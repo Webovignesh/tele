@@ -1,0 +1,7 @@
+node_modules/
+.td_database/
+.td_files/
+downloads/
+config.json
+.env
+npm-debug.log*
