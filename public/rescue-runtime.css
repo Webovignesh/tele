@@ -23,6 +23,9 @@
   left: 0;
   right: 0;
   bottom: 0;
+  transform: none;
+  width: auto;
+  max-width: none;
   z-index: 90;
   min-height: 58px;
   padding: 9px 14px;
@@ -59,4 +62,3 @@
   .selection-dock-actions { gap: 5px; }
   .selection-dock-actions button { padding-inline: 8px; }
 }
-
