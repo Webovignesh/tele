@@ -20,6 +20,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Repair staged patch helper
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply-daily-driver-v3.py')
+          s = p.read_text()
+          old = '    return compiled.sub(replacement, text, count=1)'
+          new = '    return compiled.sub(lambda _match: replacement, text, count=1)'
+          if old not in s:
+              raise SystemExit('expected regex replacement helper not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
       - name: Validate and apply source patch
         run: |
           python -m py_compile scripts/apply-daily-driver-v3.py
