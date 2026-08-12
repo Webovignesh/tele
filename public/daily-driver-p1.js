@@ -4,7 +4,6 @@
  * - latest-message pinning on chat open
  * - cache-first, throttled per-chat file reconciliation
  * - lazy/deduplicated thumbnails
- * - desktop notifications disabled and old service workers removed
  */
 
 const teleP1ThumbCache = new Map()
@@ -231,42 +230,3 @@ teleDailyMessageMedia = function teleP1MessageMedia (item) {
   if (audio) audio.preload = 'none'
   return node
 }
-
-function teleP1StripNotificationUi () {
-  const panel = document.querySelector('#mg-info-pane')
-  if (!panel) return
-  for (const section of panel.querySelectorAll('.mg-section')) {
-    const title = section.querySelector('h4')
-    if (title && title.textContent.trim().toLowerCase() === 'notifications') section.remove()
-  }
-  for (const row of panel.querySelectorAll('.mg-info-row')) {
-    const label = row.firstElementChild
-    if (label && label.textContent.trim().toLowerCase() === 'notifications') row.remove()
-  }
-}
-
-function teleP1DisableNotifications () {
-  try { localStorage.removeItem('tele-desktop-notifications') } catch {}
-  try { rescueMaybeNotifyMessage = function () {} } catch {}
-  try { rescueNotificationServiceRegistration = async function () { return null } } catch {}
-  window.teleDesktopNotificationsEnabled = undefined
-  window.teleEnableDesktopNotifications = undefined
-  window.teleDisableDesktopNotifications = undefined
-  window.teleTestDesktopNotification = undefined
-  teleP1StripNotificationUi()
-
-  if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
-    const unregister = () => navigator.serviceWorker.getRegistrations()
-      .then(registrations => Promise.all(registrations.map(registration => registration.unregister())))
-      .catch(() => {})
-    unregister()
-    setTimeout(unregister, 500)
-    setTimeout(unregister, 1800)
-  }
-}
-
-const teleP1InfoPane = document.querySelector('#mg-info-pane')
-if (teleP1InfoPane) {
-  new MutationObserver(teleP1StripNotificationUi).observe(teleP1InfoPane, { childList: true, subtree: true })
-}
-teleP1DisableNotifications()

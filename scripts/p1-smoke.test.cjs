@@ -35,9 +35,8 @@ assert.match(server, /album_cover_thumbnail: null/, 'optional audio album cover 
 assert.match(compatSource, /'@type': type/, 'compat layer must preserve explicit nested TDLib InputFile type tags')
 assert.match(compatSource, /validateAttachmentQuery/, 'compat layer must reject a lost primary InputFile before TDLib invoke')
 
-assert.doesNotMatch(rescue, /rescueNotificationServiceRegistration|Notification\.requestPermission|new Notification/, 'desktop notification implementation must be removed')
-assert.doesNotMatch(management, /renderNotificationSection|Desktop notifications/, 'Chat Info notification UI must be removed')
-assert.doesNotMatch(server, /set-managed-muted|managedNotificationSettings/, 'notification management endpoint must be removed')
+const notificationRuntime = [p1, rescue, management, server].join('\n')
+assert.doesNotMatch(notificationRuntime, /Notification\.requestPermission|new Notification|showNotification|rescueNotificationServiceRegistration|renderNotificationSection|Desktop notifications|set-managed-muted|managedNotificationSettings/, 'notification implementation must be removed from active runtime sources')
 assert.equal(fs.existsSync('public/sw.js'), false, 'notification service worker must be deleted')
 
 const { normalizeAttachmentQuery, validateAttachmentQuery } = require('../tdl-upload-compat.js')
