@@ -1,0 +1,66 @@
+name: Fix daily-driver v3 scrollbar selection
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[v3-scrollbar-bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rescue/legacy-modernization
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Protect selection during scrollbar interaction
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('public/telegram-daily-driver-v3.js')
+          s = p.read_text()
+          old = """  teleV3SelectionGrid.addEventListener('mousedown', event => {
+              if (event.button !== 0 || event.target.closest('.gcard,input,button,a,select')) return
+              teleV3BlankPointer = {
+          """
+          new = """  teleV3SelectionGrid.addEventListener('mousedown', event => {
+              if (event.button !== 0 || event.target.closest('.gcard,input,button,a,select')) return
+              const onVerticalScrollbar = event.offsetX >= teleV3SelectionGrid.clientWidth - 18
+              const onHorizontalScrollbar = event.offsetY >= teleV3SelectionGrid.clientHeight - 18
+              if (onVerticalScrollbar || onHorizontalScrollbar) {
+                event.stopImmediatePropagation()
+                teleV3BlankPointer = null
+                return
+              }
+              teleV3BlankPointer = {
+          """
+          if s.count(old) != 1:
+              raise SystemExit(f'expected scrollbar patch target once, got {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Install and verify
+        run: |
+          npm ci
+          node --check public/telegram-daily-driver-v3.js
+          npm run verify
+      - name: Guard selection behavior
+        shell: bash
+        run: |
+          grep -q "onVerticalScrollbar" public/telegram-daily-driver-v3.js
+          grep -q "stopImmediatePropagation" public/telegram-daily-driver-v3.js
+      - name: Commit selection fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/telegram-daily-driver-v3.js
+          git commit -m "fix(rescue): preserve file selection during scrolling [v3-scrollbar-bot]"
+          git push origin HEAD:rescue/legacy-modernization
