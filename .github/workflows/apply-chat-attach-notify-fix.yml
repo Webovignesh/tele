@@ -20,6 +20,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Repair staged patch syntax
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply-chat-attach-notify-fix.py')
+          s = p.read_text()
+          s = s.replace(")),\n\",\n", ")),\\n\",\n")
+          p.write_text(s)
+          PY
+          python -m py_compile scripts/apply-chat-attach-notify-fix.py
       - name: Apply patch
         run: python scripts/apply-chat-attach-notify-fix.py
       - name: Install and verify
