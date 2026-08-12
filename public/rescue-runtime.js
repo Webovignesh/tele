@@ -199,6 +199,10 @@ loadMessages = async function rescueLoadMessages (chatId, fromMessageId) {
   if (rescueInflight.has(requestKey)) return rescueInflight.get(requestKey)
 
   const generation = rescueOpenGeneration
+  const messagePanel = $('#messages')
+  const preserveMessageViewport = state.view === 'messages' && messagePanel
+  const beforeHeight = preserveMessageViewport ? messagePanel.scrollHeight : 0
+  const beforeTop = preserveMessageViewport ? messagePanel.scrollTop : 0
   if (rescueChatKey(state.activeChatId) === chatKey) {
     state.loadingMore = true
     setLoadState(state.messages.length ? 'Refreshing…' : 'loading')
@@ -212,6 +216,12 @@ loadMessages = async function rescueLoadMessages (chatId, fromMessageId) {
       state.hasMore = !!data.hasMore
       rescueSaveActiveChat()
       rescueRenderCurrent()
+      if (preserveMessageViewport) {
+        requestAnimationFrame(() => {
+          const delta = messagePanel.scrollHeight - beforeHeight
+          messagePanel.scrollTop = Math.max(0, beforeTop + delta)
+        })
+      }
       setLoadState(state.hasMore ? '' : 'End of history')
     } catch (e) {
       if (rescueChatKey(state.activeChatId) !== chatKey) return
@@ -276,6 +286,12 @@ openChat = async function rescueOpenChat (chatId) {
   const preferredView = rescuePreferredView()
   setView(preferredView)
   renderMessagesList()
+  if (preferredView === 'messages') {
+    requestAnimationFrame(() => {
+      const panel = $('#messages')
+      if (panel) panel.scrollTop = panel.scrollHeight
+    })
+  }
   if (preferredView === 'files') {
     const fileSnapshot = rescueFileCache.get(rescueChatKey(chatId))
     if (fileSnapshot) {
@@ -459,3 +475,11 @@ removeChat = function rescueRemoveChatPersistent (chatId) {
   rescueAvatarCache.delete(rescueChatKey(chatId))
   return rescueBaseRemoveChat(chatId)
 }
+
+// Keep selection actions physically inside the center workspace.
+const rescueSelectionDock = $('#selection-bar')
+const rescueChatPane = $('.chat')
+if (rescueSelectionDock && rescueChatPane && rescueSelectionDock.parentElement !== rescueChatPane) {
+  rescueChatPane.appendChild(rescueSelectionDock)
+}
+

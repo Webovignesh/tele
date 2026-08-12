@@ -475,7 +475,7 @@ async function loadMessages (chatId, fromMessageId) {
 function renderMessagesList () {
   const list = $('#messages')
   list.innerHTML = ''
-  for (const m of state.messages) {
+  for (const m of [...state.messages].reverse()) {
     const msgEl = h('div', 'msg' + (m.outgoing ? ' outgoing' : ' incoming'))
     const head = h('div', 'msg-head')
     head.appendChild(h('span', 'msg-sender', m.sender || 'Unknown'))
@@ -1514,7 +1514,7 @@ $('#media-grid').addEventListener('scroll', e => {
   }
 })
 $('#messages').addEventListener('scroll', e => {
-  if (e.target.scrollTop + e.target.clientHeight >= e.target.scrollHeight - 250) {
+  if (e.target.scrollTop <= 250) {
     if (state.activeChatId && state.hasMore && !state.loadingMore) loadMessages(state.activeChatId)
   }
 })

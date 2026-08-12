@@ -16,25 +16,28 @@
   .app { grid-template-columns: 320px minmax(0, 1fr) 390px; }
 }
 
-/* Contextual selection dock */
+/* Contextual selection dock: center chat workspace only */
+.chat { position: relative; }
 #selection-bar.selection-dock {
-  position: fixed;
-  left: clamp(250px, 20vw, 320px);
-  right: clamp(300px, 24vw, 390px);
+  position: absolute;
+  left: 0;
+  right: 0;
   bottom: 0;
   z-index: 90;
   min-height: 58px;
-  padding: 9px 16px;
+  padding: 9px 14px;
   border-radius: 0;
   border: 1px solid var(--border);
+  border-left: 0;
+  border-right: 0;
   border-bottom: 0;
-  background: color-mix(in srgb, var(--panel) 96%, transparent);
-  box-shadow: 0 -10px 34px rgba(0, 0, 0, .28);
+  background: color-mix(in srgb, var(--panel) 97%, transparent);
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, .24);
   backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 14px;
 }
 #selection-bar.selection-dock.hidden { display: none; }
 #selection-bar.selection-dock #selection-count {
@@ -51,9 +54,9 @@
 }
 .selection-dock-actions button { min-height: 38px; }
 
-@media (max-width: 1100px) {
-  #selection-bar.selection-dock { left: 250px; right: 300px; padding-inline: 10px; }
+@media (max-width: 900px) {
+  #selection-bar.selection-dock { padding-inline: 8px; gap: 8px; }
   .selection-dock-actions { gap: 5px; }
-  .selection-dock-actions button { padding-inline: 9px; }
+  .selection-dock-actions button { padding-inline: 8px; }
 }
 
