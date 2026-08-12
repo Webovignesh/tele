@@ -13,8 +13,6 @@
     createStep: 1,
     createDraft: defaultCreateDraft(),
     memberLoading: false,
-    usernameCheckSeq: 0,
-    usernameCheck: null,
     photoPreviewUrl: null
   }
 
@@ -69,8 +67,6 @@
       type: 'channel',
       title: '',
       description: '',
-      visibility: 'private',
-      username: '',
       members: '',
       forum: false,
       autoDeleteTime: 0
@@ -97,46 +93,6 @@
 
   function normalizeUsername (value) {
     return String(value || '').trim().replace(/^@/, '')
-  }
-
-  function usernamePresentation (kind) {
-    return kind === 'channel'
-      ? { label: 'Public link', prefix: 't.me/', placeholder: 'channelname' }
-      : { label: 'Public username', prefix: '@', placeholder: 'groupname' }
-  }
-
-  function setUsernameStatus (node, state, message) {
-    if (!node) return
-    node.className = `mg-username-status ${state || 'idle'}`
-    node.textContent = message || ''
-  }
-
-  async function checkUsernameAvailability (username, chatId, statusNode) {
-    const value = normalizeUsername(username)
-    const seq = ++ui.usernameCheckSeq
-    if (!value) {
-      ui.usernameCheck = { username: value, available: false, state: 'idle', message: 'Enter a username to check availability.' }
-      setUsernameStatus(statusNode, 'idle', ui.usernameCheck.message)
-      return ui.usernameCheck
-    }
-    if (!/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(value)) {
-      ui.usernameCheck = { username: value, available: false, state: 'invalid', message: 'Use 4–32 letters, numbers or underscores; start with a letter.' }
-      setUsernameStatus(statusNode, 'invalid', ui.usernameCheck.message)
-      return ui.usernameCheck
-    }
-    setUsernameStatus(statusNode, 'checking', 'Checking with Telegram…')
-    try {
-      const result = await request('check-managed-username', { username: value, chatId: chatId == null ? 0 : chatId })
-      if (seq !== ui.usernameCheckSeq) return result
-      ui.usernameCheck = result
-      setUsernameStatus(statusNode, result.available ? 'available' : 'unavailable', result.message)
-      return result
-    } catch (e) {
-      if (seq !== ui.usernameCheckSeq) return { available: false, message: e.message }
-      ui.usernameCheck = { username: value, available: false, state: 'error', message: e.message }
-      setUsernameStatus(statusNode, 'unavailable', e.message)
-      return ui.usernameCheck
-    }
   }
 
   function parseMemberUsernames (value) {
@@ -278,9 +234,7 @@
       if (forum) draft.forum = !!forum.checked
       if (autoDelete) draft.autoDeleteTime = Number(autoDelete.value || 0)
     } else if (ui.createStep === 3) {
-      const username = document.querySelector('#mg-create-username')
       const members = document.querySelector('#mg-create-members')
-      if (username) draft.username = normalizeUsername(username.value)
       if (members) draft.members = members.value.trim()
     }
   }
@@ -295,19 +249,6 @@
       }
       if (draft.description.length > 255) {
         toast('Description must be at most 255 characters', 'error')
-        return false
-      }
-    }
-    if (ui.createStep === 3 && draft.visibility === 'public') {
-      if (!draft.username || !/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(draft.username)) {
-        toast('Enter a valid public username/link', 'error')
-        return false
-      }
-      const check = ui.usernameCheck && ui.usernameCheck.username === draft.username
-        ? ui.usernameCheck
-        : await checkUsernameAvailability(draft.username, 0, document.querySelector('#mg-create-username-status'))
-      if (!check || !check.available) {
-        toast((check && check.message) || 'That username is not available', 'error')
         return false
       }
     }
@@ -326,7 +267,7 @@
       }
       await createManagedChat()
     } finally {
-      if (next && ui.createStep !== 4) next.disabled = false
+      if (next) next.disabled = false
     }
   }
 
@@ -338,7 +279,7 @@
     if (!body || !progress || !back || !next) return
 
     progress.innerHTML = ''
-    const labels = ['Type', 'Details', 'Access', 'Review']
+    const labels = ['Type', 'Details', 'Members', 'Review']
     labels.forEach((label, index) => {
       const item = elem('div', 'mg-progress-step' + (index + 1 <= ui.createStep ? ' active' : ''))
       item.append(elem('span', '', String(index + 1)), elem('small', '', label))
@@ -356,7 +297,7 @@
   }
 
   function renderCreateType (body) {
-    body.appendChild(elem('p', 'mg-step-copy', 'Choose what you want to create. Groups use Telegram supergroups so public usernames and modern management features are available.'))
+    body.appendChild(elem('p', 'mg-step-copy', 'Choose what you want to create. Tele creates a private Telegram channel or modern supergroup and manages access through invite links.'))
     const choices = elem('div', 'mg-choice-grid')
     for (const option of [
       { type: 'channel', icon: '📣', title: 'Channel', copy: 'Broadcast updates to subscribers.' },
@@ -401,50 +342,12 @@
   }
 
   function renderCreateAccess (body) {
-    const presentation = usernamePresentation(ui.createDraft.type)
-    body.appendChild(elem('p', 'mg-step-copy', ui.createDraft.type === 'channel'
-      ? 'Private channels use an invite link. Public channels get a shareable t.me link.'
-      : 'Private groups use invite links. Public groups expose a Telegram @username.'))
-    const visibility = elem('div', 'mg-segmented')
-    for (const [value, label] of [['private', 'Private'], ['public', 'Public']]) {
-      const b = button(label, ui.createDraft.visibility === value ? 'active' : '', () => {
-        captureCreateStep()
-        ui.createDraft.visibility = value
-        ui.usernameCheck = null
-        if (value === 'private') ui.createDraft.username = ''
-        renderCreateWizard()
-      })
-      visibility.appendChild(b)
-    }
-    body.appendChild(labelled('Visibility', visibility))
-
-    if (ui.createDraft.visibility === 'public') {
-      const username = textInput(ui.createDraft.username, presentation.placeholder)
-      username.id = 'mg-create-username'
-      const prefix = elem('div', 'mg-username-field')
-      prefix.append(elem('span', 'mg-username-prefix', presentation.prefix), username)
-      const field = labelled(presentation.label, prefix)
-      const status = elem('div', 'mg-username-status idle', 'Enter a username to check availability.')
-      status.id = 'mg-create-username-status'
-      field.appendChild(status)
-      body.appendChild(field)
-
-      let timer = null
-      username.addEventListener('input', () => {
-        ui.createDraft.username = normalizeUsername(username.value)
-        ui.usernameCheck = null
-        clearTimeout(timer)
-        setUsernameStatus(status, 'checking', ui.createDraft.username ? 'Waiting to check…' : 'Enter a username to check availability.')
-        timer = setTimeout(() => checkUsernameAvailability(ui.createDraft.username, 0, status), 320)
-      })
-      if (ui.createDraft.username) setTimeout(() => checkUsernameAvailability(ui.createDraft.username, 0, status), 0)
-    }
-
+    body.appendChild(elem('p', 'mg-step-copy', 'Access is invite-link based. After creation, Chat Info shows the current Telegram invite link and lets you copy or rotate it.'))
     const members = textarea(ui.createDraft.members, '@alice, @bob (optional)')
     members.id = 'mg-create-members'
     members.rows = 3
     body.appendChild(labelled('Initial members by @username', members))
-    body.appendChild(elem('span', 'mg-help', 'Up to 20 usernames. Telegram privacy restrictions may prevent some users from being added.'))
+    body.appendChild(elem('span', 'mg-help', 'Up to 20 user usernames can be resolved for initial membership. Telegram privacy restrictions may prevent some users from being added.'))
   }
 
   function renderCreateReview (body) {
@@ -453,7 +356,7 @@
     const rows = [
       ['Type', d.type === 'channel' ? 'Channel' : (d.forum ? 'Forum group' : 'Group')],
       ['Title', d.title],
-      ['Visibility', d.visibility === 'public' ? (d.type === 'channel' ? `Public · t.me/${d.username}` : `Public · @${d.username}`) : 'Private'],
+      ['Access', 'Private · invite link'],
       ['Auto-delete', formatAutoDelete(d.autoDeleteTime)],
       ['Initial members', String(parseMemberUsernames(d.members).length)]
     ]
@@ -466,7 +369,7 @@
       review.appendChild(elem('div', 'mg-review-description', d.description))
     }
     body.appendChild(review)
-    body.appendChild(elem('p', 'mg-step-copy', 'Tele will create the chat through TDLib, apply the requested username, add eligible members, then open the new chat automatically.'))
+    body.appendChild(elem('p', 'mg-step-copy', 'Tele will create the chat through TDLib, add eligible members, then open it automatically. Invite-link management is available in Chat Info.'))
   }
 
   async function createManagedChat () {
@@ -479,8 +382,6 @@
         type: d.type,
         title: d.title,
         description: d.description,
-        visibility: d.visibility,
-        username: d.visibility === 'public' ? d.username : '',
         forum: d.type === 'group' && d.forum,
         autoDeleteTime: Number(d.autoDeleteTime || 0),
         memberUsernames: parseMemberUsernames(d.members)
@@ -541,14 +442,15 @@
     avatar.style.background = avatarColor(chat.title)
     if (chat.photoFileId) loadInfoAvatar(chat, avatar)
     const titleBox = elem('div', 'mg-info-title')
-    titleBox.append(elem('h3', '', chat.title), elem('span', 'muted', chat.username ? (chat.kind === 'channel' ? `t.me/${chat.username}` : `@${chat.username}`) : formatKind(chat.kind)))
+    const identity = chat.kind === 'private' && chat.username ? `@${chat.username}` : formatKind(chat.kind)
+    titleBox.append(elem('h3', '', chat.title), elem('span', 'muted', identity))
     hero.append(avatar, titleBox)
     panel.appendChild(hero)
 
     const overview = section('Overview')
     overview.append(
       infoRow('Type', formatKind(chat.kind)),
-      infoRow('Access', chat.username ? 'Public' : (chat.kind === 'private' ? 'Private chat' : 'Private')),
+      infoRow('Access', chat.kind === 'private' ? 'Private chat' : (details.inviteLink ? 'Invite link' : 'Private')),
       infoRow('Members', details.memberCount != null ? String(details.memberCount) : '—'),
       infoRow('Your role', details.statusLabel || 'Member'),
       infoRow('Auto-delete', formatAutoDelete(details.autoDeleteTime)),
@@ -607,54 +509,14 @@
     }
     box.append(labelled('Title', title), labelled('Description', description), labelled('Auto-delete', autoDelete))
 
-    let username = null
-    let usernameStatus = null
-    if (permissions.canEditUsername) {
-      const presentation = usernamePresentation(chat.kind)
-      username = textInput(chat.username || '', presentation.placeholder)
-      const prefix = elem('div', 'mg-username-field')
-      prefix.append(elem('span', 'mg-username-prefix', presentation.prefix), username)
-      const field = labelled(presentation.label, prefix)
-      usernameStatus = elem('div', 'mg-username-status idle', chat.username ? 'Current public address' : 'Leave blank to keep this chat private.')
-      field.appendChild(usernameStatus)
-      box.appendChild(field)
-      let usernameTimer = null
-      username.addEventListener('input', () => {
-        clearTimeout(usernameTimer)
-        const nextValue = normalizeUsername(username.value)
-        if (!nextValue) {
-          ui.usernameCheck = null
-          setUsernameStatus(usernameStatus, 'idle', 'Blank makes the chat private when Telegram permits it.')
-          return
-        }
-        if (nextValue === (chat.username || '')) {
-          ui.usernameCheck = { username: nextValue, available: true, state: 'current', message: 'Current public address' }
-          setUsernameStatus(usernameStatus, 'available', 'Current public address')
-          return
-        }
-        ui.usernameCheck = null
-        usernameTimer = setTimeout(() => checkUsernameAvailability(nextValue, chat.id, usernameStatus), 320)
-      })
-    }
-
     const actions = elem('div', 'mg-row')
     const save = button('Save changes', '', async () => {
       save.disabled = true
       try {
-        if (username) {
-          const nextUsername = normalizeUsername(username.value)
-          if (nextUsername && nextUsername !== (chat.username || '')) {
-            const check = ui.usernameCheck && ui.usernameCheck.username === nextUsername
-              ? ui.usernameCheck
-              : await checkUsernameAvailability(nextUsername, chat.id, usernameStatus)
-            if (!check || !check.available) throw new Error((check && check.message) || 'That public address is not available')
-          }
-        }
         await request('update-managed-chat', {
           chatId: chat.id,
           title: title.value.trim(),
           description: description.value.trim(),
-          username: username ? normalizeUsername(username.value) : undefined,
           autoDeleteTime: Number(autoDelete.value || 0)
         })
         toastOk('Chat settings updated')
@@ -753,23 +615,28 @@
     const { chat, details, permissions } = data
     const box = section('Invite link')
     const linkRow = elem('div', 'mg-invite-row')
-    const value = elem('div', 'mg-invite-value', details.inviteLink || 'No invite link loaded')
+    const value = elem('div', 'mg-invite-value', details.inviteLink || 'No invite link available yet')
     value.title = details.inviteLink || ''
     linkRow.appendChild(value)
-    if (details.inviteLink) {
-      linkRow.appendChild(button('Copy', 'ghost small', () => copyText(details.inviteLink, 'Invite link copied')))
-    }
-    if (!details.inviteLink && permissions.canInviteUsers) {
-      linkRow.appendChild(button('Create link', 'ghost small', async e => {
-        e.currentTarget.disabled = true
+    if (details.inviteLink) linkRow.appendChild(button('Copy', 'ghost small', () => copyText(details.inviteLink, 'Invite link copied')))
+    linkRow.appendChild(button('Refresh', 'ghost small', async e => {
+      e.currentTarget.disabled = true
+      try { await refreshChatInfo() } finally { e.currentTarget.disabled = false }
+    }))
+    if (permissions.canInviteUsers) {
+      const rotate = button(details.inviteLink ? 'New link' : 'Create link', 'ghost small', async () => {
+        if (details.inviteLink && !await confirmAction('Replace invite link?', 'The current primary invite link will stop working and Telegram will create a new one.', 'Replace link')) return
+        rotate.disabled = true
         try {
-          const r = await request('create-managed-invite', { chatId: chat.id })
-          if (r.inviteLink) copyText(r.inviteLink, 'Invite link created and copied')
+          const r = await request('replace-managed-invite', { chatId: chat.id })
+          if (r.inviteLink) copyText(r.inviteLink, details.inviteLink ? 'New invite link copied' : 'Invite link created and copied')
           await refreshChatInfo()
-        } catch (err) { toast(err.message, 'error') } finally { e.currentTarget.disabled = false }
-      }))
+        } catch (err) { toast(err.message, 'error') } finally { rotate.disabled = false }
+      })
+      linkRow.appendChild(rotate)
     }
     box.appendChild(linkRow)
+    box.appendChild(elem('span', 'mg-help', 'Tele follows Telegram invite-link updates. Refresh forces a fresh TDLib full-info read if an external client changed the link.'))
     return box
   }
 
@@ -845,7 +712,7 @@
     const box = section('Notifications')
     const row = elem('div', 'mg-setting-row')
     const text = elem('div', '')
-    text.append(elem('strong', '', details.muted ? 'Muted' : 'Notifications on'), elem('span', 'muted', details.muted ? 'Tele will unmute this chat.' : 'Mute this chat until you turn notifications back on.'))
+    text.append(elem('strong', '', details.muted ? 'Muted' : 'Telegram notifications on'), elem('span', 'muted', details.muted ? 'Unmute this Telegram chat.' : 'Mute this Telegram chat until you turn notifications back on.'))
     row.appendChild(text)
     const toggle = button(details.muted ? 'Unmute' : 'Mute', 'ghost', async () => {
       if (!permissions.canMute) return
@@ -862,12 +729,15 @@
     if (window.teleEnableDesktopNotifications) {
       const desktop = elem('div', 'mg-setting-row')
       const copy = elem('div', '')
-      const enabled = window.teleDesktopNotificationsEnabled && window.teleDesktopNotificationsEnabled()
+      const supported = 'Notification' in window
+      const permission = supported ? Notification.permission : 'unsupported'
+      const enabled = !!(window.teleDesktopNotificationsEnabled && window.teleDesktopNotificationsEnabled())
       copy.append(
         elem('strong', '', enabled ? 'Desktop notifications enabled' : 'Desktop notifications'),
-        elem('span', 'muted', enabled ? 'Tele can alert you about incoming messages while the browser is open.' : 'Allow Tele to show Windows/browser notifications for incoming messages.')
+        elem('span', 'muted', supported ? `Browser permission: ${permission}. Notifications are delivered while Tele is running.` : 'This browser does not support desktop notifications.')
       )
-      const desktopToggle = button(enabled ? 'Disable' : 'Enable', 'ghost', async () => {
+      const controls = elem('div', 'mg-row')
+      const desktopToggle = button(enabled ? 'Disable' : 'Enable', 'ghost small', async () => {
         desktopToggle.disabled = true
         try {
           if (enabled) {
@@ -875,12 +745,19 @@
             toastOk('Desktop notifications disabled')
           } else {
             await window.teleEnableDesktopNotifications()
-            toastOk('Desktop notifications enabled')
+            toastOk('Desktop notifications enabled — test notification sent')
           }
           refreshChatInfo()
         } catch (e) { toast(e.message, 'error') } finally { desktopToggle.disabled = false }
       })
-      desktop.append(copy, desktopToggle)
+      desktopToggle.disabled = !supported
+      controls.appendChild(desktopToggle)
+      if (supported && permission === 'granted' && window.teleTestDesktopNotification) {
+        controls.appendChild(button('Test', 'ghost small', async () => {
+          try { await window.teleTestDesktopNotification(); toastOk('Test notification sent') } catch (e) { toast(e.message, 'error') }
+        }))
+      }
+      desktop.append(copy, controls)
       box.appendChild(desktop)
     }
     return box

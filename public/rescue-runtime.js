@@ -599,22 +599,65 @@ handleEvent = function rescueRealtimeHandleEvent (ev) {
     rescueRealtimeMessageDelete(ev.chatId, ev.messageIds)
     return
   }
+  if (ev && ev.name === 'history-cleared') {
+    const key = rescueChatKey(ev.chatId)
+    rescueChatCache.delete(key)
+    rescueFileCache.delete(key)
+    if (state.activeChatId != null && rescueChatKey(state.activeChatId) === key) {
+      state.messages = []
+      state.selection.clear()
+      state.selectedMessages.clear()
+      updateSelectionBar()
+      rescueRenderCurrent()
+      setLoadState('End of history')
+    }
+    return
+  }
   return rescueBaseHandleEvent(ev)
 }
 
 /* ------------------------------ Chat composer + desktop notifications ------------------------------ */
 const rescueNotificationPrefKey = 'tele-desktop-notifications'
-const rescueCompose = { replyTo: null, editMessageId: null, editOriginal: '' }
+const rescueCompose = { replyTo: null, editMessageId: null, editOriginal: '', attachment: null }
+let rescueNotificationRegistration = null
 
 function rescueDesktopNotificationsEnabled () {
   try { return localStorage.getItem(rescueNotificationPrefKey) === '1' && 'Notification' in window && Notification.permission === 'granted' } catch { return false }
 }
 
+async function rescueNotificationServiceRegistration () {
+  if (!('serviceWorker' in navigator)) return null
+  if (rescueNotificationRegistration) return rescueNotificationRegistration
+  const registered = await navigator.serviceWorker.register('/sw.js?v=1', { scope: '/' })
+  rescueNotificationRegistration = await navigator.serviceWorker.ready.catch(() => registered)
+  return rescueNotificationRegistration
+}
+
+async function rescueShowDesktopNotification (title, options = {}) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') throw new Error('Desktop notification permission is not granted')
+  const registration = await rescueNotificationServiceRegistration().catch(() => null)
+  if (registration && registration.showNotification) {
+    await registration.showNotification(title, options)
+    return true
+  }
+  const n = new Notification(title, options)
+  if (options.data && options.data.chatId != null) {
+    n.onclick = () => {
+      window.focus()
+      openChat(options.data.chatId)
+      n.close()
+    }
+  }
+  return true
+}
+
 async function rescueEnableDesktopNotifications () {
   if (!('Notification' in window)) throw new Error('Desktop notifications are not supported by this browser')
   const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission()
-  if (permission !== 'granted') throw new Error('Desktop notification permission was not granted')
+  if (permission !== 'granted') throw new Error('Desktop notification permission was not granted. Allow notifications for 127.0.0.1 in the browser site settings.')
   try { localStorage.setItem(rescueNotificationPrefKey, '1') } catch {}
+  await rescueNotificationServiceRegistration().catch(() => null)
+  await rescueTestDesktopNotification()
   return true
 }
 
@@ -623,24 +666,28 @@ function rescueDisableDesktopNotifications () {
   return true
 }
 
+async function rescueTestDesktopNotification () {
+  if (!rescueDesktopNotificationsEnabled()) throw new Error('Enable desktop notifications first')
+  return rescueShowDesktopNotification('Tele', {
+    body: 'Notifications are working.',
+    tag: `tele-test-${Date.now()}`,
+    data: { test: true }
+  })
+}
+
 function rescueMaybeNotifyMessage (chatId, message) {
   if (!message || message.outgoing || !rescueDesktopNotificationsEnabled()) return
-  const active = state.activeChatId != null && rescueChatKey(state.activeChatId) === rescueChatKey(chatId)
-  if (active && document.visibilityState === 'visible' && document.hasFocus()) return
   const chat = state.chats.find(c => rescueChatKey(c.id) === rescueChatKey(chatId))
   const title = chat ? chat.title : 'Telegram'
   let body = message.text || ''
   if (!body && message.media) body = `${message.sender ? message.sender + ': ' : ''}${message.media.type || 'Media'}`
   else if (message.sender && body) body = `${message.sender}: ${body}`
   body = String(body || 'New message').slice(0, 180)
-  try {
-    const n = new Notification(title, { body, tag: `tele-chat-${chatId}`, renotify: true })
-    n.onclick = () => {
-      window.focus()
-      if (chatId != null) openChat(chatId)
-      n.close()
-    }
-  } catch {}
+  rescueShowDesktopNotification(title, {
+    body,
+    tag: `tele-chat-${chatId}-${message.id}`,
+    data: { chatId }
+  }).catch(() => {})
 }
 
 function rescueMountComposer () {
@@ -656,14 +703,32 @@ function rescueMountComposer () {
       <div><strong id="tele-compose-mode"></strong><span id="tele-compose-preview"></span></div>
       <button id="tele-compose-cancel" class="ghost small" type="button">Cancel</button>
     </div>
+    <div id="tele-attachment-preview" class="tele-attachment-preview hidden">
+      <div><strong id="tele-attachment-name"></strong><span id="tele-attachment-meta"></span></div>
+      <button id="tele-attachment-clear" class="ghost small" type="button">Remove</button>
+    </div>
     <div class="tele-compose-row">
+      <input id="tele-compose-file" type="file" class="hidden" />
+      <button id="tele-compose-attach" class="ghost tele-compose-attach" type="button" title="Attach file" aria-label="Attach file">📎</button>
       <textarea id="tele-compose-input" rows="1" placeholder="Message" aria-label="Message"></textarea>
       <button id="tele-compose-send" type="button">Send</button>
     </div>`
   chat.insertBefore(composer, foot)
   const input = document.querySelector('#tele-compose-input')
+  const fileInput = document.querySelector('#tele-compose-file')
   document.querySelector('#tele-compose-send').onclick = rescueSendComposer
   document.querySelector('#tele-compose-cancel').onclick = rescueClearComposeContext
+  document.querySelector('#tele-compose-attach').onclick = () => { if (!rescueCompose.editMessageId) fileInput.click() }
+  document.querySelector('#tele-attachment-clear').onclick = rescueClearAttachment
+  fileInput.addEventListener('change', () => rescueSetAttachment(fileInput.files && fileInput.files[0]))
+  composer.addEventListener('dragover', e => { if (state.view === 'messages' && state.activeChatId != null) e.preventDefault() })
+  composer.addEventListener('drop', e => {
+    if (state.view !== 'messages' || state.activeChatId == null || rescueCompose.editMessageId) return
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]
+    if (!file) return
+    e.preventDefault()
+    rescueSetAttachment(file)
+  })
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -684,6 +749,30 @@ function rescueUpdateComposerVisibility () {
   const composer = document.querySelector('#tele-composer')
   if (!composer) return
   composer.classList.toggle('hidden', state.view !== 'messages' || state.activeChatId == null)
+}
+
+function rescueClearAttachment () {
+  rescueCompose.attachment = null
+  const input = document.querySelector('#tele-compose-file')
+  if (input) input.value = ''
+  const preview = document.querySelector('#tele-attachment-preview')
+  if (preview) preview.classList.add('hidden')
+  const name = document.querySelector('#tele-attachment-name')
+  const meta = document.querySelector('#tele-attachment-meta')
+  if (name) name.textContent = ''
+  if (meta) meta.textContent = ''
+}
+
+function rescueSetAttachment (file) {
+  if (!file) return
+  if (file.size > 4 * 1024 * 1024 * 1024) { toast('Attachments larger than 4 GB are not supported', 'error'); return }
+  rescueCompose.attachment = file
+  const preview = document.querySelector('#tele-attachment-preview')
+  const name = document.querySelector('#tele-attachment-name')
+  const meta = document.querySelector('#tele-attachment-meta')
+  if (name) name.textContent = file.name
+  if (meta) meta.textContent = `${fmtSize(file.size)}${file.type ? ' · ' + file.type : ''}`
+  if (preview) preview.classList.remove('hidden')
 }
 
 function rescueClearComposeContext () {
@@ -708,6 +797,7 @@ function rescueSetComposeContext (mode, message) {
   if (!input || !context) return
   context.classList.remove('hidden')
   if (mode === 'edit') {
+    rescueClearAttachment()
     rescueCompose.editMessageId = message.id
     rescueCompose.editOriginal = message.text || ''
     input.value = message.text || ''
@@ -726,12 +816,30 @@ async function rescueSendComposer () {
   const send = document.querySelector('#tele-compose-send')
   if (!input || !send || state.activeChatId == null) return
   const text = input.value.trim()
-  if (!text) return
+  const attachment = rescueCompose.attachment
+  if (!text && !attachment) return
+  if (attachment && rescueCompose.editMessageId) return toast('Finish editing before attaching a file', 'error')
   send.disabled = true
+  const oldLabel = send.textContent
+  send.textContent = attachment ? 'Uploading…' : 'Sending…'
   try {
     if (rescueCompose.editMessageId) {
       await request('edit-chat-message', { chatId: state.activeChatId, messageId: rescueCompose.editMessageId, text })
       toastOk('Message edited')
+    } else if (attachment) {
+      const headers = {
+        'Content-Type': 'application/octet-stream',
+        'X-File-Name': encodeURIComponent(attachment.name),
+        'X-Caption': encodeURIComponent(text.slice(0, 1024))
+      }
+      if (rescueCompose.replyTo && rescueCompose.replyTo.id != null) headers['X-Reply-To'] = String(rescueCompose.replyTo.id)
+      const response = await fetch(`/api/chat-attachment/${encodeURIComponent(state.activeChatId)}`, {
+        method: 'POST',
+        headers,
+        body: attachment
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || `Attachment upload failed (${response.status})`)
     } else {
       await request('send-chat-message', {
         chatId: state.activeChatId,
@@ -741,11 +849,13 @@ async function rescueSendComposer () {
     }
     input.value = ''
     input.style.height = 'auto'
+    rescueClearAttachment()
     rescueClearComposeContext()
   } catch (e) {
     toast(e.message, 'error')
   } finally {
     send.disabled = false
+    send.textContent = oldLabel
     input.focus()
   }
 }
@@ -772,5 +882,14 @@ window.teleDeleteMessage = rescueDeleteMessage
 window.teleDesktopNotificationsEnabled = rescueDesktopNotificationsEnabled
 window.teleEnableDesktopNotifications = rescueEnableDesktopNotifications
 window.teleDisableDesktopNotifications = rescueDisableDesktopNotifications
+window.teleTestDesktopNotification = rescueTestDesktopNotification
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', event => {
+    const data = event.data || {}
+    if (data.type === 'open-chat' && data.chatId != null) openChat(data.chatId)
+  })
+  rescueNotificationServiceRegistration().catch(() => {})
+}
 
 rescueMountComposer()

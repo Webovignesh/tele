@@ -35,7 +35,6 @@ assert.match(html, /management\.js/, 'management runtime must be loaded')
 
 const rescueRuntime = fs.readFileSync('public/rescue-runtime.js', 'utf8')
 const managementCss = fs.readFileSync('public/management.css', 'utf8')
-assert.match(server, /checkChatUsername/, 'username availability must use TDLib')
 assert.match(server, /updateNewMessage/, 'new Telegram messages must be pushed in realtime')
 assert.match(server, /updateDeleteMessages/, 'message deletions must be pushed in realtime')
 assert.match(server, /message-upsert/, 'server must publish realtime message upserts')
@@ -43,8 +42,6 @@ assert.match(server, /message-delete/, 'server must publish realtime message del
 assert.match(server, /\.png/, 'chat photo endpoint must support PNG')
 assert.match(rescueRuntime, /rescueRealtimeMessageUpsert/, 'client must merge realtime messages into cache')
 assert.match(rescueRuntime, /rescueSortChatsRecentFirst/, 'chat list must enforce recent-first order')
-assert.match(management, /t\.me\//, 'channel public addresses must use t.me link presentation')
-assert.match(management, /check-managed-username/, 'creation/edit UI must validate username availability')
 assert.match(management, /image\/png/, 'chat photo UI must accept PNG')
 assert.match(managementCss, /mg-photo-drop/, 'chat photo UI must use the polished upload surface')
 
@@ -56,3 +53,11 @@ assert.match(server, /canClearHistoryForSelf/, 'clear history must distinguish s
 assert.match(server, /managedSupergroupFullInfoCache/, 'invite-link/full-info updates must use authoritative realtime cache')
 assert.match(management, /Desktop notifications/, 'desktop notification controls must exist')
 assert.match(management, /Clear history for everyone/, 'history UI must expose valid revoke mode')
+
+assert.match(server, /replacePrimaryChatInviteLink/, 'invite links must use primary Telegram invite-link management')
+assert.match(server, /inputMessageDocument/, 'chat attachments must send through TDLib')
+assert.match(server, /api\/chat-attachment/, 'chat attachment streaming endpoint must exist')
+assert.match(rescueRuntime, /tele-compose-attach/, 'chat composer must expose file attachment')
+assert.match(rescueRuntime, /serviceWorker/, 'desktop notifications must use service-worker delivery when available')
+assert.match(management, /Test/, 'notification settings must expose a test action')
+assert.doesNotMatch(management, /check-managed-username/, 'channel/group username management must be removed from the UI')

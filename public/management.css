@@ -416,7 +416,7 @@ button.danger-outline:hover { border-color: var(--danger); color: #fff; backgrou
   flex-direction: column;
   gap: 8px;
 }
-.tele-compose-row { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 8px; }
+.tele-compose-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: end; gap: 8px; }
 #tele-compose-input {
   width: 100%;
   min-height: 40px;
@@ -447,3 +447,41 @@ button.danger-outline:hover { border-color: var(--danger); color: #fff; backgrou
 .tele-compose-context > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .tele-compose-context strong { font-size: 11px; color: var(--accent); }
 .tele-compose-context span { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Chat attachment + notification service polish */
+.tele-compose-attach {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  border-radius: 12px;
+}
+.tele-attachment-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(61,155,250,.08);
+}
+.tele-attachment-preview > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tele-attachment-preview strong,
+.tele-attachment-preview span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tele-attachment-preview strong { font-size: 11.5px; }
+.tele-attachment-preview span { color: var(--muted); font-size: 10.5px; }
+.mg-setting-row > .mg-row { justify-content: flex-end; flex: 0 0 auto; }
+
