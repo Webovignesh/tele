@@ -4,7 +4,10 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node --check server.js && node --check public/app.js",
+    "test": "node scripts/rescue-smoke.test.cjs",
+    "verify": "npm run check && npm test"
   },
   "keywords": [],
   "author": "",
