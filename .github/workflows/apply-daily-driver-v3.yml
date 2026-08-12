@@ -1,0 +1,57 @@
+name: Apply daily-driver v3
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[daily-driver-v3-bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rescue/legacy-modernization
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate and apply source patch
+        run: |
+          python -m py_compile scripts/apply-daily-driver-v3.py
+          python scripts/apply-daily-driver-v3.py
+      - name: Install and verify
+        run: |
+          npm ci
+          node --check server.js
+          node --check public/app.js
+          node --check public/rescue-runtime.js
+          node --check public/management.js
+          node --check public/telegram-daily-driver.js
+          node --check public/telegram-daily-driver-v3.js
+          npm run verify
+      - name: Guard v3 behavior
+        shell: bash
+        run: |
+          grep -q "scanMediaIndexV3" server.js
+          grep -q "media-index-progress" server.js
+          grep -q "previewFileInflight" server.js
+          grep -q "Content-Range" server.js
+          grep -q "id: uploaded.id" server.js
+          grep -q "teleV3OpenPreview" public/telegram-daily-driver-v3.js
+          grep -q "teleV3UnionSelectionKeys" public/telegram-daily-driver-v3.js
+          grep -q "XMLHttpRequest" public/telegram-daily-driver-v3.js
+          grep -q "telegram-daily-driver-v3.js" public/index.html
+          grep -q "telegram-daily-driver-v3.css" public/index.html
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js public/index.html package.json scripts/rescue-smoke.test.cjs
+          git commit -m "fix(rescue): harden media, files, uploads, and Telegram chat UI [daily-driver-v3-bot]"
+          git push origin HEAD:rescue/legacy-modernization
