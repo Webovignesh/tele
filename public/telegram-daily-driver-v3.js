@@ -494,6 +494,13 @@ const teleV3SelectionGrid = $('#media-grid')
 if (teleV3SelectionGrid) {
   teleV3SelectionGrid.addEventListener('mousedown', event => {
     if (event.button !== 0 || event.target.closest('.gcard,input,button,a,select')) return
+    const onVerticalScrollbar = event.offsetX >= teleV3SelectionGrid.clientWidth - 18
+    const onHorizontalScrollbar = event.offsetY >= teleV3SelectionGrid.clientHeight - 18
+    if (onVerticalScrollbar || onHorizontalScrollbar) {
+      event.stopImmediatePropagation()
+      teleV3BlankPointer = null
+      return
+    }
     teleV3BlankPointer = {
       x: event.clientX,
       y: event.clientY,
