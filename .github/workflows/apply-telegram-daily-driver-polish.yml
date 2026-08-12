@@ -1,0 +1,54 @@
+name: Apply Telegram daily-driver polish
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[daily-driver-polish-bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rescue/legacy-modernization
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply patch
+        run: python scripts/apply-telegram-daily-driver-polish.py
+      - name: Install and verify
+        run: |
+          npm ci
+          node --check server.js
+          node --check public/app.js
+          node --check public/rescue-runtime.js
+          node --check public/management.js
+          npm run verify
+      - name: Guard daily-driver regressions
+        shell: bash
+        run: |
+          grep -q "inputFileLocal" server.js
+          ! grep -q "preliminaryUploadFile" server.js
+          grep -q "messageSelfDestructTypeImmediately" server.js
+          grep -q "mediaThumbFileId" server.js
+          grep -q "api/media-preview" server.js
+          grep -q "mediaIndexCache" server.js
+          grep -q "file-range-tools" public/rescue-runtime.js
+          grep -q "tele-downloaded-files-v1" public/rescue-runtime.js
+          grep -q "tele-forwarded-files-v1" public/rescue-runtime.js
+          grep -q "telegram-polish.css" public/index.html
+          grep -q "Tele daily-driver polish" public/telegram-polish.css
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js public/app.js public/rescue-runtime.js public/management.js public/index.html public/telegram-polish.css scripts/rescue-smoke.test.cjs
+          git commit -m "feat(rescue): polish daily-driver chat and file workspace [daily-driver-polish-bot]"
+          git push origin HEAD:rescue/legacy-modernization
