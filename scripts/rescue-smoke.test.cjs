@@ -6,6 +6,7 @@ const fs = require('node:fs')
 const server = fs.readFileSync('server.js', 'utf8')
 const app = fs.readFileSync('public/app.js', 'utf8')
 const html = fs.readFileSync('public/index.html', 'utf8')
+const management = fs.readFileSync('public/management.js', 'utf8')
 
 assert.match(server, /_:\s*'forwardMessages'/, 'native TDLib forwardMessages must be present')
 assert.match(server, /send_copy:\s*false/, 'forwarding must preserve native forwarded-message semantics')
@@ -22,3 +23,12 @@ assert.match(app, /searchForwardDestinations/, 'UI must resolve destinations thr
 assert.match(html, /id="forward-selected"/, 'selection bar must expose Forward')
 
 console.log('rescue smoke checks passed')
+
+assert.match(server, /createNewSupergroupChat/, 'channel and group creation must use TDLib')
+assert.match(server, /case 'get-chat-management'/, 'permission-aware chat management command must exist')
+assert.match(server, /deleteChatHistory/, 'clear-history support must exist')
+assert.match(server, /leaveChat/, 'leave-chat support must exist')
+assert.match(server, /deleteChat/, 'permission-aware delete support must exist')
+assert.match(management, /Create link/, 'chat info drawer must expose invite management')
+assert.match(management, /Load members/, 'chat info drawer must expose member management')
+assert.match(html, /management\.js/, 'management runtime must be loaded')
