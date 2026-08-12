@@ -1,0 +1,17 @@
+/* Cache-first rescue UI additions */
+.chat-avatar { overflow: hidden; position: relative; }
+.chat-avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: inherit; }
+
+#chat-media-count { min-height: 18px; }
+
+.messages { scroll-behavior: auto; }
+.msg { min-width: 240px; }
+.msg.incoming { margin-right: auto; }
+.msg.outgoing { margin-left: auto; }
+
+.chat-foot { min-height: 34px; }
+#load-state { transition: opacity .15s ease; }
+
+@media (min-width: 1500px) {
+  .app { grid-template-columns: 320px minmax(0, 1fr) 390px; }
+}
