@@ -674,6 +674,14 @@ async function submitLogin (kind, value) {
   }
 }
 
+/* Realtime entity/full-info caches. TDLib full-info getters may return cached
+ * data for a short period, so update*FullInfo events are treated as authoritative. */
+const managedSupergroupFullInfoCache = new Map()
+const managedBasicGroupFullInfoCache = new Map()
+const supergroupChatIds = new Map()
+const basicGroupChatIds = new Map()
+const privateUserChatIds = new Map()
+
 /* ------------------------------ Client init ------------------------------ */
 
 function initClient (config) {
@@ -787,15 +795,37 @@ function initClient (config) {
       return
     }
 
-    if ([
-      'updateSupergroup',
-      'updateSupergroupFullInfo',
-      'updateBasicGroup',
-      'updateBasicGroupFullInfo',
-      'updateUser',
-      'updateUserFullInfo'
-    ].includes(u._)) {
-      emitManagementRefresh(null)
+    if (u._ === 'updateSupergroupFullInfo') {
+      managedSupergroupFullInfoCache.set(String(u.supergroup_id), u.supergroup_full_info)
+      const chatId = supergroupChatIds.get(String(u.supergroup_id))
+      if (chatId != null) emitChatUpsert(chatId).catch(() => {})
+      sendAll({ type: 'event', event: { name: 'management-refresh', chatId: chatId == null ? null : chatId, supergroupId: u.supergroup_id } })
+      return
+    }
+    if (u._ === 'updateBasicGroupFullInfo') {
+      managedBasicGroupFullInfoCache.set(String(u.basic_group_id), u.basic_group_full_info)
+      const chatId = basicGroupChatIds.get(String(u.basic_group_id))
+      if (chatId != null) emitChatUpsert(chatId).catch(() => {})
+      sendAll({ type: 'event', event: { name: 'management-refresh', chatId: chatId == null ? null : chatId, basicGroupId: u.basic_group_id } })
+      return
+    }
+    if (u._ === 'updateSupergroup') {
+      const chatId = supergroupChatIds.get(String(u.supergroup && u.supergroup.id))
+      if (chatId != null) emitChatUpsert(chatId).catch(() => {})
+      sendAll({ type: 'event', event: { name: 'management-refresh', chatId: chatId == null ? null : chatId, supergroupId: u.supergroup && u.supergroup.id } })
+      return
+    }
+    if (u._ === 'updateBasicGroup') {
+      const chatId = basicGroupChatIds.get(String(u.basic_group && u.basic_group.id))
+      if (chatId != null) emitChatUpsert(chatId).catch(() => {})
+      sendAll({ type: 'event', event: { name: 'management-refresh', chatId: chatId == null ? null : chatId, basicGroupId: u.basic_group && u.basic_group.id } })
+      return
+    }
+    if (u._ === 'updateUser' || u._ === 'updateUserFullInfo') {
+      const userId = u.user ? u.user.id : u.user_id
+      const chatId = privateUserChatIds.get(String(userId))
+      if (chatId != null) emitChatUpsert(chatId).catch(() => {})
+      emitManagementRefresh(chatId == null ? null : chatId)
     }
   })
 }
@@ -884,10 +914,16 @@ function serializeChat (chat) {
   }
   const t = chat.type
   if (t) {
-    if (t._ === 'chatTypePrivate') info.kind = 'private'
-    else if (t._ === 'chatTypeBasicGroup') info.kind = 'group'
-    else if (t._ === 'chatTypeSupergroup') info.kind = t.is_channel ? 'channel' : 'supergroup'
-    else info.kind = 'other'
+    if (t._ === 'chatTypePrivate') {
+      info.kind = 'private'
+      privateUserChatIds.set(String(t.user_id), chat.id)
+    } else if (t._ === 'chatTypeBasicGroup') {
+      info.kind = 'group'
+      basicGroupChatIds.set(String(t.basic_group_id), chat.id)
+    } else if (t._ === 'chatTypeSupergroup') {
+      info.kind = t.is_channel ? 'channel' : 'supergroup'
+      supergroupChatIds.set(String(t.supergroup_id), chat.id)
+    } else info.kind = 'other'
   }
   return info
 }
@@ -1109,6 +1145,8 @@ function managedPermissions (status, chat, kind, isSavedMessages, canGetMembers)
     canInviteUsers: !!(owner || rights.can_invite_users || adminFallback),
     canRestrictMembers: !!(owner || rights.can_restrict_members || adminFallback),
     canDeleteForAll: !!chat.can_be_deleted_for_all_users,
+    canClearHistoryForSelf: !!chat.can_be_deleted_only_for_self,
+    canClearHistoryForAll: !!chat.can_be_deleted_for_all_users,
     canClearHistory: !!(chat.can_be_deleted_only_for_self || chat.can_be_deleted_for_all_users),
     canLeave: kind !== 'private' && kind !== 'secret',
     canEditUsername: !!(owner && (kind === 'channel' || kind === 'supergroup')),
@@ -1131,7 +1169,9 @@ async function getManagedChatInfo (chatId) {
   if (type._ === 'chatTypeSupergroup') {
     groupInfo = await client.invoke({ _: 'getSupergroup', supergroup_id: type.supergroup_id }).catch(() => null)
     status = groupInfo && groupInfo.status
-    fullInfo = await client.invoke({ _: 'getSupergroupFullInfo', supergroup_id: type.supergroup_id }).catch(() => null)
+    fullInfo = managedSupergroupFullInfoCache.get(String(type.supergroup_id)) ||
+      await client.invoke({ _: 'getSupergroupFullInfo', supergroup_id: type.supergroup_id }).catch(() => null)
+    if (fullInfo) managedSupergroupFullInfoCache.set(String(type.supergroup_id), fullInfo)
     canGetMembers = !!(fullInfo && fullInfo.can_get_members)
     if (!serialized.username && groupInfo && groupInfo.usernames && groupInfo.usernames.active_usernames && groupInfo.usernames.active_usernames.length) {
       serialized.username = groupInfo.usernames.active_usernames[0]
@@ -1139,7 +1179,9 @@ async function getManagedChatInfo (chatId) {
   } else if (type._ === 'chatTypeBasicGroup') {
     groupInfo = await client.invoke({ _: 'getBasicGroup', basic_group_id: type.basic_group_id }).catch(() => null)
     status = groupInfo && groupInfo.status
-    fullInfo = await client.invoke({ _: 'getBasicGroupFullInfo', basic_group_id: type.basic_group_id }).catch(() => null)
+    fullInfo = managedBasicGroupFullInfoCache.get(String(type.basic_group_id)) ||
+      await client.invoke({ _: 'getBasicGroupFullInfo', basic_group_id: type.basic_group_id }).catch(() => null)
+    if (fullInfo) managedBasicGroupFullInfoCache.set(String(type.basic_group_id), fullInfo)
     canGetMembers = !!fullInfo
   }
 
@@ -1385,6 +1427,83 @@ function managedNotificationSettings (current, muted) {
 }
 
 
+/* ------------------------------ Interactive chat service ------------------------------ */
+
+function managedTextContent (text) {
+  return {
+    _: 'inputMessageText',
+    text: { _: 'formattedText', text, entities: [] },
+    link_preview_options: null,
+    clear_draft: true
+  }
+}
+
+async function getManagedMessageActions (chatId, messageId) {
+  ensureManagementReady()
+  const properties = await client.invoke({ _: 'getMessageProperties', chat_id: chatId, message_id: messageId })
+  return {
+    canReply: !!properties.can_be_replied,
+    canEdit: !!properties.can_be_edited,
+    canDeleteSelf: !!properties.can_be_deleted_only_for_self,
+    canDeleteAll: !!properties.can_be_deleted_for_all_users
+  }
+}
+
+async function sendManagedTextMessage (chatId, text, replyToMessageId) {
+  ensureManagementReady()
+  const body = String(text || '').trim()
+  if (!body) throw new Error('Message is empty')
+  if (body.length > 4096) throw new Error('Message is too long')
+  let replyTo = null
+  if (replyToMessageId) {
+    const actions = await getManagedMessageActions(chatId, replyToMessageId)
+    if (!actions.canReply) throw new Error('Telegram does not allow replying to this message')
+    replyTo = { _: 'inputMessageReplyToMessage', message_id: replyToMessageId, quote: null, checklist_task_id: 0 }
+  }
+  const message = await client.invoke({
+    _: 'sendMessage',
+    chat_id: chatId,
+    topic_id: null,
+    reply_to: replyTo,
+    options: null,
+    reply_markup: null,
+    input_message_content: managedTextContent(body)
+  })
+  emitRealtimeMessage(message).catch(() => {})
+  emitChatUpsert(chatId).catch(() => {})
+  return serializeRealtimeMessage(message)
+}
+
+async function editManagedTextMessage (chatId, messageId, text) {
+  ensureManagementReady()
+  const body = String(text || '').trim()
+  if (!body) throw new Error('Message is empty')
+  const actions = await getManagedMessageActions(chatId, messageId)
+  if (!actions.canEdit) throw new Error('Telegram does not allow editing this message')
+  const message = await client.invoke({
+    _: 'editMessageText',
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: null,
+    input_message_content: managedTextContent(body)
+  })
+  emitRealtimeMessage(message).catch(() => {})
+  return serializeRealtimeMessage(message)
+}
+
+async function deleteManagedMessage (chatId, messageId, revoke) {
+  ensureManagementReady()
+  const actions = await getManagedMessageActions(chatId, messageId)
+  const useRevoke = revoke === true
+  if (useRevoke && !actions.canDeleteAll) throw new Error('Telegram does not allow deleting this message for everyone')
+  if (!useRevoke && !actions.canDeleteSelf) throw new Error('Telegram does not allow deleting this message only for you')
+  await client.invoke({ _: 'deleteMessages', chat_id: chatId, message_ids: [messageId], revoke: useRevoke })
+  sendAll({ type: 'event', event: { name: 'message-delete', chatId, messageIds: [messageId], isPermanent: useRevoke } })
+  emitChatUpsert(chatId).catch(() => {})
+  return { ok: true, revoke: useRevoke }
+}
+
+
 /* ------------------------------ File search ------------------------------ */
 
 const MESSAGE_FILTERS = {
@@ -1565,6 +1684,14 @@ wss.on('connection', (ws) => {
           })
         }
 
+        case 'get-message-actions':
+          return respond(ws, id, true, await getManagedMessageActions(payload.chatId, payload.messageId))
+        case 'send-chat-message':
+          return respond(ws, id, true, await sendManagedTextMessage(payload.chatId, payload.text, payload.replyToMessageId))
+        case 'edit-chat-message':
+          return respond(ws, id, true, await editManagedTextMessage(payload.chatId, payload.messageId, payload.text))
+        case 'delete-chat-message':
+          return respond(ws, id, true, await deleteManagedMessage(payload.chatId, payload.messageId, payload.revoke))
         case 'get-chat-management':
           return respond(ws, id, true, await getManagedChatInfo(payload.chatId))
         case 'check-managed-username':
@@ -1615,8 +1742,8 @@ wss.on('connection', (ws) => {
         case 'clear-managed-history': {
           const info = await getManagedChatInfo(payload.chatId)
           const revoke = !!payload.revoke
-          if (revoke && !info.permissions.canDeleteForAll) throw new Error('Telegram does not allow deleting this history for everyone')
-          if (!revoke && !info.permissions.canClearHistory) throw new Error('Telegram does not allow clearing this history')
+          if (revoke && !info.permissions.canClearHistoryForAll) throw new Error('Telegram does not allow deleting this history for everyone')
+          if (!revoke && !info.permissions.canClearHistoryForSelf) throw new Error('Telegram does not allow deleting this history only for you')
           await client.invoke({ _: 'deleteChatHistory', chat_id: payload.chatId, remove_from_chat_list: false, revoke })
           return respond(ws, id, true, { ok: true })
         }

@@ -858,6 +858,31 @@
     toggle.disabled = !permissions.canMute
     row.appendChild(toggle)
     box.appendChild(row)
+
+    if (window.teleEnableDesktopNotifications) {
+      const desktop = elem('div', 'mg-setting-row')
+      const copy = elem('div', '')
+      const enabled = window.teleDesktopNotificationsEnabled && window.teleDesktopNotificationsEnabled()
+      copy.append(
+        elem('strong', '', enabled ? 'Desktop notifications enabled' : 'Desktop notifications'),
+        elem('span', 'muted', enabled ? 'Tele can alert you about incoming messages while the browser is open.' : 'Allow Tele to show Windows/browser notifications for incoming messages.')
+      )
+      const desktopToggle = button(enabled ? 'Disable' : 'Enable', 'ghost', async () => {
+        desktopToggle.disabled = true
+        try {
+          if (enabled) {
+            window.teleDisableDesktopNotifications()
+            toastOk('Desktop notifications disabled')
+          } else {
+            await window.teleEnableDesktopNotifications()
+            toastOk('Desktop notifications enabled')
+          }
+          refreshChatInfo()
+        } catch (e) { toast(e.message, 'error') } finally { desktopToggle.disabled = false }
+      })
+      desktop.append(copy, desktopToggle)
+      box.appendChild(desktop)
+    }
     return box
   }
 
@@ -866,18 +891,31 @@
     const box = section('Danger zone')
     box.classList.add('mg-danger-section')
 
-    if (permissions.canClearHistory) {
-      const clearSelf = button('Clear history', 'ghost danger-outline', async () => {
-        if (!await confirmAction('Clear chat history?', 'Messages will be removed from your history. This cannot be undone.', 'Clear history')) return
+    if (permissions.canClearHistoryForSelf) {
+      const clearSelf = button('Clear history for me', 'ghost danger-outline', async () => {
+        if (!await confirmAction('Clear history for you?', 'Messages will be removed only from your history.', 'Clear for me')) return
         try {
           await request('clear-managed-history', { chatId: chat.id, revoke: false })
           state.messages = []
           renderMessagesList()
           renderFiles()
-          toastOk('Chat history cleared')
+          toastOk('Chat history cleared for you')
         } catch (e) { toast(e.message, 'error') }
       })
       box.appendChild(clearSelf)
+    }
+    if (permissions.canClearHistoryForAll) {
+      const clearAll = button('Clear history for everyone', 'ghost danger-outline', async () => {
+        if (!await confirmAction('Clear history for everyone?', 'Telegram will permanently delete the chat history for all members where your permissions allow it.', 'Clear for everyone')) return
+        try {
+          await request('clear-managed-history', { chatId: chat.id, revoke: true })
+          state.messages = []
+          renderMessagesList()
+          renderFiles()
+          toastOk('Chat history cleared for everyone')
+        } catch (e) { toast(e.message, 'error') }
+      })
+      box.appendChild(clearAll)
     }
 
     if (permissions.canLeave) {
@@ -1020,6 +1058,8 @@
     }
     return managementBaseHandleEvent(ev)
   }
+
+  window.teleConfirmAction = confirmAction
 
   mountDrawer()
   mountEntryPoints()

@@ -84,6 +84,7 @@ const rescueBaseSetView = setView
 setView = function rescueSetView (view) {
   rescueRememberView(view)
   rescueBaseSetView(view)
+  if (typeof rescueUpdateComposerVisibility === 'function') rescueUpdateComposerVisibility()
   if (view === 'files' && state.activeChatId != null) {
     rescueEnsureAllFiles(state.activeChatId)
   }
@@ -553,6 +554,7 @@ function rescueRealtimeMessageUpsert (chatId, message) {
   const chatKey = rescueChatKey(chatId)
   rescueUpsertCachedMessage(chatKey, message)
   rescuePatchCompleteFileCache(chatKey, message)
+  rescueMaybeNotifyMessage(chatId, message)
   if (state.activeChatId == null || rescueChatKey(state.activeChatId) !== chatKey) return
 
   const panel = $('#messages')
@@ -599,3 +601,176 @@ handleEvent = function rescueRealtimeHandleEvent (ev) {
   }
   return rescueBaseHandleEvent(ev)
 }
+
+/* ------------------------------ Chat composer + desktop notifications ------------------------------ */
+const rescueNotificationPrefKey = 'tele-desktop-notifications'
+const rescueCompose = { replyTo: null, editMessageId: null, editOriginal: '' }
+
+function rescueDesktopNotificationsEnabled () {
+  try { return localStorage.getItem(rescueNotificationPrefKey) === '1' && 'Notification' in window && Notification.permission === 'granted' } catch { return false }
+}
+
+async function rescueEnableDesktopNotifications () {
+  if (!('Notification' in window)) throw new Error('Desktop notifications are not supported by this browser')
+  const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission()
+  if (permission !== 'granted') throw new Error('Desktop notification permission was not granted')
+  try { localStorage.setItem(rescueNotificationPrefKey, '1') } catch {}
+  return true
+}
+
+function rescueDisableDesktopNotifications () {
+  try { localStorage.setItem(rescueNotificationPrefKey, '0') } catch {}
+  return true
+}
+
+function rescueMaybeNotifyMessage (chatId, message) {
+  if (!message || message.outgoing || !rescueDesktopNotificationsEnabled()) return
+  const active = state.activeChatId != null && rescueChatKey(state.activeChatId) === rescueChatKey(chatId)
+  if (active && document.visibilityState === 'visible' && document.hasFocus()) return
+  const chat = state.chats.find(c => rescueChatKey(c.id) === rescueChatKey(chatId))
+  const title = chat ? chat.title : 'Telegram'
+  let body = message.text || ''
+  if (!body && message.media) body = `${message.sender ? message.sender + ': ' : ''}${message.media.type || 'Media'}`
+  else if (message.sender && body) body = `${message.sender}: ${body}`
+  body = String(body || 'New message').slice(0, 180)
+  try {
+    const n = new Notification(title, { body, tag: `tele-chat-${chatId}`, renotify: true })
+    n.onclick = () => {
+      window.focus()
+      if (chatId != null) openChat(chatId)
+      n.close()
+    }
+  } catch {}
+}
+
+function rescueMountComposer () {
+  if (document.querySelector('#tele-composer')) return
+  const chat = document.querySelector('.chat')
+  const foot = document.querySelector('.chat-foot')
+  if (!chat || !foot) return
+  const composer = document.createElement('div')
+  composer.id = 'tele-composer'
+  composer.className = 'tele-composer hidden'
+  composer.innerHTML = `
+    <div id="tele-compose-context" class="tele-compose-context hidden">
+      <div><strong id="tele-compose-mode"></strong><span id="tele-compose-preview"></span></div>
+      <button id="tele-compose-cancel" class="ghost small" type="button">Cancel</button>
+    </div>
+    <div class="tele-compose-row">
+      <textarea id="tele-compose-input" rows="1" placeholder="Message" aria-label="Message"></textarea>
+      <button id="tele-compose-send" type="button">Send</button>
+    </div>`
+  chat.insertBefore(composer, foot)
+  const input = document.querySelector('#tele-compose-input')
+  document.querySelector('#tele-compose-send').onclick = rescueSendComposer
+  document.querySelector('#tele-compose-cancel').onclick = rescueClearComposeContext
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      rescueSendComposer()
+    } else if (e.key === 'Escape') {
+      rescueClearComposeContext()
+    }
+  })
+  input.addEventListener('input', () => {
+    input.style.height = 'auto'
+    input.style.height = Math.min(140, input.scrollHeight) + 'px'
+  })
+  rescueUpdateComposerVisibility()
+}
+
+function rescueUpdateComposerVisibility () {
+  rescueMountComposer()
+  const composer = document.querySelector('#tele-composer')
+  if (!composer) return
+  composer.classList.toggle('hidden', state.view !== 'messages' || state.activeChatId == null)
+}
+
+function rescueClearComposeContext () {
+  rescueCompose.replyTo = null
+  rescueCompose.editMessageId = null
+  rescueCompose.editOriginal = ''
+  const context = document.querySelector('#tele-compose-context')
+  if (context) context.classList.add('hidden')
+  const mode = document.querySelector('#tele-compose-mode')
+  const preview = document.querySelector('#tele-compose-preview')
+  if (mode) mode.textContent = ''
+  if (preview) preview.textContent = ''
+}
+
+function rescueSetComposeContext (mode, message) {
+  rescueMountComposer()
+  rescueClearComposeContext()
+  const input = document.querySelector('#tele-compose-input')
+  const context = document.querySelector('#tele-compose-context')
+  const modeNode = document.querySelector('#tele-compose-mode')
+  const preview = document.querySelector('#tele-compose-preview')
+  if (!input || !context) return
+  context.classList.remove('hidden')
+  if (mode === 'edit') {
+    rescueCompose.editMessageId = message.id
+    rescueCompose.editOriginal = message.text || ''
+    input.value = message.text || ''
+    modeNode.textContent = 'Editing message'
+  } else {
+    rescueCompose.replyTo = message
+    modeNode.textContent = `Replying to ${message.sender || 'message'}`
+  }
+  preview.textContent = String(message.text || (message.media && message.media.name) || '').slice(0, 120)
+  input.focus()
+  input.dispatchEvent(new Event('input'))
+}
+
+async function rescueSendComposer () {
+  const input = document.querySelector('#tele-compose-input')
+  const send = document.querySelector('#tele-compose-send')
+  if (!input || !send || state.activeChatId == null) return
+  const text = input.value.trim()
+  if (!text) return
+  send.disabled = true
+  try {
+    if (rescueCompose.editMessageId) {
+      await request('edit-chat-message', { chatId: state.activeChatId, messageId: rescueCompose.editMessageId, text })
+      toastOk('Message edited')
+    } else {
+      await request('send-chat-message', {
+        chatId: state.activeChatId,
+        text,
+        replyToMessageId: rescueCompose.replyTo ? rescueCompose.replyTo.id : null
+      })
+    }
+    input.value = ''
+    input.style.height = 'auto'
+    rescueClearComposeContext()
+  } catch (e) {
+    toast(e.message, 'error')
+  } finally {
+    send.disabled = false
+    input.focus()
+  }
+}
+
+async function rescueDeleteMessage (message) {
+  if (!message || state.activeChatId == null) return
+  try {
+    const actions = await request('get-message-actions', { chatId: state.activeChatId, messageId: message.id })
+    if (!actions.canDeleteAll && !actions.canDeleteSelf) throw new Error('Telegram does not allow deleting this message')
+    const revoke = !!actions.canDeleteAll
+    const scope = revoke ? 'for everyone' : 'only for you'
+    const confirmFn = window.teleConfirmAction
+    const ok = confirmFn
+      ? await confirmFn('Delete message?', `This message will be deleted ${scope}.`, 'Delete')
+      : window.confirm(`Delete this message ${scope}?`)
+    if (!ok) return
+    await request('delete-chat-message', { chatId: state.activeChatId, messageId: message.id, revoke })
+  } catch (e) { toast(e.message, 'error') }
+}
+
+window.teleReplyToMessage = message => rescueSetComposeContext('reply', message)
+window.teleEditMessage = message => rescueSetComposeContext('edit', message)
+window.teleDeleteMessage = rescueDeleteMessage
+window.teleDesktopNotificationsEnabled = rescueDesktopNotificationsEnabled
+window.teleEnableDesktopNotifications = rescueEnableDesktopNotifications
+window.teleDisableDesktopNotifications = rescueDisableDesktopNotifications
+
+rescueMountComposer()

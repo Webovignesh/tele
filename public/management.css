@@ -391,3 +391,59 @@ button.danger-outline:hover { border-color: var(--danger); color: #fff; backgrou
   .mg-photo-actions { grid-template-columns: 1fr 1fr; }
   .mg-photo-actions .danger-outline { grid-column: 1 / -1; }
 }
+
+/* Tele chat composer and message actions */
+.msg { position: relative; }
+.msg-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: 7px;
+  opacity: .35;
+  transition: opacity .15s ease;
+}
+.msg:hover .msg-actions,
+.msg:focus-within .msg-actions { opacity: 1; }
+.msg-actions button { font-size: 10.5px; padding: 4px 7px; }
+
+.tele-composer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding: 10px 14px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tele-compose-row { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 8px; }
+#tele-compose-input {
+  width: 100%;
+  min-height: 40px;
+  max-height: 140px;
+  resize: none;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+  line-height: 1.4;
+  outline: none;
+}
+#tele-compose-input:focus { border-color: var(--accent); }
+#tele-compose-send { min-width: 72px; height: 40px; }
+.tele-compose-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border-left: 3px solid var(--accent);
+  border-radius: 7px;
+  background: rgba(61,155,250,.08);
+}
+.tele-compose-context > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tele-compose-context strong { font-size: 11px; color: var(--accent); }
+.tele-compose-context span { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

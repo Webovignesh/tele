@@ -47,3 +47,12 @@ assert.match(management, /t\.me\//, 'channel public addresses must use t.me link
 assert.match(management, /check-managed-username/, 'creation/edit UI must validate username availability')
 assert.match(management, /image\/png/, 'chat photo UI must accept PNG')
 assert.match(managementCss, /mg-photo-drop/, 'chat photo UI must use the polished upload surface')
+
+assert.match(server, /getMessageProperties/, 'message actions must be permission-aware')
+assert.match(server, /sendMessage/, 'chat composer must send through TDLib')
+assert.match(server, /editMessageText/, 'text editing must use TDLib')
+assert.match(server, /deleteMessages/, 'message deletion must use TDLib')
+assert.match(server, /canClearHistoryForSelf/, 'clear history must distinguish self/all permissions')
+assert.match(server, /managedSupergroupFullInfoCache/, 'invite-link/full-info updates must use authoritative realtime cache')
+assert.match(management, /Desktop notifications/, 'desktop notification controls must exist')
+assert.match(management, /Clear history for everyone/, 'history UI must expose valid revoke mode')

@@ -483,6 +483,22 @@ function renderMessagesList () {
     msgEl.appendChild(head)
     if (m.text) msgEl.appendChild(h('div', 'msg-text', m.text))
     if (m.media) msgEl.appendChild(buildMediaRow(m, false))
+    const actions = h('div', 'msg-actions')
+    const reply = h('button', 'ghost small', 'Reply')
+    reply.type = 'button'
+    reply.onclick = (e) => { e.stopPropagation(); if (window.teleReplyToMessage) window.teleReplyToMessage(m) }
+    actions.appendChild(reply)
+    if (m.outgoing && m.text) {
+      const edit = h('button', 'ghost small', 'Edit')
+      edit.type = 'button'
+      edit.onclick = (e) => { e.stopPropagation(); if (window.teleEditMessage) window.teleEditMessage(m) }
+      actions.appendChild(edit)
+    }
+    const del = h('button', 'ghost small danger-outline', 'Delete')
+    del.type = 'button'
+    del.onclick = (e) => { e.stopPropagation(); if (window.teleDeleteMessage) window.teleDeleteMessage(m) }
+    actions.appendChild(del)
+    msgEl.appendChild(actions)
     const select = h('label', 'msg-select')
     const cb = h('input', '')
     cb.type = 'checkbox'
