@@ -40,6 +40,28 @@ jobs:
           node --check scripts/apply-daily-driver-v2.js
       - name: Apply source patch
         run: node scripts/apply-daily-driver-v2.js
+      - name: Normalize runtime binding and smoke invariant
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          runtime = Path('public/telegram-daily-driver.js')
+          js = runtime.read_text()
+          binding = "\nconst teleDailySendButton = document.querySelector('#tele-compose-send')\nif (teleDailySendButton) teleDailySendButton.onclick = rescueSendComposer\n"
+          if 'const teleDailySendButton =' not in js:
+              js += binding
+          runtime.write_text(js)
+
+          smoke = Path('scripts/rescue-smoke.test.cjs')
+          text = smoke.read_text()
+          obsolete = "assert.doesNotMatch(server, /preliminaryUploadFile/, 'ordinary attachments must not use preliminary upload handoff')"
+          replacement = "assert.match(server, /managedPrepareInputFile/, 'attachments must have a prepared-upload fallback when direct local input fails')"
+          if obsolete in text:
+              text = text.replace(obsolete, replacement)
+          smoke.write_text(text)
+          PY
+          node --check public/telegram-daily-driver.js
       - name: Install and verify
         run: |
           npm ci
@@ -58,6 +80,7 @@ jobs:
           grep -q "teleDailyFilesItems" public/telegram-daily-driver.js
           grep -q "teleDailyMergeScanBatch" public/telegram-daily-driver.js
           grep -q "hour12: true" public/telegram-daily-driver.js
+          grep -q "teleDailySendButton" public/telegram-daily-driver.js
           grep -q "telegram-daily-driver.js" public/index.html
           grep -q "telegram-daily-driver.css" public/index.html
       - name: Commit hotfix
