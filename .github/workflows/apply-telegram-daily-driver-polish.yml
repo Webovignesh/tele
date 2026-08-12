@@ -29,12 +29,13 @@ jobs:
           s = p.read_text()
           s = s.replace(')),\n",\n', ')),\\n",\n')
           s = s.replace("    'message thumbnail serialization',\n    minimum=2\n)", "    'message thumbnail serialization',\n    minimum=1\n)")
+          s = s.replace("    'scanner thumbnail serialization',\n    minimum=2\n)", "    'scanner thumbnail serialization',\n    minimum=1\n)")
           p.write_text(s)
           PY
           python -m py_compile scripts/apply-telegram-daily-driver-polish.py
       - name: Apply patch
         run: python scripts/apply-telegram-daily-driver-polish.py
-      - name: Normalize remaining thumbnail serializer
+      - name: Normalize remaining thumbnail serializers
         shell: bash
         run: |
           python - <<'PY'
@@ -42,8 +43,10 @@ jobs:
           import re
           p = Path('server.js')
           s = p.read_text()
-          pattern = re.compile(r"(?P<i>\s*)if \(item\.media\.thumb && item\.media\.thumb\.photo && item\.media\.thumb\.photo\.id\) \{\n(?P=i)  item\.media\.thumbUrl = null\n(?P=i)  item\.media\.thumbFileId = item\.media\.thumb\.photo\.id\n(?P=i)\}")
-          s = pattern.sub(lambda m: f"{m.group('i')}const thumbFileId = mediaThumbFileId(item.media.thumb)\n{m.group('i')}if (thumbFileId) {{\n{m.group('i')}  item.media.thumbUrl = null\n{m.group('i')}  item.media.thumbFileId = thumbFileId\n{m.group('i')}}}", s)
+          message_pattern = re.compile(r"(?P<i>\s*)if \(item\.media\.thumb && item\.media\.thumb\.photo && item\.media\.thumb\.photo\.id\) \{\n(?P=i)  item\.media\.thumbUrl = null\n(?P=i)  item\.media\.thumbFileId = item\.media\.thumb\.photo\.id\n(?P=i)\}")
+          s = message_pattern.sub(lambda m: f"{m.group('i')}const thumbFileId = mediaThumbFileId(item.media.thumb)\n{m.group('i')}if (thumbFileId) {{\n{m.group('i')}  item.media.thumbUrl = null\n{m.group('i')}  item.media.thumbFileId = thumbFileId\n{m.group('i')}}}", s)
+          scanner_pattern = re.compile(r"(?P<i>\s*)caption: media\.caption \|\| null,\n(?P=i)thumbFileId: media\.thumb && media\.thumb\.photo \? media\.thumb\.photo\.id : null,")
+          s = scanner_pattern.sub(lambda m: f"{m.group('i')}mime: media.mime || 'application/octet-stream',\n{m.group('i')}caption: media.caption || null,\n{m.group('i')}thumbFileId: mediaThumbFileId(media.thumb),", s)
           p.write_text(s)
           PY
       - name: Install and verify
