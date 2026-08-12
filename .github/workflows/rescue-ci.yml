@@ -21,4 +21,15 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Syntax checks
+        run: |
+          node --check server.js
+          node --check public/app.js
+          node --check public/rescue-runtime.js
       - run: npm run verify
+      - name: Rescue runtime wiring
+        shell: bash
+        run: |
+          grep -q 'rescue-runtime.js' public/index.html
+          grep -q 'rescue-runtime.css' public/index.html
+          grep -q 'photoFileId' server.js
