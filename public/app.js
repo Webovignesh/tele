@@ -1194,113 +1194,6 @@ async function downloadAllMedia () {
   } catch (e) { toast(e.message, 'error') }
 }
 
-async function saveUniqueSelected () {
-  if (!state.activeChatId) return
-  const items = [...state.selection.values()]
-  if (!items.length) return toast('Select files first', 'error')
-  const chatTitle = $('#chat-title').textContent || 'files'
-  const payload = {
-    chatId: state.activeChatId,
-    chatTitle,
-    items: items.map(i => ({ messageId: i.messageId, fileId: i.fileId, fileName: i.name, fileSize: i.fileSize }))
-  }
-  try {
-    const s = await request('save-selected-preview', payload)
-    if (!s.queued) {
-      toastOk(`Nothing to download — ${s.duplicates} duplicates, ${s.alreadyPresent} already on disk`)
-      return
-    }
-    const ok = confirm(
-      `Save unique preview:\n\n` +
-      `• ${s.total} selected\n` +
-      `• ${s.duplicates} duplicates (same name + same size) — skipped\n` +
-      `• ${s.alreadyPresent} already on disk — skipped\n` +
-      `• ${s.queued} to download directly to ${chatTitle}\n\n` +
-      `Proceed?`
-    )
-    if (!ok) return
-    const r = await request('save-selected-direct', payload)
-    const parts = []
-    if (r.duplicates) parts.push(`${r.duplicates} duplicates skipped`)
-    if (r.alreadyPresent) parts.push(`${r.alreadyPresent} already on disk`)
-    if (r.queued) parts.push(`${r.queued} downloading`)
-    toastOk(parts.length ? parts.join(', ') : 'Nothing new to download')
-    state.selection.clear()
-    updateSelectionBar()
-  } catch (e) { toast(e.message, 'error') }
-}
-
-function fmtBytes (n) {
-  if (!n) return ''
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  let v = n
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
-  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`
-}
-
-function renderLinksModal (links) {
-  const list = $('#links-list')
-  list.innerHTML = ''
-  for (const l of links) {
-    const row = document.createElement('div')
-    row.className = 'link-row'
-    const name = document.createElement('span')
-    name.className = 'lname'
-    name.textContent = l.name
-    const size = document.createElement('span')
-    size.className = 'lsize'
-    size.textContent = fmtBytes(l.size)
-    const copy = document.createElement('button')
-    copy.className = 'ghost small'
-    copy.textContent = 'Copy link'
-    copy.dataset.url = window.location.origin + l.url
-    copy.onclick = async (e) => {
-      await navigator.clipboard.writeText(e.currentTarget.dataset.url)
-      toastOk('Link copied')
-    }
-    row.append(name, size, copy)
-    list.appendChild(row)
-  }
-  $('#links-count').textContent = `${links.length} files — paste these links (or the .txt) into IDM`
-}
-
-async function downloadViaIDM () {
-  if (!state.activeChatId) return
-  const items = [...state.selection.values()]
-  if (!items.length) return toast('Select files first', 'error')
-  const chatTitle = $('#chat-title').textContent || 'files'
-  const payload = {
-    chatId: state.activeChatId,
-    chatTitle,
-    items: items.map(i => ({ messageId: i.messageId, fileId: i.fileId, fileName: i.name, fileSize: i.fileSize }))
-  }
-  try {
-    const r = await request('save-selected-links', payload)
-    if (!r.links || !r.links.length) {
-      toastOk(`Nothing to download — ${r.duplicates} duplicates, ${r.skippedOnDisk} already on disk`)
-      return
-    }
-    renderLinksModal(r.links)
-    $('#links-modal').classList.remove('hidden')
-  } catch (e) { toast(e.message, 'error') }
-}
-
-function closeLinksModal () {
-  $('#links-modal').classList.add('hidden')
-  $('#links-list').innerHTML = ''
-}
-
-function downloadLinksTxt () {
-  const urls = [...$('#links-list').querySelectorAll('.link-row button')].map(b => b.dataset.url)
-  if (!urls.length) return
-  const blob = new Blob([urls.join('\n')], { type: 'text/plain' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = 'idm-links.txt'
-  a.click()
-  URL.revokeObjectURL(a.href)
-}
 
 /* ------------------------------ Scan banner ------------------------------ */
 
@@ -1664,15 +1557,6 @@ $('#download-all-media').onclick = downloadAllMedia
 $('#cancel-scan').onclick = () => request('cancel-scan', {}).catch(() => {})
 $('#download-selected').onclick = () => startDownloads([...state.selection.values()])
 $('#forward-selected').onclick = forwardSelectedMessages
-$('#save-unique').onclick = saveUniqueSelected
-$('#idl-links').onclick = downloadViaIDM
-$('#links-close').onclick = closeLinksModal
-$('#links-txt').onclick = downloadLinksTxt
-$('#links-copy').onclick = () => {
-  const urls = [...$('#links-list').querySelectorAll('.link-row button')].map(b => b.dataset.url)
-  if (!urls.length) return
-  navigator.clipboard.writeText(urls.join('\n')).then(() => toastOk('All links copied')).catch(() => toast('Copy failed', 'error'))
-}
 $('#mark-completed').onclick = markSelectedCompleted
 $('#unmark-completed').onclick = unmarkSelectedCompleted
 $('#clear-selection').onclick = () => {

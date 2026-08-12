@@ -7,12 +7,25 @@
 
 const rescueChatCache = new Map()
 const rescueFileCache = new Map()
+const rescueAvatarCache = new Map()
 const rescueFileInflight = new Map()
 const rescueInflight = new Map()
 const rescueCacheLimit = 24
 const rescueMessageLimit = 400
 let rescueOpenGeneration = 0
 let rescueSyncTimer = null
+let rescueRestoredLastChat = false
+
+function rescueSavedChatId () {
+  try { return localStorage.getItem('tele-active-chat') } catch { return null }
+}
+
+function rescueRememberChat (chatId) {
+  try {
+    if (chatId == null) localStorage.removeItem('tele-active-chat')
+    else localStorage.setItem('tele-active-chat', String(chatId))
+  } catch {}
+}
 
 function rescuePreferredView () {
   try {
@@ -228,6 +241,7 @@ openChat = async function rescueOpenChat (chatId) {
   if (state.activeChatId != null && rescueChatKey(state.activeChatId) !== rescueChatKey(chatId)) rescueSaveActiveChat()
   rescueOpenGeneration++
   state.activeChatId = chatId
+  rescueRememberChat(chatId)
   state.selection.clear()
   state.selectedMessages.clear()
   state.loadingMore = false
@@ -313,10 +327,14 @@ openChat = async function rescueOpenChat (chatId) {
 // Render real Telegram chat photos when TDLib exposes one, falling back to initials.
 function rescueLoadAvatar (chat, holder) {
   if (!chat || !chat.photoFileId || !holder) return
-  if (chat._avatarUrl) {
+  const key = rescueChatKey(chat.id)
+  const cachedUrl = rescueAvatarCache.get(key) || chat._avatarUrl
+  if (cachedUrl) {
+    rescueAvatarCache.set(key, cachedUrl)
+    chat._avatarUrl = cachedUrl
     holder.textContent = ''
     const img = h('img', 'chat-avatar-img')
-    img.src = '/dl' + chat._avatarUrl
+    img.src = '/dl' + cachedUrl
     img.alt = ''
     holder.appendChild(img)
     return
@@ -327,6 +345,7 @@ function rescueLoadAvatar (chat, holder) {
     chat._avatarPending = false
     if (!data || !data.path) return
     chat._avatarUrl = data.path
+    rescueAvatarCache.set(key, data.path)
     const live = document.querySelector(`.chat-item[data-chat-id="${CSS.escape(String(chat.id))}"] .chat-avatar`)
     if (!live) return
     live.textContent = ''
@@ -389,6 +408,12 @@ loadChats = async function rescueLoadChats () {
       removeChat(state.activeChatId)
     } else {
       renderChats()
+      if (!rescueRestoredLastChat && state.activeChatId == null) {
+        const saved = rescueSavedChatId()
+        const match = saved && state.chats.find(c => rescueChatKey(c.id) === saved)
+        rescueRestoredLastChat = true
+        if (match) openChat(match.id)
+      }
     }
   } catch (e) {
     // Keep already-rendered chats during transient sync failures.
@@ -416,3 +441,21 @@ $('#tab-files').classList.toggle('active', rescueInitialView === 'files')
 $('#messages').classList.toggle('hidden', rescueInitialView !== 'messages')
 $('#media-grid').classList.toggle('hidden', rescueInitialView !== 'files')
 $('#files-toolbar').classList.toggle('hidden', rescueInitialView !== 'files')
+
+// Preference restoration is explicit here as well as in the legacy handler so
+// it survives future UI refactors.
+try {
+  const channelsOnly = localStorage.getItem('tele-channels-only') === '1'
+  if ($('#channels-only')) $('#channels-only').checked = channelsOnly
+} catch {}
+
+const rescueBaseRemoveChat = removeChat
+removeChat = function rescueRemoveChatPersistent (chatId) {
+  if (state.activeChatId != null && rescueChatKey(state.activeChatId) === rescueChatKey(chatId)) {
+    rescueRememberChat(null)
+  }
+  rescueChatCache.delete(rescueChatKey(chatId))
+  rescueFileCache.delete(rescueChatKey(chatId))
+  rescueAvatarCache.delete(rescueChatKey(chatId))
+  return rescueBaseRemoveChat(chatId)
+}

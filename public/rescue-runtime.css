@@ -15,3 +15,45 @@
 @media (min-width: 1500px) {
   .app { grid-template-columns: 320px minmax(0, 1fr) 390px; }
 }
+
+/* Contextual selection dock */
+#selection-bar.selection-dock {
+  position: fixed;
+  left: clamp(250px, 20vw, 320px);
+  right: clamp(300px, 24vw, 390px);
+  bottom: 0;
+  z-index: 90;
+  min-height: 58px;
+  padding: 9px 16px;
+  border-radius: 0;
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: 0 -10px 34px rgba(0, 0, 0, .28);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+#selection-bar.selection-dock.hidden { display: none; }
+#selection-bar.selection-dock #selection-count {
+  flex: 0 0 auto;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.selection-dock-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.selection-dock-actions button { min-height: 38px; }
+
+@media (max-width: 1100px) {
+  #selection-bar.selection-dock { left: 250px; right: 300px; padding-inline: 10px; }
+  .selection-dock-actions { gap: 5px; }
+  .selection-dock-actions button { padding-inline: 9px; }
+}
+

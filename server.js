@@ -463,81 +463,6 @@ function startPackSelected (items, chatTitle) {
   return true
 }
 
-function computeSelectedSave (items, chatTitle) {
-  const { unique, remove } = packSelected.dedupe(items || [])
-  const chatFolder = path.join(downloadsDir, sanitize(chatTitle))
-
-  const onDisk = new Set()
-  try {
-    for (const f of fs.readdirSync(chatFolder)) {
-      const stats = fs.statSync(path.join(chatFolder, f))
-      if (!stats.isFile()) continue
-      onDisk.add(`${stats.size}\u0000${f}`)
-    }
-  } catch {}
-
-  const alreadyPresent = []
-  const queued = []
-  for (const it of unique) {
-    const key = `${it.fileSize || 0}\u0000${String(it.fileName || '')}`
-    if (onDisk.has(key)) { alreadyPresent.push(it); continue }
-    queued.push(it)
-  }
-
-  return {
-    total: (items || []).length,
-    duplicates: remove.length,
-    alreadyPresent: alreadyPresent.length,
-    queued: queued.length
-  }
-}
-
-function saveSelectedDirect (items, chatTitle, chatId) {
-  const { unique } = packSelected.dedupe(items || [])
-  const chatFolder = path.join(downloadsDir, sanitize(chatTitle))
-
-  const onDisk = new Set()
-  try {
-    for (const f of fs.readdirSync(chatFolder)) {
-      const stats = fs.statSync(path.join(chatFolder, f))
-      if (!stats.isFile()) continue
-      onDisk.add(`${stats.size}\u0000${f}`)
-    }
-  } catch {}
-
-  for (const it of unique) {
-    const key = `${it.fileSize || 0}\u0000${String(it.fileName || '')}`
-    if (onDisk.has(key)) continue
-    dm.add(chatId, chatTitle, it.messageId, it.fileId, it.fileName, it.fileSize)
-  }
-
-  return computeSelectedSave(items, chatTitle)
-}
-
-function saveSelectedLinks (items, chatTitle) {
-  const { unique, remove } = packSelected.dedupe(items || [])
-  const chatFolder = path.join(downloadsDir, sanitize(chatTitle))
-
-  const onDisk = new Set()
-  try {
-    for (const f of fs.readdirSync(chatFolder)) {
-      const stats = fs.statSync(path.join(chatFolder, f))
-      if (!stats.isFile()) continue
-      onDisk.add(`${stats.size}\u0000${f}`)
-    }
-  } catch {}
-
-  const links = []
-  let skippedOnDisk = 0
-  for (const it of unique) {
-    const key = `${it.fileSize || 0}\u0000${String(it.fileName || '')}`
-    if (onDisk.has(key)) { skippedOnDisk++; continue }
-    const url = `/dl/fetch/${encodeURIComponent(it.fileId)}?name=${encodeURIComponent(it.fileName || 'file')}&size=${it.fileSize || 0}`
-    links.push({ name: it.fileName || 'file', url, size: it.fileSize || 0, messageId: it.messageId })
-  }
-
-  return { links, skippedOnDisk, duplicates: remove.length }
-}
 
 /* ------------------------------ Channel scanner ------------------------------ */
 
@@ -923,17 +848,47 @@ async function loadChats () {
 
 async function loadMessages (chatId, fromMessageId, limit) {
   if (!client || !ready) throw new Error('Not logged in')
-  const history = await client.invoke({
-    _: 'getChatHistory',
-    chat_id: chatId,
-    from_message_id: fromMessageId || 0,
-    offset: 0,
-    limit,
-    only_local: false
-  })
-  const messages = (history.messages || []).filter(m => m.sending_state === undefined)
-  const out = []
-  for (const m of messages) {
+  const target = Math.max(1, Math.min(100, Number(limit) || 100))
+  const raw = []
+  const seen = new Set()
+  let cursor = fromMessageId || 0
+  let exhausted = false
+
+  // TDLib can return a very short batch for private/contact histories while it
+  // hydrates older messages. Keep paging inside this request so the UI receives
+  // one useful snapshot rather than appearing to contain only one message.
+  for (let attempt = 0; attempt < 8 && raw.length < target; attempt++) {
+    const history = await client.invoke({
+      _: 'getChatHistory',
+      chat_id: chatId,
+      from_message_id: cursor,
+      offset: 0,
+      limit: Math.min(100, target - raw.length),
+      only_local: false
+    })
+    const batch = (history.messages || []).filter(m => m.sending_state === undefined)
+    if (!batch.length) { exhausted = true; break }
+
+    let added = 0
+    for (const message of batch) {
+      const key = String(message.id)
+      if (seen.has(key)) continue
+      seen.add(key)
+      raw.push(message)
+      added++
+      if (raw.length >= target) break
+    }
+
+    const oldest = batch[batch.length - 1]
+    const nextCursor = oldest && oldest.id
+    if (!nextCursor || String(nextCursor) === String(cursor) || added === 0) {
+      exhausted = true
+      break
+    }
+    cursor = nextCursor
+  }
+
+  const out = await Promise.all(raw.map(async (m) => {
     const item = {
       id: m.id,
       date: m.date,
@@ -953,10 +908,11 @@ async function loadMessages (chatId, fromMessageId, limit) {
     } else {
       item.media = null
     }
-    out.push(item)
-  }
+    return item
+  }))
+
   out.sort((a, b) => (String(a.id) < String(b.id) ? 1 : -1))
-  return { messages: out, hasMore: messages.length === limit }
+  return { messages: out, hasMore: !exhausted && raw.length >= target }
 }
 
 /* ------------------------------ File search ------------------------------ */
@@ -1010,81 +966,6 @@ async function searchMedia (chatId, query, fromMessageId, limit, filter) {
 
 const app = express()
 app.use(express.json())
-
-// Stream a Telegram file to the client (for IDM / direct download).
-// Downloads via TDLib to its local cache, then pipes the file over HTTP.
-// Served as a single full-body 200 (no Range/206) so IDM grabs the file
-// with one connection instead of opening parallel segment downloads.
-const fetchLocks = new Map() // fileId -> Promise<localPath>
-
-function getLocalPath (fileId) {
-  if (fetchLocks.has(fileId)) return fetchLocks.get(fileId)
-  const p = (async () => {
-    let localPath = null
-    const cached = await client.invoke({ _: 'getFile', file_id: fileId }).catch(() => null)
-    if (cached && cached.local && cached.local.is_downloading_completed && cached.local.path) {
-      return cached.local.path
-    }
-    localPath = await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), 10 * 60 * 1000)
-      const onUpdate = (u) => {
-        if (u._ !== 'updateFile' || u.file.id !== fileId) return
-        const local = u.file.local || {}
-        if (local.is_downloading_completed && local.path) {
-          clearTimeout(timer)
-          client.off('update', onUpdate)
-          resolve(local.path)
-        }
-      }
-      client.on('update', onUpdate)
-      client.invoke({ _: 'downloadFile', file_id: fileId, priority: 32, offset: 0, limit: 0, synchronous: false })
-        .then(r => {
-          const local = r && r.local
-          if (local && local.is_downloading_completed && local.path) {
-            clearTimeout(timer)
-            client.off('update', onUpdate)
-            resolve(local.path)
-          }
-        })
-        .catch(() => { clearTimeout(timer); client.off('update', onUpdate); resolve(null) })
-    })
-    return localPath
-  })()
-  fetchLocks.set(fileId, p)
-  p.finally(() => fetchLocks.delete(fileId)).catch(() => {})
-  return p
-}
-
-app.get('/dl/fetch/:fileId', async (req, res) => {
-  const fileId = req.params.fileId
-  const name = String(req.query.name || 'file')
-  if (!client || !ready) return res.status(503).send('Not logged in')
-
-  const safeName = sanitize(name)
-  const size = parseInt(req.query.size, 10) || 0
-
-  res.status(200)
-  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(safeName)}`)
-  res.setHeader('Cache-Control', 'no-store')
-  res.setHeader('Accept-Ranges', 'none')
-  res.setHeader('X-Accel-Buffering', 'no')
-  if (size > 0) res.setHeader('Content-Length', size)
-  res.flushHeaders()
-
-  const localPath = await getLocalPath(fileId)
-  if (!localPath) return res.destroy()
-
-  if (!size) {
-    try {
-      const real = (await fs.promises.stat(localPath)).size
-      res.setHeader('Content-Length', real)
-    } catch {}
-  }
-
-  return fs.createReadStream(localPath)
-    .on('error', () => { res.destroy() })
-    .pipe(res)
-})
 
 app.use('/dl', (req, res, next) => {
   express.static(downloadsDir, { fallthrough: true, maxAge: 0, dotfiles: 'allow' })(req, res, next)
@@ -1249,24 +1130,6 @@ wss.on('connection', (ws) => {
             return respond(ws, id, true, { busy: true })
           }
           return respond(ws, id, true, { started: true })
-        }
-        case 'save-selected-preview': {
-          const items = payload.items || []
-          const chatTitle = String(payload.chatTitle || 'Chat')
-          return respond(ws, id, true, computeSelectedSave(items, chatTitle))
-        }
-        case 'save-selected-links': {
-          const items = payload.items || []
-          const chatTitle = String(payload.chatTitle || 'Chat')
-          const { links, skippedOnDisk, duplicates } = saveSelectedLinks(items, chatTitle)
-          return respond(ws, id, true, { links, skippedOnDisk, duplicates, count: links.length })
-        }
-        case 'save-selected-direct': {
-          const items = payload.items || []
-          const chatTitle = String(payload.chatTitle || 'Chat')
-          const chatId = payload.chatId != null ? payload.chatId : chatTitle
-          const out = saveSelectedDirect(items, chatTitle, chatId)
-          return respond(ws, id, true, out)
         }
         case 'cancel-pack':
           if (packState) packState.cancelled = true
