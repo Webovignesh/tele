@@ -20,6 +20,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Repair patch anchor
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/rescue-patch.cjs')
+          s = p.read_text()
+          s = s.replace('"  $(\'#download-selected\').onclick = () => startDownloads([...state.selection.values()])"', '"$(\'#download-selected\').onclick = () => startDownloads([...state.selection.values()])"')
+          s = s.replace('"  $(\'#download-selected\').onclick = () => startDownloads([...state.selection.values()])\\n  $(\'#forward-selected\').onclick = forwardSelectedMessages"', '"$(\'#download-selected\').onclick = () => startDownloads([...state.selection.values()])\\n$(\'#forward-selected\').onclick = forwardSelectedMessages"')
+          p.write_text(s)
+          PY
       - name: Apply rescue patch
         run: node scripts/rescue-patch.cjs
       - name: Syntax check
