@@ -20,6 +20,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Repair generator interpolation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/rescue-ui-fix.cjs')
+          s = p.read_text()
+          s = s.replace("\\`${messageIds.length} selected message\\${messageIds.length === 1 ? '' : 's'}\\`", "\\`\\${messageIds.length} selected message\\${messageIds.length === 1 ? '' : 's'}\\`")
+          p.write_text(s)
+          PY
       - name: Apply patch
         run: node scripts/rescue-ui-fix.cjs
       - name: Syntax check
