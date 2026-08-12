@@ -1,0 +1,285 @@
+/* Daily-driver P0 visual cleanup. Loaded last on purpose. */
+
+/* ---------- Downloads drawer ---------- */
+.downloads {
+  min-width: 330px !important;
+}
+.downloads .dl-controls {
+  margin: 18px 16px 16px !important;
+  padding: 18px !important;
+  gap: 20px !important;
+  border-radius: 18px !important;
+  background: color-mix(in srgb, var(--panel) 92%, #162536) !important;
+  box-shadow: inset 0 0 0 1px var(--border) !important;
+}
+.downloads .dl-controls .conc {
+  gap: 10px !important;
+}
+.downloads .dl-controls .conc > span:first-child {
+  font-size: 11px !important;
+  letter-spacing: .08em !important;
+  opacity: .9;
+}
+.downloads .dl-controls .conc:first-of-type > .row {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 10px !important;
+  width: 100%;
+}
+.downloads #dl-dir {
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 42px !important;
+  padding: 0 12px !important;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace !important;
+  text-overflow: ellipsis;
+}
+.downloads #set-dir {
+  min-width: 58px;
+  height: 42px;
+  padding-inline: 13px !important;
+}
+.downloads .dir-current {
+  display: block !important;
+  margin: -9px 0 0 !important;
+  padding: 10px 12px !important;
+  min-height: 38px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, #071019 72%, transparent);
+  color: var(--muted) !important;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px !important;
+  line-height: 1.45 !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+  white-space: normal !important;
+}
+.downloads .dl-controls .conc:nth-of-type(2) > .row {
+  display: grid !important;
+  grid-template-columns: minmax(110px, 1fr) 34px !important;
+  gap: 12px !important;
+  align-items: center !important;
+}
+.downloads #concurrency {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+.downloads #concurrency-val {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: #0b141e;
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+.downloads .dl-controls > .row {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 10px !important;
+  width: 100%;
+}
+.downloads .dl-controls > .row button {
+  width: 100%;
+  min-height: 40px;
+  justify-content: center;
+  white-space: nowrap;
+}
+.downloads #download-list {
+  padding: 0 16px 18px !important;
+}
+.downloads #download-list > * {
+  border-radius: 14px !important;
+  margin-bottom: 12px !important;
+}
+
+/* ---------- Search stays visually identical while its event handler is replaced ---------- */
+#chat-search[data-tele-p0-bound="1"] {
+  transition: border-color .12s ease, box-shadow .12s ease, background .12s ease;
+}
+
+/* ---------- Attachment queue ---------- */
+#tele-attachment-preview {
+  padding: 12px !important;
+  border-radius: 16px !important;
+  background: #111d28 !important;
+  border: 1px solid var(--border) !important;
+}
+.tele-attachment-list {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px !important;
+}
+.tele-p0-attachment {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 11px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: #0d1721;
+}
+.tele-p0-attachment.is-error {
+  border-color: color-mix(in srgb, #ff5d68 68%, var(--border));
+}
+.tele-p0-attachment-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 11px;
+  background: #182a3a;
+  color: #76bbff;
+  font-size: 11px;
+  font-weight: 750;
+}
+.tele-p0-attachment-body { min-width: 0; }
+.tele-p0-attachment-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.tele-p0-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.tele-p0-attachment-size {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+.tele-p0-attachment-status {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tele-p0-attachment-status.telegram { color: #70b8ff; }
+.tele-p0-attachment-status.sent { color: #4bd67d; }
+.tele-p0-attachment-status.error { color: #ff717a; }
+.tele-p0-upload-track {
+  height: 3px;
+  margin-top: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #22303d;
+}
+.tele-p0-upload-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #54a8ff;
+  transition: width .12s linear;
+}
+.tele-p0-attachment-status.sent + .tele-p0-upload-track .tele-p0-upload-fill { background: #43cf76; }
+.tele-p0-attachment-remove {
+  width: 30px !important;
+  height: 30px !important;
+  min-width: 30px !important;
+  padding: 0 !important;
+  border-radius: 9px !important;
+}
+.tele-attachment-footer {
+  margin-top: 12px !important;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+.tele-compose-row {
+  gap: 9px !important;
+}
+#tele-compose-input {
+  min-height: 48px !important;
+  padding: 13px 15px !important;
+  border-radius: 16px !important;
+}
+#tele-compose-send {
+  min-width: 92px;
+  border-radius: 14px !important;
+}
+
+/* ---------- Unified image/video popup ---------- */
+.tele-hotfix-preview-shell {
+  width: min(1220px, 95vw) !important;
+  height: min(880px, 92vh) !important;
+}
+#tele-hotfix-preview-body {
+  position: relative;
+  padding: 14px !important;
+}
+.tele-p0-preview-image,
+.tele-p0-preview-video {
+  display: block;
+  max-width: 100%;
+  max-height: calc(92vh - 92px);
+  margin: auto;
+  object-fit: contain;
+  border-radius: 12px;
+  background: #04080c;
+}
+.tele-p0-preview-image.is-thumb {
+  filter: saturate(.9);
+}
+.tele-p0-video-shell {
+  position: relative;
+  width: min(1100px, 100%);
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+}
+.tele-p0-preview-video { width: 100%; }
+.tele-p0-video-status {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  padding: 7px 11px;
+  border-radius: 999px;
+  background: rgba(5, 10, 15, .82);
+  color: #d9e7f5;
+  font-size: 11px;
+  pointer-events: none;
+}
+.tele-p0-preview-audio { width: min(720px, 88vw); }
+.tele-p0-preview-error {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  max-width: 520px;
+  padding: 22px;
+  text-align: center;
+}
+.tele-p0-preview-actions {
+  display: flex;
+  gap: 9px;
+  margin-top: 6px;
+}
+.gthumb[role="button"]:focus-visible {
+  outline: 2px solid #4da8ff;
+  outline-offset: 2px;
+}
+
+/* ---------- General daily-driver spacing cleanup ---------- */
+.files-toolbar {
+  gap: 10px !important;
+}
+.file-range-tools {
+  min-width: 0;
+}
+.messages {
+  scrollbar-gutter: stable;
+}
+@media (max-width: 1360px) {
+  .downloads { min-width: 300px !important; }
+  .downloads .dl-controls { margin-inline: 10px !important; padding: 14px !important; }
+  .downloads .dl-controls > .row { grid-template-columns: 1fr !important; }
+}
