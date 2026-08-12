@@ -307,6 +307,109 @@ class DownloadManager {
 
 const dm = new DownloadManager()
 
+/* ------------------------------ Native forward manager ------------------------------ */
+
+const forwardHistory = new Set()
+
+function normalizeMessageIds (ids) {
+  const out = []
+  const seen = new Set()
+  for (const raw of ids || []) {
+    const id = String(raw || '').trim()
+    if (!/^\d+$/.test(id) || id === '0' || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
+async function resolveDestinationChat (destination) {
+  if (!client || !ready) throw new Error('Telegram session is not ready')
+
+  if (destination && destination.chatId != null) {
+    const chatId = destination.chatId
+    const chat = await client.invoke({ _: 'getChat', chat_id: chatId })
+    return { id: chat.id, title: chat.title || 'Destination' }
+  }
+
+  const query = String(destination && (destination.username || destination.query) || '').trim()
+  if (!query) throw new Error('Choose a destination chat')
+
+  const username = query.replace(/^@/, '')
+  if (username) {
+    const publicChat = await client.invoke({ _: 'searchPublicChat', username }).catch(() => null)
+    if (publicChat && publicChat.id) return { id: publicChat.id, title: publicChat.title || '@' + username }
+  }
+
+  const local = await client.invoke({ _: 'searchChats', query, limit: 50 }).catch(() => null)
+  for (const chatId of (local && local.chat_ids) || []) {
+    const chat = await client.invoke({ _: 'getChat', chat_id: chatId }).catch(() => null)
+    if (!chat) continue
+    const title = String(chat.title || '')
+    const usernames = chat.usernames && chat.usernames.active_usernames ? chat.usernames.active_usernames : []
+    if (title.toLowerCase() === query.toLowerCase() || usernames.some(u => String(u).toLowerCase() === username.toLowerCase())) {
+      return { id: chat.id, title: title || query }
+    }
+  }
+
+  throw new Error('Destination chat not found')
+}
+
+async function forwardMessagesNative (sourceChatId, messageIds, destination) {
+  if (!client || !ready) throw new Error('Telegram session is not ready')
+  if (sourceChatId == null) throw new Error('Source chat is required')
+
+  const ids = normalizeMessageIds(messageIds)
+  if (!ids.length) throw new Error('Select at least one message to forward')
+  const dest = await resolveDestinationChat(destination)
+  if (String(dest.id) === String(sourceChatId)) throw new Error('Choose a different destination chat')
+
+  const fresh = []
+  const skipped = []
+  for (const messageId of ids) {
+    const dedupeKey = String(sourceChatId) + ':' + messageId + ':' + String(dest.id)
+    if (forwardHistory.has(dedupeKey)) skipped.push(messageId)
+    else fresh.push(messageId)
+  }
+
+  if (!fresh.length) {
+    return { destination: dest, forwarded: [], skipped, messages: [] }
+  }
+
+  // TDLib's native forwardMessages preserves Telegram-native forwarding semantics
+  // for both text and media. No download/re-upload path is involved.
+  const result = await client.invoke({
+    _: 'forwardMessages',
+    chat_id: dest.id,
+    from_chat_id: sourceChatId,
+    message_ids: fresh,
+    options: { _: 'messageSendOptions', disable_notification: false, from_background: false, protect_content: false },
+    send_copy: false,
+    remove_caption: false
+  })
+
+  const forwardedMessages = (result && result.messages) || []
+  for (const messageId of fresh) {
+    forwardHistory.add(String(sourceChatId) + ':' + messageId + ':' + String(dest.id))
+  }
+
+  sendAll({
+    type: 'event',
+    event: {
+      name: 'forward-done',
+      payload: {
+        sourceChatId,
+        destination: dest,
+        forwarded: fresh,
+        skipped,
+        destinationMessageIds: forwardedMessages.map(m => m && m.id).filter(Boolean)
+      }
+    }
+  })
+
+  return { destination: dest, forwarded: fresh, skipped, messages: forwardedMessages }
+}
+
 /* ------------------------------ Media packer ------------------------------ */
 
 let packState = null // { active, cancelled }
@@ -675,6 +778,16 @@ function initClient (config) {
       handleAuthState(u.authorization_state)
     } else if (u._ === 'updateFile') {
       dm.onFileUpdate(u.file)
+    } else if (u._ === 'updateNewChat') {
+      sendAll({ type: 'event', event: { name: 'chat-upsert', chat: serializeChat(u.chat) } })
+    } else if (u._ === 'updateChatTitle') {
+      client.invoke({ _: 'getChat', chat_id: u.chat_id }).then(chat => {
+        sendAll({ type: 'event', event: { name: 'chat-upsert', chat: serializeChat(chat) } })
+      }).catch(() => {})
+    } else if (u._ === 'updateChatPhoto' || u._ === 'updateChatPosition' || u._ === 'updateChatLastMessage') {
+      client.invoke({ _: 'getChat', chat_id: u.chat_id }).then(chat => {
+        sendAll({ type: 'event', event: { name: 'chat-upsert', chat: serializeChat(chat) } })
+      }).catch(() => {})
     }
   })
 }
@@ -1013,6 +1126,29 @@ wss.on('connection', (ws) => {
           const r = await searchMedia(payload.chatId, payload.query, payload.fromMessageId, payload.limit, payload.filter)
           return respond(ws, id, true, r)
         }
+        case 'search-destinations': {
+          const query = String(payload.query || '').trim()
+          const ids = query
+            ? ((await client.invoke({ _: 'searchChats', query, limit: 50 }).catch(() => ({ chat_ids: [] }))).chat_ids || [])
+            : ((await client.invoke({ _: 'getChats', chat_list: { _: 'chatListMain' }, offset_order: '9223372036854775807', offset_chat_id: 0, limit: 50 })).chat_ids || [])
+          const chats = []
+          for (const chatId of ids) {
+            if (payload.excludeChatId != null && String(chatId) === String(payload.excludeChatId)) continue
+            const chat = await client.invoke({ _: 'getChat', chat_id: chatId }).catch(() => null)
+            if (!chat || (chat.type && chat.type._ === 'chatTypeSecret')) continue
+            chats.push(serializeChat(chat))
+          }
+          return respond(ws, id, true, { chats })
+        }
+        case 'forward-messages': {
+          const result = await forwardMessagesNative(payload.sourceChatId, payload.messageIds, payload.destination || {})
+          return respond(ws, id, true, {
+            destination: result.destination,
+            forwarded: result.forwarded,
+            skipped: result.skipped,
+            destinationMessageIds: result.messages.map(m => m && m.id).filter(Boolean)
+          })
+        }
         case 'start-download': {
           const chat = await client.invoke({ _: 'getChat', chat_id: payload.chatId }).catch(() => ({ title: 'Chat' }))
           const chatTitle = chat.title || 'Chat'
@@ -1124,8 +1260,8 @@ if (config) {
   console.log('No API credentials found. Open the web UI to enter api_id and api_hash.')
 }
 
-server.listen(PORT, () => {
-  console.log(`Tele Scraper running at http://localhost:${PORT}`)
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`Tele running at http://127.0.0.1:${PORT}`)
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

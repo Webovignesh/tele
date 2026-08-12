@@ -7,6 +7,7 @@ const state = {
   activeChatId: null,
   messages: [],
   selection: new Map(), // key `${chatId}:${messageId}` -> item
+  selectedMessages: new Map(), // key `${chatId}:${messageId}` -> full message for Forward
   downloads: new Map(), // jobId -> job
   prevSpeed: new Map(),
   samples: new Map(), // jobId -> [{time, downloaded}] for speed smoothing
@@ -176,6 +177,12 @@ function handleEvent (ev) {
     case 'settings-changed':
       setDirLabel(ev.downloadsDir)
       break
+    case 'chat-upsert':
+      upsertChat(ev.chat)
+      break
+    case 'forward-done':
+      toastOk(`Forwarded ${(ev.payload.forwarded || []).length} message(s) to ${ev.payload.destination && ev.payload.destination.title ? ev.payload.destination.title : 'destination'}`)
+      break
     case 'pack-progress':
       onPackProgress(ev.payload)
       break
@@ -315,6 +322,16 @@ function renderChats () {
   $('#chat-count').textContent = channelsOnly ? `${shown} channels` : `${state.chats.length} chats`
 }
 
+function upsertChat (chat) {
+  if (!chat || chat.id == null) return
+  if (chat.lastMessage && chat.lastMessage._ === 'messageText') chat.lastText = chat.lastMessage.text?.text || ''
+  const index = state.chats.findIndex(c => String(c.id) === String(chat.id))
+  if (index >= 0) state.chats[index] = { ...state.chats[index], ...chat }
+  else state.chats.unshift(chat)
+  state.chats.sort((a, b) => String(a.order || '0') < String(b.order || '0') ? 1 : -1)
+  renderChats()
+}
+
 async function loadChats () {
   try {
     const data = await request('get-chats')
@@ -362,6 +379,7 @@ async function openChat (chatId) {
   state.activeChatId = chatId
   state.messages = []
   state.selection.clear()
+  state.selectedMessages.clear()
   state.hasMore = true
   state.mediaCount = null
   state.typeCounts = null
@@ -439,8 +457,21 @@ function renderMessagesList () {
     head.appendChild(h('span', 'msg-sender', m.sender || 'Unknown'))
     head.appendChild(h('span', 'msg-date', new Date(m.date * 1000).toLocaleString()))
     msgEl.appendChild(head)
-    if (m.text) msgEl.appendChild(h('div', 'msg-text', escapeHtml(m.text)))
+    if (m.text) msgEl.appendChild(h('div', 'msg-text', m.text))
     if (m.media) msgEl.appendChild(buildMediaRow(m))
+    const select = h('label', 'msg-select')
+    const cb = h('input', '')
+    cb.type = 'checkbox'
+    const key = `${state.activeChatId}:${m.id}`
+    cb.checked = state.selectedMessages.has(key)
+    cb.onchange = () => {
+      if (cb.checked) state.selectedMessages.set(key, m)
+      else state.selectedMessages.delete(key)
+      updateSelectionBar()
+    }
+    select.appendChild(cb)
+    select.appendChild(document.createTextNode(' Select'))
+    msgEl.appendChild(select)
     list.appendChild(msgEl)
   }
 }
@@ -709,9 +740,15 @@ async function loadSearchMore () {
 /* ------------------------------ Selection / bulk actions ------------------------------ */
 
 function updateSelectionBar () {
+  const messageForwardCount = selectedForwardIds().length
   const count = state.selection.size
   $('#selection-count').textContent = `${count} selected`
-  $('#selection-bar').classList.toggle('hidden', count === 0)
+  $('#selection-bar').classList.toggle('hidden', count === 0 && messageForwardCount === 0)
+  const forwardBtn = $('#forward-selected')
+  if (forwardBtn) {
+    forwardBtn.disabled = messageForwardCount === 0
+    forwardBtn.textContent = messageForwardCount ? `Forward (${messageForwardCount})` : 'Forward'
+  }
 }
 
 function selectAllMedia () {
@@ -993,6 +1030,57 @@ function unmarkSelectedCompleted () {
   updateSelectionBar()
   for (const key of keys) setCardCompleted(key, false)
   toast(n ? `Unmarked ${n} files` : 'No completed files in selection')
+}
+
+function selectedForwardIds () {
+  const ids = []
+  const seen = new Set()
+  for (const item of state.selectedMessages.values()) {
+    const id = String(item.id || item.messageId || '')
+    if (id && !seen.has(id)) { seen.add(id); ids.push(id) }
+  }
+  for (const item of state.selection.values()) {
+    const id = String(item.messageId || item.id || '')
+    if (id && !seen.has(id)) { seen.add(id); ids.push(id) }
+  }
+  return ids
+}
+
+async function searchForwardDestinations (query = '') {
+  return request('search-destinations', { query, excludeChatId: state.activeChatId })
+}
+
+async function forwardSelectedMessages () {
+  if (!state.activeChatId) return
+  const messageIds = selectedForwardIds()
+  if (!messageIds.length) return toast('Select one or more messages first', 'error')
+
+  const typed = prompt('Forward to chat title or @username:')
+  if (!typed) return
+
+  try {
+    const candidates = await searchForwardDestinations(typed)
+    let destination = null
+    if (typed.startsWith('@')) destination = { username: typed }
+    else if (candidates.chats && candidates.chats.length) destination = { chatId: candidates.chats[0].id }
+    else destination = { query: typed }
+
+    const result = await request('forward-messages', {
+      sourceChatId: state.activeChatId,
+      messageIds,
+      destination
+    })
+    const forwarded = (result.forwarded || []).length
+    const skipped = (result.skipped || []).length
+    state.selectedMessages.clear()
+    state.selection.clear()
+    updateSelectionBar()
+    renderMessagesList()
+    renderFiles()
+    toastOk(`Forwarded ${forwarded} message(s)${skipped ? ` · ${skipped} already sent this session` : ''}`)
+  } catch (e) {
+    toast(e.message, 'error')
+  }
 }
 
 async function startDownloads (items) {
@@ -1498,6 +1586,7 @@ $('#select-all-media').onclick = selectAllMedia
 $('#download-all-media').onclick = downloadAllMedia
 $('#cancel-scan').onclick = () => request('cancel-scan', {}).catch(() => {})
 $('#download-selected').onclick = () => startDownloads([...state.selection.values()])
+$('#forward-selected').onclick = forwardSelectedMessages
 $('#save-unique').onclick = saveUniqueSelected
 $('#idl-links').onclick = downloadViaIDM
 $('#links-close').onclick = closeLinksModal
