@@ -20,6 +20,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Repair staged patch script
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply-daily-driver-v2.js')
+          s = p.read_text()
+          old = "throw new Error(`Telegram attachment send failed. Direct: ${first}. Prepared upload: ${second}`)"
+          new = "throw new Error('Telegram attachment send failed. Direct: ' + first + '. Prepared upload: ' + second)"
+          if old not in s:
+              raise SystemExit('expected attachment error template not found')
+          p.write_text(s.replace(old, new))
+          PY
+          node --check scripts/apply-daily-driver-v2.js
       - name: Apply source patch
         run: node scripts/apply-daily-driver-v2.js
       - name: Install and verify
