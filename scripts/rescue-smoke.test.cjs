@@ -67,7 +67,6 @@ assert.match(rescueRuntime, /rescueMarkActiveChat/, 'chat switching must update 
 assert.match(html, /modern\.css/, 'modern desktop skin must be loaded')
 assert.match(modernCss, /Tele modern desktop skin/, 'modern UI skin must exist')
 
-
 const polishCss = fs.readFileSync('public/telegram-polish.css', 'utf8')
 assert.match(server, /inputFileLocal/, 'attachments must send directly as local files')
 assert.match(server, /managedPrepareInputFile/, 'attachments must have a prepared-upload fallback when direct local input fails')
@@ -99,7 +98,6 @@ assert.match(dailyDriverCss, /#toggle-drawer\s*\{\s*display:\s*none/, 'download 
 assert.match(html, /telegram-daily-driver\.js/, 'daily-driver runtime must be loaded')
 assert.match(html, /telegram-daily-driver\.css/, 'daily-driver stylesheet must be loaded')
 
-
 const dailyDriverV3 = fs.readFileSync('public/telegram-daily-driver-v3.js', 'utf8')
 const dailyDriverV3Css = fs.readFileSync('public/telegram-daily-driver-v3.css', 'utf8')
 assert.match(server, /scanMediaIndexV3/, 'file indexing must be chat scoped')
@@ -116,3 +114,11 @@ assert.match(dailyDriverV3Css, /position:\s*relative\s*!important/, 'v3 selectio
 assert.doesNotMatch(html, /telegram-daily-driver-v3\.js/, 'unstable v3 runtime must not block application bootstrap')
 assert.doesNotMatch(html, /telegram-daily-driver-v3\.css/, 'unstable v3 stylesheet must not be active during bootstrap')
 assert.match(html, /id="boot-status"/, 'bootstrap must expose a visible connecting state instead of a blank page')
+
+const dailyHotfix = fs.readFileSync('public/daily-driver-hotfix.js', 'utf8')
+assert.match(dailyHotfix, /scan-media-v3/, 'stable runtime must use the chat-scoped media index engine')
+assert.match(dailyHotfix, /teleHotfixSnapshotBelongsToChat/, 'stale cross-chat file snapshots must be rejected')
+assert.match(dailyHotfix, /messageId/, 'preview requests must carry message identity for Telegram file rehydration')
+assert.match(dailyHotfix, /rescueDownloadedMarks\.delete/, 'unmark must clear persisted Downloaded labels')
+assert.match(html, /daily-driver-hotfix\.js/, 'acceptance hotfix runtime must be loaded')
+assert.match(html, /daily-driver-hotfix\.css/, 'acceptance hotfix stylesheet must be loaded')
