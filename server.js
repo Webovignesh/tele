@@ -703,26 +703,99 @@ function initClient (config) {
   client.on('update', (u) => {
     if (u._ === 'updateAuthorizationState') {
       handleAuthState(u.authorization_state)
-    } else if (u._ === 'updateFile') {
+      return
+    }
+    if (u._ === 'updateFile') {
       dm.onFileUpdate(u.file)
-    } else if (u._ === 'updateNewChat') {
+      return
+    }
+
+    if (u._ === 'updateNewMessage') {
+      emitRealtimeMessage(u.message).catch(() => {})
+      emitChatUpsert(u.message && u.message.chat_id).catch(() => {})
+      return
+    }
+    if (u._ === 'updateMessageContent' || u._ === 'updateMessageEdited') {
+      client.invoke({ _: 'getMessage', chat_id: u.chat_id, message_id: u.message_id })
+        .then(emitRealtimeMessage)
+        .catch(() => {})
+      return
+    }
+    if (u._ === 'updateMessageSendSucceeded') {
+      if (u.old_message_id && u.message && String(u.old_message_id) !== String(u.message.id)) {
+        sendAll({ type: 'event', event: { name: 'message-delete', chatId: u.message.chat_id, messageIds: [u.old_message_id] } })
+      }
+      emitRealtimeMessage(u.message).catch(() => {})
+      emitChatUpsert(u.message && u.message.chat_id).catch(() => {})
+      return
+    }
+    if (u._ === 'updateDeleteMessages') {
+      sendAll({
+        type: 'event',
+        event: {
+          name: 'message-delete',
+          chatId: u.chat_id,
+          messageIds: u.message_ids || [],
+          isPermanent: !!u.is_permanent,
+          fromCache: !!u.from_cache
+        }
+      })
+      emitChatUpsert(u.chat_id).catch(() => {})
+      return
+    }
+
+    if (u._ === 'updateNewChat') {
       serializeChatDetailed(u.chat).then(chat => {
         sendAll({ type: 'event', event: { name: 'chat-upsert', chat } })
       }).catch(() => {})
-    } else if (u._ === 'updateChatTitle' || u._ === 'updateChatPhoto' || u._ === 'updateChatLastMessage') {
-      client.invoke({ _: 'getChat', chat_id: u.chat_id }).then(serializeChatDetailed).then(chat => {
-        sendAll({ type: 'event', event: { name: 'chat-upsert', chat } })
-      }).catch(() => {})
-    } else if (u._ === 'updateChatPosition') {
+      return
+    }
+
+    if ([
+      'updateChatTitle',
+      'updateChatPhoto',
+      'updateChatLastMessage',
+      'updateChatReadInbox',
+      'updateChatReadOutbox',
+      'updateChatUnreadMentionCount',
+      'updateChatUnreadReactionCount',
+      'updateChatNotificationSettings',
+      'updateChatDraftMessage',
+      'updateChatMessageAutoDeleteTime',
+      'updateChatAvailableReactions'
+    ].includes(u._)) {
+      emitChatUpsert(u.chat_id).catch(() => {})
+      if (u._ === 'updateChatNotificationSettings' || u._ === 'updateChatMessageAutoDeleteTime') emitManagementRefresh(u.chat_id)
+      return
+    }
+
+    if (u._ === 'updateChatPosition') {
       const pos = u.position || {}
-      const isMain = !pos.chat_list || pos.chat_list._ === 'chatListMain'
+      const list = pos.list || pos.chat_list
+      const isMain = !list || list._ === 'chatListMain'
       if (isMain && String(pos.order || '0') === '0') {
         sendAll({ type: 'event', event: { name: 'chat-remove', chatId: u.chat_id } })
       } else {
-        client.invoke({ _: 'getChat', chat_id: u.chat_id }).then(serializeChatDetailed).then(chat => {
-          sendAll({ type: 'event', event: { name: 'chat-upsert', chat } })
-        }).catch(() => {})
+        emitChatUpsert(u.chat_id).catch(() => {})
       }
+      return
+    }
+
+    if (u._ === 'updateChatMember') {
+      emitChatUpsert(u.chat_id).catch(() => {})
+      emitManagementRefresh(u.chat_id)
+      return
+    }
+
+    if ([
+      'updateSupergroup',
+      'updateSupergroupFullInfo',
+      'updateBasicGroup',
+      'updateBasicGroupFullInfo',
+      'updateUser',
+      'updateUserFullInfo'
+    ].includes(u._)) {
+      emitManagementRefresh(null)
     }
   })
 }
@@ -783,12 +856,27 @@ function extractMedia (msg) {
   }
 }
 
+function mainChatOrder (chat) {
+  const positions = Array.isArray(chat && chat.positions) ? chat.positions : []
+  const main = positions.find(p => {
+    const list = p && (p.list || p.chat_list)
+    return !list || list._ === 'chatListMain'
+  })
+  return String((main && main.order) || chat.order || '0')
+}
+
+function compareChatOrderDesc (a, b) {
+  const aa = BigInt(String((a && a.order) || '0'))
+  const bb = BigInt(String((b && b.order) || '0'))
+  return aa === bb ? 0 : (aa < bb ? 1 : -1)
+}
+
 function serializeChat (chat) {
   const title = chat.title || 'Unknown'
   const info = {
     id: chat.id,
     title,
-    order: chat.order,
+    order: mainChatOrder(chat),
     unread: chat.unread_count || 0,
     lastMessage: chat.last_message ? chat.last_message.content : null,
     username: null,
@@ -839,13 +927,55 @@ async function loadChats () {
       return null
     }
   }))).filter(Boolean)
-  out.sort((a, b) => (a.order < b.order ? 1 : -1))
+  out.sort(compareChatOrderDesc)
   if (out.length) {
     lastChatOffset = { order: out[out.length - 1].order, chat_id: out[out.length - 1].id }
   } else {
     lastChatOffset = { order: '0', chat_id: 0 }
   }
   return out
+}
+
+async function serializeRealtimeMessage (m) {
+  if (!m) return null
+  const item = {
+    id: m.id,
+    date: m.date,
+    text: m.content && m.content._ === 'messageText' ? (m.content.text?.text || '') : null,
+    sender: await resolveSenderName(m),
+    outgoing: !!m.is_outgoing,
+    media: extractMedia(m)
+  }
+  if (item.media && item.media.file) {
+    const f = item.media.file
+    item.media.fileSize = f.size || f.expected_size || 0
+    item.media.fileId = f.id
+    if (item.media.thumb && item.media.thumb.photo && item.media.thumb.photo.id) {
+      item.media.thumbUrl = null
+      item.media.thumbFileId = item.media.thumb.photo.id
+    }
+  } else {
+    item.media = null
+  }
+  return item
+}
+
+async function emitRealtimeMessage (message) {
+  if (!message || message.chat_id == null) return
+  const serialized = await serializeRealtimeMessage(message)
+  if (!serialized) return
+  sendAll({ type: 'event', event: { name: 'message-upsert', chatId: message.chat_id, message: serialized } })
+}
+
+async function emitChatUpsert (chatId) {
+  if (chatId == null || !client) return
+  const chat = await client.invoke({ _: 'getChat', chat_id: chatId }).catch(() => null)
+  if (!chat) return
+  sendAll({ type: 'event', event: { name: 'chat-upsert', chat: await serializeChatDetailed(chat) } })
+}
+
+function emitManagementRefresh (chatId = null) {
+  sendAll({ type: 'event', event: { name: 'management-refresh', chatId } })
 }
 
 async function loadMessages (chatId, fromMessageId, limit) {
@@ -927,6 +1057,32 @@ function ensureManagementReady () {
 
 function normalizeManagedUsername (value) {
   return String(value || '').trim().replace(/^@/, '')
+}
+
+async function checkManagedUsername (chatId, value) {
+  ensureManagementReady()
+  const username = normalizeManagedUsername(value)
+  if (!username) return { username, available: false, state: 'invalid', message: 'Enter a username' }
+  const result = await client.invoke({
+    _: 'checkChatUsername',
+    chat_id: chatId == null ? 0 : chatId,
+    username
+  })
+  const type = result && result._
+  const messages = {
+    checkChatUsernameResultOk: 'Available',
+    checkChatUsernameResultUsernameInvalid: 'Username format is invalid',
+    checkChatUsernameResultUsernameOccupied: 'Already taken',
+    checkChatUsernameResultPublicChatsTooMany: 'Your account has reached the public chat limit',
+    checkChatUsernameResultPublicGroupsUnavailable: 'Public groups are unavailable for this account',
+    checkChatUsernameResultUsernamePurchasable: 'This username is purchasable on Fragment'
+  }
+  return {
+    username,
+    available: type === 'checkChatUsernameResultOk',
+    state: type || 'unknown',
+    message: messages[type] || 'Telegram rejected this username'
+  }
 }
 
 function managedStatusLabel (status) {
@@ -1054,6 +1210,9 @@ async function createManagedChat (payload) {
 
   const warnings = []
   if (username) {
+    const availability = await checkManagedUsername(0, username)
+    if (!availability.available) throw new Error(availability.message)
+
     try {
       await client.invoke({ _: 'setSupergroupUsername', supergroup_id: chat.type.supergroup_id, username })
     } catch (e) {
@@ -1116,6 +1275,10 @@ async function updateManagedChat (payload) {
   if (payload.username !== undefined) {
     if (!info.permissions.canEditUsername || !info.internal.supergroupId) throw new Error('Only the owner can change the public username')
     const username = normalizeManagedUsername(payload.username)
+    if (username && username !== (info.chat.username || '')) {
+      const availability = await checkManagedUsername(chatId, username)
+      if (!availability.available) throw new Error(availability.message)
+    }
     await client.invoke({ _: 'setSupergroupUsername', supergroup_id: info.internal.supergroupId, username })
   }
 
@@ -1284,9 +1447,16 @@ app.post('/api/chat-photo/:chatId', express.raw({ type: 'application/octet-strea
     const info = await getManagedChatInfo(chatId)
     if (!info.permissions.canSetPhoto) return res.status(403).json({ error: 'You do not have permission to change this chat photo' })
     const name = String(req.headers['x-file-name'] || 'photo.jpg')
-    if (!/\.jpe?g$/i.test(name)) return res.status(400).json({ error: 'Chat photos must be JPEG (.jpg/.jpeg)' })
+    const lower = name.toLowerCase()
+    const extension = lower.endsWith('.png') ? '.png' : (/\.jpe?g$/.test(lower) ? '.jpg' : null)
+    if (!extension) return res.status(400).json({ error: 'Chat photos must be PNG or JPEG' })
     if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'No image uploaded' })
-    tempPath = path.join(MANAGEMENT_UPLOAD_DIR, `${crypto.randomUUID()}.jpg`)
+    const isPng = req.body.length >= 8 && req.body.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    const isJpeg = req.body.length >= 3 && req.body[0] === 0xff && req.body[1] === 0xd8 && req.body[2] === 0xff
+    if ((extension === '.png' && !isPng) || (extension === '.jpg' && !isJpeg)) {
+      return res.status(400).json({ error: 'The uploaded file does not match its PNG/JPEG format' })
+    }
+    tempPath = path.join(MANAGEMENT_UPLOAD_DIR, `${crypto.randomUUID()}${extension}`)
     await fs.promises.writeFile(tempPath, req.body)
     await client.invoke({
       _: 'setChatPhoto',
@@ -1397,6 +1567,8 @@ wss.on('connection', (ws) => {
 
         case 'get-chat-management':
           return respond(ws, id, true, await getManagedChatInfo(payload.chatId))
+        case 'check-managed-username':
+          return respond(ws, id, true, await checkManagedUsername(payload.chatId == null ? 0 : payload.chatId, payload.username))
         case 'create-managed-chat':
           return respond(ws, id, true, await createManagedChat(payload || {}))
         case 'update-managed-chat':

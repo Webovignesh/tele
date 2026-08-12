@@ -12,7 +12,10 @@
     info: null,
     createStep: 1,
     createDraft: defaultCreateDraft(),
-    memberLoading: false
+    memberLoading: false,
+    usernameCheckSeq: 0,
+    usernameCheck: null,
+    photoPreviewUrl: null
   }
 
   function loadPref (key) {
@@ -94,6 +97,46 @@
 
   function normalizeUsername (value) {
     return String(value || '').trim().replace(/^@/, '')
+  }
+
+  function usernamePresentation (kind) {
+    return kind === 'channel'
+      ? { label: 'Public link', prefix: 't.me/', placeholder: 'channelname' }
+      : { label: 'Public username', prefix: '@', placeholder: 'groupname' }
+  }
+
+  function setUsernameStatus (node, state, message) {
+    if (!node) return
+    node.className = `mg-username-status ${state || 'idle'}`
+    node.textContent = message || ''
+  }
+
+  async function checkUsernameAvailability (username, chatId, statusNode) {
+    const value = normalizeUsername(username)
+    const seq = ++ui.usernameCheckSeq
+    if (!value) {
+      ui.usernameCheck = { username: value, available: false, state: 'idle', message: 'Enter a username to check availability.' }
+      setUsernameStatus(statusNode, 'idle', ui.usernameCheck.message)
+      return ui.usernameCheck
+    }
+    if (!/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(value)) {
+      ui.usernameCheck = { username: value, available: false, state: 'invalid', message: 'Use 4–32 letters, numbers or underscores; start with a letter.' }
+      setUsernameStatus(statusNode, 'invalid', ui.usernameCheck.message)
+      return ui.usernameCheck
+    }
+    setUsernameStatus(statusNode, 'checking', 'Checking with Telegram…')
+    try {
+      const result = await request('check-managed-username', { username: value, chatId: chatId == null ? 0 : chatId })
+      if (seq !== ui.usernameCheckSeq) return result
+      ui.usernameCheck = result
+      setUsernameStatus(statusNode, result.available ? 'available' : 'unavailable', result.message)
+      return result
+    } catch (e) {
+      if (seq !== ui.usernameCheckSeq) return { available: false, message: e.message }
+      ui.usernameCheck = { username: value, available: false, state: 'error', message: e.message }
+      setUsernameStatus(statusNode, 'unavailable', e.message)
+      return ui.usernameCheck
+    }
   }
 
   function parseMemberUsernames (value) {
@@ -242,7 +285,7 @@
     }
   }
 
-  function validateCreateStep () {
+  async function validateCreateStep () {
     captureCreateStep()
     const draft = ui.createDraft
     if (ui.createStep === 2) {
@@ -257,7 +300,14 @@
     }
     if (ui.createStep === 3 && draft.visibility === 'public') {
       if (!draft.username || !/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(draft.username)) {
-        toast('Enter a valid public @username', 'error')
+        toast('Enter a valid public username/link', 'error')
+        return false
+      }
+      const check = ui.usernameCheck && ui.usernameCheck.username === draft.username
+        ? ui.usernameCheck
+        : await checkUsernameAvailability(draft.username, 0, document.querySelector('#mg-create-username-status'))
+      if (!check || !check.available) {
+        toast((check && check.message) || 'That username is not available', 'error')
         return false
       }
     }
@@ -265,13 +315,19 @@
   }
 
   async function onCreateNext () {
-    if (!validateCreateStep()) return
-    if (ui.createStep < 4) {
-      ui.createStep++
-      renderCreateWizard()
-      return
+    const next = document.querySelector('#mg-create-next')
+    if (next) next.disabled = true
+    try {
+      if (!await validateCreateStep()) return
+      if (ui.createStep < 4) {
+        ui.createStep++
+        renderCreateWizard()
+        return
+      }
+      await createManagedChat()
+    } finally {
+      if (next && ui.createStep !== 4) next.disabled = false
     }
-    await createManagedChat()
   }
 
   function renderCreateWizard () {
@@ -345,12 +401,16 @@
   }
 
   function renderCreateAccess (body) {
-    body.appendChild(elem('p', 'mg-step-copy', 'Private chats use invite links. Public chats expose a Telegram @username.'))
+    const presentation = usernamePresentation(ui.createDraft.type)
+    body.appendChild(elem('p', 'mg-step-copy', ui.createDraft.type === 'channel'
+      ? 'Private channels use an invite link. Public channels get a shareable t.me link.'
+      : 'Private groups use invite links. Public groups expose a Telegram @username.'))
     const visibility = elem('div', 'mg-segmented')
     for (const [value, label] of [['private', 'Private'], ['public', 'Public']]) {
       const b = button(label, ui.createDraft.visibility === value ? 'active' : '', () => {
         captureCreateStep()
         ui.createDraft.visibility = value
+        ui.usernameCheck = null
         if (value === 'private') ui.createDraft.username = ''
         renderCreateWizard()
       })
@@ -359,11 +419,25 @@
     body.appendChild(labelled('Visibility', visibility))
 
     if (ui.createDraft.visibility === 'public') {
-      const username = textInput(ui.createDraft.username, 'username')
+      const username = textInput(ui.createDraft.username, presentation.placeholder)
       username.id = 'mg-create-username'
       const prefix = elem('div', 'mg-username-field')
-      prefix.append(elem('span', '', '@'), username)
-      body.appendChild(labelled('Public username', prefix))
+      prefix.append(elem('span', 'mg-username-prefix', presentation.prefix), username)
+      const field = labelled(presentation.label, prefix)
+      const status = elem('div', 'mg-username-status idle', 'Enter a username to check availability.')
+      status.id = 'mg-create-username-status'
+      field.appendChild(status)
+      body.appendChild(field)
+
+      let timer = null
+      username.addEventListener('input', () => {
+        ui.createDraft.username = normalizeUsername(username.value)
+        ui.usernameCheck = null
+        clearTimeout(timer)
+        setUsernameStatus(status, 'checking', ui.createDraft.username ? 'Waiting to check…' : 'Enter a username to check availability.')
+        timer = setTimeout(() => checkUsernameAvailability(ui.createDraft.username, 0, status), 320)
+      })
+      if (ui.createDraft.username) setTimeout(() => checkUsernameAvailability(ui.createDraft.username, 0, status), 0)
     }
 
     const members = textarea(ui.createDraft.members, '@alice, @bob (optional)')
@@ -379,7 +453,7 @@
     const rows = [
       ['Type', d.type === 'channel' ? 'Channel' : (d.forum ? 'Forum group' : 'Group')],
       ['Title', d.title],
-      ['Visibility', d.visibility === 'public' ? `Public · @${d.username}` : 'Private'],
+      ['Visibility', d.visibility === 'public' ? (d.type === 'channel' ? `Public · t.me/${d.username}` : `Public · @${d.username}`) : 'Private'],
       ['Auto-delete', formatAutoDelete(d.autoDeleteTime)],
       ['Initial members', String(parseMemberUsernames(d.members).length)]
     ]
@@ -467,7 +541,7 @@
     avatar.style.background = avatarColor(chat.title)
     if (chat.photoFileId) loadInfoAvatar(chat, avatar)
     const titleBox = elem('div', 'mg-info-title')
-    titleBox.append(elem('h3', '', chat.title), elem('span', 'muted', chat.username ? `@${chat.username}` : formatKind(chat.kind)))
+    titleBox.append(elem('h3', '', chat.title), elem('span', 'muted', chat.username ? (chat.kind === 'channel' ? `t.me/${chat.username}` : `@${chat.username}`) : formatKind(chat.kind)))
     hero.append(avatar, titleBox)
     panel.appendChild(hero)
 
@@ -534,17 +608,48 @@
     box.append(labelled('Title', title), labelled('Description', description), labelled('Auto-delete', autoDelete))
 
     let username = null
+    let usernameStatus = null
     if (permissions.canEditUsername) {
-      username = textInput(chat.username || '', 'username or blank for private')
+      const presentation = usernamePresentation(chat.kind)
+      username = textInput(chat.username || '', presentation.placeholder)
       const prefix = elem('div', 'mg-username-field')
-      prefix.append(elem('span', '', '@'), username)
-      box.appendChild(labelled('Public username', prefix))
+      prefix.append(elem('span', 'mg-username-prefix', presentation.prefix), username)
+      const field = labelled(presentation.label, prefix)
+      usernameStatus = elem('div', 'mg-username-status idle', chat.username ? 'Current public address' : 'Leave blank to keep this chat private.')
+      field.appendChild(usernameStatus)
+      box.appendChild(field)
+      let usernameTimer = null
+      username.addEventListener('input', () => {
+        clearTimeout(usernameTimer)
+        const nextValue = normalizeUsername(username.value)
+        if (!nextValue) {
+          ui.usernameCheck = null
+          setUsernameStatus(usernameStatus, 'idle', 'Blank makes the chat private when Telegram permits it.')
+          return
+        }
+        if (nextValue === (chat.username || '')) {
+          ui.usernameCheck = { username: nextValue, available: true, state: 'current', message: 'Current public address' }
+          setUsernameStatus(usernameStatus, 'available', 'Current public address')
+          return
+        }
+        ui.usernameCheck = null
+        usernameTimer = setTimeout(() => checkUsernameAvailability(nextValue, chat.id, usernameStatus), 320)
+      })
     }
 
     const actions = elem('div', 'mg-row')
     const save = button('Save changes', '', async () => {
       save.disabled = true
       try {
+        if (username) {
+          const nextUsername = normalizeUsername(username.value)
+          if (nextUsername && nextUsername !== (chat.username || '')) {
+            const check = ui.usernameCheck && ui.usernameCheck.username === nextUsername
+              ? ui.usernameCheck
+              : await checkUsernameAvailability(nextUsername, chat.id, usernameStatus)
+            if (!check || !check.available) throw new Error((check && check.message) || 'That public address is not available')
+          }
+        }
         await request('update-managed-chat', {
           chatId: chat.id,
           title: title.value.trim(),
@@ -561,14 +666,26 @@
     box.appendChild(actions)
 
     if (permissions.canSetPhoto) {
-      const photoTools = elem('div', 'mg-photo-tools')
-      const file = elem('input', 'mg-file-input')
+      const photoCard = elem('div', 'mg-photo-card')
+      const drop = elem('div', 'mg-photo-drop')
+      const preview = elem('div', 'mg-photo-preview', '🖼')
+      const copy = elem('div', 'mg-photo-copy')
+      const photoTitle = elem('strong', '', 'PNG or JPEG')
+      const photoHint = elem('span', 'muted', 'Drop an image here or choose a file. Max 10 MB.')
+      copy.append(photoTitle, photoHint)
+      drop.append(preview, copy)
+
+      const file = elem('input', 'mg-file-input-hidden')
       file.type = 'file'
-      file.accept = '.jpg,.jpeg,image/jpeg'
-      const upload = button('Set photo', 'ghost', async () => {
+      file.accept = '.jpg,.jpeg,.png,image/jpeg,image/png'
+      const controls = elem('div', 'mg-photo-actions')
+      const choose = button('Choose image', 'ghost', () => file.click())
+      const upload = button('Upload photo', '', async () => {
         const selected = file.files && file.files[0]
-        if (!selected) return toast('Choose a JPEG image first', 'error')
+        if (!selected) return toast('Choose a PNG or JPEG image first', 'error')
+        if (selected.size > 10 * 1024 * 1024) return toast('Image must be 10 MB or smaller', 'error')
         upload.disabled = true
+        upload.textContent = 'Uploading…'
         try {
           const res = await fetch(`/api/chat-photo/${encodeURIComponent(chat.id)}`, {
             method: 'POST',
@@ -580,9 +697,12 @@
           toastOk('Chat photo updated')
           await loadChats().catch(() => {})
           await refreshChatInfo()
-        } catch (e) { toast(e.message, 'error') } finally { upload.disabled = false }
+        } catch (e) { toast(e.message, 'error') } finally {
+          upload.disabled = false
+          upload.textContent = 'Upload photo'
+        }
       })
-      const remove = button('Remove photo', 'ghost danger-outline', async () => {
+      const remove = button('Remove', 'ghost danger-outline', async () => {
         if (!await confirmAction('Remove chat photo?', 'The current chat photo will be removed.', 'Remove')) return
         try {
           await request('remove-managed-photo', { chatId: chat.id })
@@ -591,8 +711,40 @@
           await refreshChatInfo()
         } catch (e) { toast(e.message, 'error') }
       })
-      photoTools.append(file, upload, remove)
-      box.appendChild(labelled('Chat photo', photoTools))
+      controls.append(choose, upload, remove)
+      photoCard.append(drop, file, controls)
+
+      const applyFile = selected => {
+        if (!selected) return
+        const valid = /\.(png|jpe?g)$/i.test(selected.name) || /^image\/(png|jpeg)$/i.test(selected.type || '')
+        if (!valid) {
+          toast('Choose a PNG or JPEG image', 'error')
+          file.value = ''
+          return
+        }
+        const dt = new DataTransfer()
+        dt.items.add(selected)
+        file.files = dt.files
+        if (ui.photoPreviewUrl) URL.revokeObjectURL(ui.photoPreviewUrl)
+        ui.photoPreviewUrl = URL.createObjectURL(selected)
+        preview.textContent = ''
+        const image = elem('img', '')
+        image.src = ui.photoPreviewUrl
+        image.alt = ''
+        preview.appendChild(image)
+        photoTitle.textContent = selected.name
+        photoHint.textContent = `${Math.max(1, Math.round(selected.size / 1024))} KB · ready to upload`
+      }
+      file.addEventListener('change', () => applyFile(file.files && file.files[0]))
+      drop.addEventListener('click', () => file.click())
+      drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('dragging') })
+      drop.addEventListener('dragleave', () => drop.classList.remove('dragging'))
+      drop.addEventListener('drop', e => {
+        e.preventDefault()
+        drop.classList.remove('dragging')
+        applyFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0])
+      })
+      box.appendChild(labelled('Chat photo', photoCard))
     }
     return box
   }
@@ -856,6 +1008,17 @@
       wrapped.__managementWrapped = true
       removeChat = wrapped
     }
+  }
+
+  const managementBaseHandleEvent = handleEvent
+  handleEvent = function managementRealtimeHandleEvent (ev) {
+    if (ev && ev.name === 'management-refresh') {
+      if (ui.drawerMode === 'info' && state.activeChatId != null && (ev.chatId == null || String(ev.chatId) === String(state.activeChatId))) {
+        setTimeout(refreshChatInfo, 80)
+      }
+      return
+    }
+    return managementBaseHandleEvent(ev)
   }
 
   mountDrawer()

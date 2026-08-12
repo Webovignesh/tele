@@ -372,7 +372,17 @@ function rescueLoadAvatar (chat, holder) {
   }).catch(() => { chat._avatarPending = false })
 }
 
+function rescueSortChatsRecentFirst () {
+  state.chats.sort((a, b) => {
+    const aa = BigInt(String((a && a.order) || '0'))
+    const bb = BigInt(String((b && b.order) || '0'))
+    if (aa !== bb) return aa < bb ? 1 : -1
+    return String(a && a.title || '').localeCompare(String(b && b.title || ''))
+  })
+}
+
 renderChats = function rescueRenderChats () {
+  rescueSortChatsRecentFirst()
   const list = $('#chat-list')
   list.innerHTML = ''
   const q = $('#chat-search').value.toLowerCase()
@@ -415,6 +425,7 @@ loadChats = async function rescueLoadChats () {
     const data = await request('get-chats')
     const previousById = new Map(state.chats.map(c => [rescueChatKey(c.id), c]))
     state.chats = (data.chats || []).map(c => ({ ...previousById.get(rescueChatKey(c.id)), ...c }))
+    rescueSortChatsRecentFirst()
     state.chats.forEach(c => {
       if (c.lastMessage && c.lastMessage._ === 'messageText') c.lastText = c.lastMessage.text?.text || ''
     })
@@ -483,3 +494,108 @@ if (rescueSelectionDock && rescueChatPane && rescueSelectionDock.parentElement !
   rescueChatPane.appendChild(rescueSelectionDock)
 }
 
+/* Realtime message/cache reconciliation. */
+function rescueRecountFileTypes (items) {
+  const counts = { document: 0, photo: 0, video: 0, gif: 0, audio: 0, voice: 0, video_note: 0, sticker: 0 }
+  for (const item of items || []) if (item && item.type && Object.prototype.hasOwnProperty.call(counts, item.type)) counts[item.type]++
+  return counts
+}
+
+function rescuePatchCompleteFileCache (chatKey, message) {
+  const snapshot = rescueFileCache.get(chatKey)
+  if (!snapshot || !Array.isArray(snapshot.items)) return
+  const id = String(message.id)
+  const index = snapshot.items.findIndex(item => String(item.messageId) === id)
+  if (message.media) {
+    const next = { ...message.media, messageId: message.id, chatId: message.media.chatId || Number(chatKey) || chatKey }
+    if (index >= 0) snapshot.items[index] = next
+    else snapshot.items.unshift(next)
+  } else if (index >= 0) {
+    snapshot.items.splice(index, 1)
+  }
+  snapshot.items.sort((a, b) => {
+    const aa = BigInt(String(a.messageId || 0))
+    const bb = BigInt(String(b.messageId || 0))
+    return aa === bb ? 0 : (aa < bb ? 1 : -1)
+  })
+  snapshot.found = snapshot.items.length
+  snapshot.typeCounts = rescueRecountFileTypes(snapshot.items)
+  snapshot.savedAt = Date.now()
+}
+
+function rescueDeleteFromCompleteFileCache (chatKey, messageIds) {
+  const snapshot = rescueFileCache.get(chatKey)
+  if (!snapshot || !Array.isArray(snapshot.items)) return
+  const ids = new Set((messageIds || []).map(String))
+  snapshot.items = snapshot.items.filter(item => !ids.has(String(item.messageId)))
+  snapshot.found = snapshot.items.length
+  snapshot.typeCounts = rescueRecountFileTypes(snapshot.items)
+  snapshot.savedAt = Date.now()
+}
+
+function rescueUpsertCachedMessage (chatKey, message) {
+  const cached = rescueChatCache.get(chatKey)
+  if (!cached) return
+  const byId = new Map((cached.messages || []).map(m => [String(m.id), m]))
+  byId.set(String(message.id), { ...message, key: `${chatKey}:${message.id}` })
+  cached.messages = [...byId.values()]
+    .sort((a, b) => {
+      const aa = BigInt(String(a.id || 0))
+      const bb = BigInt(String(b.id || 0))
+      return aa === bb ? 0 : (aa < bb ? 1 : -1)
+    })
+    .slice(0, rescueMessageLimit)
+  cached.savedAt = Date.now()
+}
+
+function rescueRealtimeMessageUpsert (chatId, message) {
+  if (chatId == null || !message || message.id == null) return
+  const chatKey = rescueChatKey(chatId)
+  rescueUpsertCachedMessage(chatKey, message)
+  rescuePatchCompleteFileCache(chatKey, message)
+  if (state.activeChatId == null || rescueChatKey(state.activeChatId) !== chatKey) return
+
+  const panel = $('#messages')
+  const distanceFromBottom = panel ? panel.scrollHeight - panel.scrollTop - panel.clientHeight : Infinity
+  const followNewest = state.view === 'messages' && distanceFromBottom < 140
+  rescueMergeMessages(chatId, [message])
+  rescueSaveActiveChat()
+  rescueRenderCurrent()
+  if (followNewest && panel) requestAnimationFrame(() => { panel.scrollTop = panel.scrollHeight })
+}
+
+function rescueRealtimeMessageDelete (chatId, messageIds) {
+  if (chatId == null) return
+  const chatKey = rescueChatKey(chatId)
+  const ids = new Set((messageIds || []).map(String))
+  const cached = rescueChatCache.get(chatKey)
+  if (cached) {
+    cached.messages = (cached.messages || []).filter(m => !ids.has(String(m.id)))
+    cached.savedAt = Date.now()
+  }
+  rescueDeleteFromCompleteFileCache(chatKey, messageIds)
+  if (state.activeChatId == null || rescueChatKey(state.activeChatId) !== chatKey) return
+
+  state.messages = state.messages.filter(m => !ids.has(String(m.id)))
+  for (const id of ids) {
+    const key = `${chatKey}:${id}`
+    state.selection.delete(key)
+    state.selectedMessages.delete(key)
+  }
+  rescueSaveActiveChat()
+  updateSelectionBar()
+  rescueRenderCurrent()
+}
+
+const rescueBaseHandleEvent = handleEvent
+handleEvent = function rescueRealtimeHandleEvent (ev) {
+  if (ev && ev.name === 'message-upsert') {
+    rescueRealtimeMessageUpsert(ev.chatId, ev.message)
+    return
+  }
+  if (ev && ev.name === 'message-delete') {
+    rescueRealtimeMessageDelete(ev.chatId, ev.messageIds)
+    return
+  }
+  return rescueBaseHandleEvent(ev)
+}
