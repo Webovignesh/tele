@@ -1458,12 +1458,28 @@ async function deleteManagedMessage (chatId, messageId, revoke) {
 
 async function sendManagedAttachmentMessage (chatId, filePath, caption, replyToMessageId) {
   ensureManagementReady()
+  const absolutePath = path.resolve(String(filePath || ''))
+  const stat = await fs.promises.stat(absolutePath).catch(() => null)
+  if (!stat || !stat.isFile() || stat.size <= 0) throw new Error('The attachment could not be staged for Telegram')
+
   let replyTo = null
   if (replyToMessageId) {
     const actions = await getManagedMessageActions(chatId, replyToMessageId)
     if (!actions.canReply) throw new Error('Telegram does not allow replying to this message')
     replyTo = { _: 'inputMessageReplyToMessage', message_id: replyToMessageId, quote: null, checklist_task_id: 0 }
   }
+
+  // Register the local file with TDLib first. Sending by inputFileId is more
+  // reliable on Windows than passing the local InputFile through nested message
+  // content in one call, and gives us a concrete file id to validate.
+  const uploaded = await client.invoke({
+    _: 'preliminaryUploadFile',
+    file: { _: 'inputFileLocal', path: absolutePath },
+    file_type: { _: 'fileTypeDocument' },
+    priority: 32
+  })
+  if (!uploaded || !uploaded.id) throw new Error('Telegram did not accept the staged attachment')
+
   const message = await client.invoke({
     _: 'sendMessage',
     chat_id: chatId,
@@ -1473,7 +1489,7 @@ async function sendManagedAttachmentMessage (chatId, filePath, caption, replyToM
     reply_markup: null,
     input_message_content: {
       _: 'inputMessageDocument',
-      document: { _: 'inputFileLocal', path: filePath },
+      document: { _: 'inputFileId', id: uploaded.id },
       thumbnail: null,
       disable_content_type_detection: false,
       caption: { _: 'formattedText', text: String(caption || '').slice(0, 1024), entities: [] }

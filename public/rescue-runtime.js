@@ -42,6 +42,14 @@ function rescueRememberView (view) {
 
 function rescueChatKey (chatId) { return String(chatId) }
 
+function rescueMarkActiveChat (chatId) {
+  const wanted = rescueChatKey(chatId)
+  document.querySelectorAll('#chat-list .chat-item.active').forEach(node => node.classList.remove('active'))
+  const next = [...document.querySelectorAll('#chat-list .chat-item')]
+    .find(node => rescueChatKey(node.dataset.chatId) === wanted)
+  if (next) next.classList.add('active')
+}
+
 function rescueTrimCache () {
   while (rescueChatCache.size > rescueCacheLimit) {
     rescueChatCache.delete(rescueChatCache.keys().next().value)
@@ -265,11 +273,10 @@ openChat = async function rescueOpenChat (chatId) {
   $('#file-filter').value = 'all'
   $('#file-sort').value = 'newest'
   updateSelectionBar()
-  renderChats()
+  rescueMarkActiveChat(chatId)
 
   const chat = state.chats.find(c => rescueChatKey(c.id) === rescueChatKey(chatId))
   $('#chat-title').textContent = chat ? chat.title : 'Chat'
-  $('#messages').innerHTML = ''
   $('#media-grid').innerHTML = ''
 
   const cached = rescueChatCache.get(rescueChatKey(chatId))
@@ -282,6 +289,7 @@ openChat = async function rescueOpenChat (chatId) {
   } else {
     state.messages = []
     state.hasMore = true
+    $('#messages').innerHTML = ''
   }
 
   const preferredView = rescuePreferredView()
@@ -304,7 +312,6 @@ openChat = async function rescueOpenChat (chatId) {
       setLoadState('Loading all files…')
     }
   } else {
-    renderFiles()
     setLoadState(cached ? `Cached ${state.messages.length} messages · refreshing…` : 'loading')
   }
   rescueUpdateMediaLabel()
@@ -312,6 +319,7 @@ openChat = async function rescueOpenChat (chatId) {
   // Always refresh the newest page, but never blank already-cached rows while waiting.
   const generation = rescueOpenGeneration
   const requestKey = `${rescueChatKey(chatId)}:latest:${generation}`
+  await new Promise(resolve => requestAnimationFrame(() => resolve()))
   const work = (async () => {
     try {
       const data = await request('get-messages', { chatId, fromMessageId: 0, limit: 100 })

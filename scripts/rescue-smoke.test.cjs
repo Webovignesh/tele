@@ -35,6 +35,7 @@ assert.match(html, /management\.js/, 'management runtime must be loaded')
 
 const rescueRuntime = fs.readFileSync('public/rescue-runtime.js', 'utf8')
 const managementCss = fs.readFileSync('public/management.css', 'utf8')
+const modernCss = fs.readFileSync('public/modern.css', 'utf8')
 assert.match(server, /updateNewMessage/, 'new Telegram messages must be pushed in realtime')
 assert.match(server, /updateDeleteMessages/, 'message deletions must be pushed in realtime')
 assert.match(server, /message-upsert/, 'server must publish realtime message upserts')
@@ -61,3 +62,9 @@ assert.match(rescueRuntime, /tele-compose-attach/, 'chat composer must expose fi
 assert.match(rescueRuntime, /serviceWorker/, 'desktop notifications must use service-worker delivery when available')
 assert.match(management, /Test/, 'notification settings must expose a test action')
 assert.doesNotMatch(management, /check-managed-username/, 'channel/group username management must be removed from the UI')
+
+assert.match(server, /preliminaryUploadFile/, 'attachments must be registered with TDLib before send')
+assert.match(server, /inputFileId/, 'attachments must send using a validated TDLib file id')
+assert.match(rescueRuntime, /rescueMarkActiveChat/, 'chat switching must update active state without rebuilding the sidebar')
+assert.match(html, /modern\.css/, 'modern desktop skin must be loaded')
+assert.match(modernCss, /Tele modern desktop skin/, 'modern UI skin must exist')
