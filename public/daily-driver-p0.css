@@ -1,8 +1,12 @@
 /* Daily-driver P0 visual cleanup. Loaded last on purpose. */
 
 /* ---------- Downloads drawer ---------- */
+.app {
+  grid-template-columns: 316px minmax(0, 1fr) 380px !important;
+}
 .downloads {
-  min-width: 330px !important;
+  min-width: 0 !important;
+  width: auto !important;
 }
 .downloads .dl-controls {
   margin: 18px 16px 16px !important;
@@ -20,10 +24,12 @@
   letter-spacing: .08em !important;
   opacity: .9;
 }
+/* Folder path gets a full row. The Set button deliberately sits below it so a
+ * normal Windows path is readable instead of being crushed into ~100px. */
 .downloads .dl-controls .conc:first-of-type > .row {
   display: grid !important;
-  grid-template-columns: minmax(0, 1fr) auto !important;
-  gap: 10px !important;
+  grid-template-columns: 1fr !important;
+  gap: 9px !important;
   width: 100%;
 }
 .downloads #dl-dir {
@@ -32,11 +38,13 @@
   height: 42px !important;
   padding: 0 12px !important;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace !important;
+  font-size: 11px !important;
   text-overflow: ellipsis;
 }
 .downloads #set-dir {
-  min-width: 58px;
-  height: 42px;
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 38px;
   padding-inline: 13px !important;
 }
 .downloads .dir-current {
@@ -57,7 +65,7 @@
 }
 .downloads .dl-controls .conc:nth-of-type(2) > .row {
   display: grid !important;
-  grid-template-columns: minmax(110px, 1fr) 34px !important;
+  grid-template-columns: minmax(110px, 1fr) 40px !important;
   gap: 12px !important;
   align-items: center !important;
 }
@@ -68,8 +76,8 @@
 .downloads #concurrency-val {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 36px;
   border-radius: 9px;
   background: #0b141e;
   border: 1px solid var(--border);
@@ -96,7 +104,7 @@
 }
 
 /* ---------- Search stays visually identical while its event handler is replaced ---------- */
-#chat-search[data-tele-p0-bound="1"] {
+#chat-search[data-tele-p0-v2="1"] {
   transition: border-color .12s ease, box-shadow .12s ease, background .12s ease;
 }
 
@@ -279,7 +287,10 @@
   scrollbar-gutter: stable;
 }
 @media (max-width: 1360px) {
-  .downloads { min-width: 300px !important; }
+  .app { grid-template-columns: 290px minmax(0, 1fr) 330px !important; }
   .downloads .dl-controls { margin-inline: 10px !important; padding: 14px !important; }
   .downloads .dl-controls > .row { grid-template-columns: 1fr !important; }
+}
+@media (max-width: 1120px) {
+  .app { grid-template-columns: 270px minmax(0, 1fr) 300px !important; }
 }
