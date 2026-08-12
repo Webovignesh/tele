@@ -6,11 +6,26 @@
  */
 
 const rescueChatCache = new Map()
+const rescueFileCache = new Map()
+const rescueFileInflight = new Map()
 const rescueInflight = new Map()
 const rescueCacheLimit = 24
 const rescueMessageLimit = 400
 let rescueOpenGeneration = 0
 let rescueSyncTimer = null
+
+function rescuePreferredView () {
+  try {
+    const saved = localStorage.getItem('tele-active-tab')
+    return saved === 'files' ? 'files' : 'messages'
+  } catch {
+    return 'messages'
+  }
+}
+
+function rescueRememberView (view) {
+  try { localStorage.setItem('tele-active-tab', view) } catch {}
+}
 
 function rescueChatKey (chatId) { return String(chatId) }
 
@@ -52,6 +67,15 @@ function rescueUpdateMediaLabel () {
 // initiated by explicit user actions (Download all / Search whole chat).
 updateMediaCountLabel = rescueUpdateMediaLabel
 
+const rescueBaseSetView = setView
+setView = function rescueSetView (view) {
+  rescueRememberView(view)
+  rescueBaseSetView(view)
+  if (view === 'files' && state.activeChatId != null) {
+    rescueEnsureAllFiles(state.activeChatId)
+  }
+}
+
 function rescueMergeMessages (chatId, incoming) {
   const byKey = new Map()
   for (const m of state.messages) {
@@ -72,9 +96,85 @@ function rescueMergeMessages (chatId, incoming) {
 }
 
 function rescueRenderCurrent () {
-  if (state.view === 'messages') renderMessagesList()
-  else renderFiles()
+  if (state.view === 'messages') {
+    renderMessagesList()
+  } else {
+    const key = state.activeChatId == null ? null : rescueChatKey(state.activeChatId)
+    if (!key || !rescueFileInflight.has(key)) renderFiles()
+  }
   rescueUpdateMediaLabel()
+}
+
+function rescueApplyCompleteFiles (chatId, snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.items)) return
+  const keep = state.messages.filter(m => !m.media)
+  const mediaMessages = snapshot.items.map(it => ({
+    ...it,
+    id: it.messageId,
+    key: `${chatId}:${it.messageId}`,
+    media: it
+  }))
+  state.messages = [...keep, ...mediaMessages].sort((a, b) => {
+    const aa = BigInt(String(a.id || 0))
+    const bb = BigInt(String(b.id || 0))
+    return aa === bb ? 0 : (aa < bb ? 1 : -1)
+  })
+  state.mediaCount = snapshot.found == null ? snapshot.items.length : snapshot.found
+  state.typeCounts = snapshot.typeCounts || null
+  state.hasMore = false
+}
+
+async function rescueEnsureAllFiles (chatId) {
+  if (chatId == null) return
+  const key = rescueChatKey(chatId)
+  const cached = rescueFileCache.get(key)
+  if (cached) {
+    if (rescueChatKey(state.activeChatId) !== key) return
+    rescueApplyCompleteFiles(chatId, cached)
+    renderFiles()
+    rescueUpdateMediaLabel()
+    setLoadState(`Loaded all ${cached.items.length} files`)
+    return
+  }
+  if (rescueFileInflight.has(key)) return rescueFileInflight.get(key)
+
+  if (rescueChatKey(state.activeChatId) === key) {
+    $('#media-grid').innerHTML = ''
+    setLoadState('Loading all files…')
+  }
+
+  const generation = rescueOpenGeneration
+  const work = (async () => {
+    try {
+      let data = await request('scan-media', { chatId, includeItems: true })
+      while (data && data.busy) {
+        await new Promise(resolve => setTimeout(resolve, 750))
+        if (rescueChatKey(state.activeChatId) !== key || generation !== rescueOpenGeneration) return
+        data = await request('scan-media', { chatId, includeItems: true })
+      }
+      const snapshot = {
+        items: (data && data.items) || [],
+        found: data && data.found,
+        typeCounts: data && data.typeCounts,
+        savedAt: Date.now()
+      }
+      rescueFileCache.set(key, snapshot)
+      if (rescueChatKey(state.activeChatId) !== key || generation !== rescueOpenGeneration || state.view !== 'files') return
+      rescueApplyCompleteFiles(chatId, snapshot)
+      renderFiles()
+      rescueUpdateMediaLabel()
+      setLoadState(`Loaded all ${snapshot.items.length} files`)
+    } catch (e) {
+      if (rescueChatKey(state.activeChatId) === key && state.view === 'files') {
+        setLoadState('Failed to load all files. Try Files again.')
+        toast(String(e && e.message ? e.message : e), 'error')
+      }
+    } finally {
+      rescueFileInflight.delete(key)
+    }
+  })()
+  rescueFileInflight.set(key, work)
+  return work
 }
 
 loadMessages = async function rescueLoadMessages (chatId, fromMessageId) {
@@ -105,6 +205,7 @@ loadMessages = async function rescueLoadMessages (chatId, fromMessageId) {
       const msg = String(e && e.message ? e.message : e)
       if (/can.?t access|not accessible|chat not found|have no access/i.test(msg)) {
         rescueChatCache.delete(chatKey)
+        rescueFileCache.delete(chatKey)
         removeChat(chatId)
         toast('Chat is no longer accessible and was removed from the list', 'error')
       } else {
@@ -158,12 +259,24 @@ openChat = async function rescueOpenChat (chatId) {
     state.hasMore = true
   }
 
-  // Messages are the daily-driver default. Files are derived from the same cache.
-  setView('messages')
+  const preferredView = rescuePreferredView()
+  setView(preferredView)
   renderMessagesList()
-  renderFiles()
+  if (preferredView === 'files') {
+    const fileSnapshot = rescueFileCache.get(rescueChatKey(chatId))
+    if (fileSnapshot) {
+      rescueApplyCompleteFiles(chatId, fileSnapshot)
+      renderFiles()
+      setLoadState(`Loaded all ${fileSnapshot.items.length} files`)
+    } else {
+      $('#media-grid').innerHTML = ''
+      setLoadState('Loading all files…')
+    }
+  } else {
+    renderFiles()
+    setLoadState(cached ? `Cached ${state.messages.length} messages · refreshing…` : 'loading')
+  }
   rescueUpdateMediaLabel()
-  setLoadState(cached ? `Cached ${state.messages.length} messages · refreshing…` : 'loading')
 
   // Always refresh the newest page, but never blank already-cached rows while waiting.
   const generation = rescueOpenGeneration
@@ -182,6 +295,7 @@ openChat = async function rescueOpenChat (chatId) {
       const msg = String(e && e.message ? e.message : e)
       if (/can.?t access|not accessible|chat not found|have no access/i.test(msg)) {
         rescueChatCache.delete(rescueChatKey(chatId))
+        rescueFileCache.delete(rescueChatKey(chatId))
         removeChat(chatId)
         toast('Chat is no longer accessible and was removed from the list', 'error')
       } else {
@@ -288,16 +402,17 @@ function rescueStartChatSync () {
   if (rescueSyncTimer) clearInterval(rescueSyncTimer)
   rescueSyncTimer = setInterval(() => {
     if (state.status === 'ready' && ws && ws.readyState === WebSocket.OPEN) loadChats()
-  }, 7000)
+  }, 15000)
 }
 rescueStartChatSync()
 
 // Reorder tabs without waiting for a larger HTML redesign.
 const rescueTabs = $('.tabs')
 if (rescueTabs && $('#tab-messages') && $('#tab-files')) rescueTabs.insertBefore($('#tab-messages'), $('#tab-files'))
-state.view = 'messages'
-$('#tab-messages').classList.add('active')
-$('#tab-files').classList.remove('active')
-$('#messages').classList.remove('hidden')
-$('#media-grid').classList.add('hidden')
-$('#files-toolbar').classList.add('hidden')
+const rescueInitialView = rescuePreferredView()
+state.view = rescueInitialView
+$('#tab-messages').classList.toggle('active', rescueInitialView === 'messages')
+$('#tab-files').classList.toggle('active', rescueInitialView === 'files')
+$('#messages').classList.toggle('hidden', rescueInitialView !== 'messages')
+$('#media-grid').classList.toggle('hidden', rescueInitialView !== 'files')
+$('#files-toolbar').classList.toggle('hidden', rescueInitialView !== 'files')

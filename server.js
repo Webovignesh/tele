@@ -902,15 +902,16 @@ async function loadChats () {
     limit: 100
   })
   const ids = (chats.chat_ids || [])
-  const out = []
-  for (const id of ids) {
+  const out = (await Promise.all(ids.map(async (id) => {
     try {
       const chat = await client.invoke({ _: 'getChat', chat_id: id })
       const t = chat.type
-      if (t && t._ === 'chatTypeSecret') continue
-      out.push(await serializeChatDetailed(chat))
-    } catch (e) {}
-  }
+      if (t && t._ === 'chatTypeSecret') return null
+      return await serializeChatDetailed(chat)
+    } catch (e) {
+      return null
+    }
+  }))).filter(Boolean)
   out.sort((a, b) => (a.order < b.order ? 1 : -1))
   if (out.length) {
     lastChatOffset = { order: out[out.length - 1].order, chat_id: out[out.length - 1].id }
