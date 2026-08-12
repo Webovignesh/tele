@@ -1,0 +1,46 @@
+name: Apply realtime and management polish
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[realtime-polish-bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rescue/legacy-modernization
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply patch
+        run: python scripts/apply-realtime-polish.py
+      - name: Install and verify
+        run: |
+          npm ci
+          npm run verify
+      - name: Guard realtime and management wiring
+        shell: bash
+        run: |
+          grep -q "updateNewMessage" server.js
+          grep -q "updateDeleteMessages" server.js
+          grep -q "checkChatUsername" server.js
+          grep -q "message-upsert" public/rescue-runtime.js
+          grep -q "t.me/" public/management.js
+          grep -q "image/png" public/management.js
+          grep -q "mg-photo-drop" public/management.css
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js public/rescue-runtime.js public/management.js public/management.css public/index.html scripts/rescue-smoke.test.cjs
+          git commit -m "feat(rescue): make chat management realtime and polish creation [realtime-polish-bot]"
+          git push origin HEAD:rescue/legacy-modernization
