@@ -20,14 +20,29 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Repair staged patch syntax
+      - name: Repair staged patch
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
           p = Path('scripts/apply-chat-attach-notify-fix.py')
           s = p.read_text()
+          # Repair two accidentally literal newlines inside Python string literals.
           s = s.replace(")),\n\",\n", ")),\\n\",\n")
+          # This composer-visibility hook is already present in the current rescue runtime.
+          s = re.sub(
+              r"\nreplace_once\(\n    'public/rescue-runtime\.js',\n    \"  rescueBaseSetView\(view\)\\n  if \(view === 'files' && state\.activeChatId != null\) \{\",.*?    'sync composer visibility'\n\)\n",
+              "\n",
+              s,
+              count=1,
+              flags=re.S,
+          )
+          # Match the whole existing composer template, including nested divs.
+          s = s.replace(
+              r'r"  composer\\.innerHTML = `\\n    <div id=\\\"tele-compose-context\\\".*?</div>`\\n  chat\\.insertBefore\\(composer, foot\\)"',
+              r'r"  composer\\.innerHTML = `.*?`\\n  chat\\.insertBefore\\(composer, foot\\)"',
+          )
           p.write_text(s)
           PY
           python -m py_compile scripts/apply-chat-attach-notify-fix.py
