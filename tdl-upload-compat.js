@@ -2,14 +2,14 @@
 
 /* TDLib upload compatibility shim.
  *
- * Recent TDLib schemas have nullable upload fields (for example video.cover,
- * video.thumbnail and document.thumbnail) which should be passed explicitly as
- * null when unused. The application historically omitted them. On Windows that
- * can surface as the misleading TDLib error "InputFile is not specified" even
- * though the primary video/document InputFile is present.
+ * The installed TDLib schema contains nullable upload/file fields on media
+ * content (notably inputMessageVideo.cover). They need to be represented as
+ * explicit null values when unused. Omitting one can surface as the misleading
+ * "InputFile is not specified" error even when the primary video/document file
+ * is present.
  *
- * This preloader wraps only attachment-related invoke calls. Everything else is
- * passed to tdl unchanged.
+ * This preloader wraps attachment-related invokes only. All other TDLib calls
+ * pass through unchanged.
  */
 
 const fs = require('node:fs')
@@ -23,8 +23,7 @@ function hasOwn (object, key) {
 }
 
 function normalizeLocalInputFile (file, slashMode) {
-  if (!file || typeof file !== 'object') return file
-  if (file._ !== 'inputFileLocal') return file
+  if (!file || typeof file !== 'object' || file._ !== 'inputFileLocal') return file
   let filePath = String(file.path || '')
   if (filePath) {
     try {
@@ -44,37 +43,43 @@ function normalizeInputFileHolder (value, slashMode) {
   return value
 }
 
+function nullable (content, key, value) {
+  return hasOwn(content, key) ? value : null
+}
+
 function normalizeAttachmentContent (content, slashMode) {
   if (!content || typeof content !== 'object') return content
   switch (content._) {
-    case 'inputMessageVideo': {
-      const next = {
+    case 'inputMessageVideo':
+      return {
         ...content,
         video: normalizeInputFileHolder(content.video, slashMode),
-        thumbnail: hasOwn(content, 'thumbnail') ? content.thumbnail : null,
-        cover: hasOwn(content, 'cover') ? normalizeInputFileHolder(content.cover, slashMode) : null,
-        self_destruct_type: hasOwn(content, 'self_destruct_type') ? content.self_destruct_type : null
+        thumbnail: nullable(content, 'thumbnail', content.thumbnail),
+        cover: nullable(content, 'cover', normalizeInputFileHolder(content.cover, slashMode)),
+        show_caption_above_media: !!content.show_caption_above_media,
+        self_destruct_type: nullable(content, 'self_destruct_type', content.self_destruct_type),
+        has_spoiler: !!content.has_spoiler
       }
-      return next
-    }
     case 'inputMessagePhoto':
       return {
         ...content,
         photo: normalizeInputFileHolder(content.photo, slashMode),
-        thumbnail: hasOwn(content, 'thumbnail') ? content.thumbnail : null,
-        self_destruct_type: hasOwn(content, 'self_destruct_type') ? content.self_destruct_type : null
+        thumbnail: nullable(content, 'thumbnail', content.thumbnail),
+        show_caption_above_media: !!content.show_caption_above_media,
+        self_destruct_type: nullable(content, 'self_destruct_type', content.self_destruct_type),
+        has_spoiler: !!content.has_spoiler
       }
     case 'inputMessageAudio':
       return {
         ...content,
         audio: normalizeInputFileHolder(content.audio, slashMode),
-        album_cover_thumbnail: hasOwn(content, 'album_cover_thumbnail') ? content.album_cover_thumbnail : null
+        album_cover_thumbnail: nullable(content, 'album_cover_thumbnail', content.album_cover_thumbnail)
       }
     case 'inputMessageDocument':
       return {
         ...content,
         document: normalizeInputFileHolder(content.document, slashMode),
-        thumbnail: hasOwn(content, 'thumbnail') ? content.thumbnail : null
+        thumbnail: nullable(content, 'thumbnail', content.thumbnail)
       }
     default:
       return content
@@ -116,11 +121,18 @@ tdl.createClient = function createCompatibleClient (options) {
       return await originalInvoke(normalized)
     } catch (error) {
       if (!inputFileError(error) || process.platform !== 'win32') throw error
-      /* A second attempt uses a canonical real path with forward slashes. This
-       * is harmless on Windows and avoids path parsing edge cases in tdjson. */
+      /* Retry a local Windows InputFile with a canonical forward-slash path.
+       * inputFileId fallbacks are unchanged by this retry. */
       return originalInvoke(normalizeAttachmentQuery(query, true))
     }
   }
 
   return client
+}
+
+module.exports = {
+  normalizeAttachmentQuery,
+  normalizeAttachmentContent,
+  normalizeLocalInputFile,
+  isAttachmentQuery
 }
