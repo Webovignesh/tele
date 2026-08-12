@@ -1,0 +1,40 @@
+name: Apply legacy rescue patch
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[rescue-bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rescue/legacy-modernization
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply rescue patch
+        run: node scripts/rescue-patch.cjs
+      - name: Syntax check
+        run: |
+          node --check server.js
+          node --check public/app.js
+      - name: Commit applied rescue changes
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No rescue changes produced"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js public/app.js public/index.html
+          git commit -m "feat(rescue): add native forwarding and realtime chat sync [rescue-bot]"
+          git push origin HEAD:rescue/legacy-modernization
