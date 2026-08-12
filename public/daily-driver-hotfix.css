@@ -1,0 +1,70 @@
+/* Acceptance hotfix: resilient preview without reintroducing the unstable v3 runtime. */
+.tele-hotfix-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 120000;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(5, 9, 14, .88);
+  backdrop-filter: blur(8px);
+}
+.tele-hotfix-preview.hidden { display: none !important; }
+.tele-hotfix-preview-shell {
+  width: min(1180px, 96vw);
+  height: min(860px, 92vh);
+  min-height: 420px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: #0b121a;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .55);
+}
+.tele-hotfix-preview-shell > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  background: #101923;
+}
+.tele-hotfix-preview-shell > header > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#tele-hotfix-preview-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#tele-hotfix-preview-meta { color: var(--muted); font-size: 12px; }
+#tele-hotfix-preview-body {
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: 20px;
+}
+#tele-hotfix-preview-body img,
+#tele-hotfix-preview-body video {
+  display: block;
+  max-width: 100%;
+  max-height: calc(92vh - 100px);
+  object-fit: contain;
+  border-radius: 12px;
+  background: #060a0f;
+}
+#tele-hotfix-preview-body audio { width: min(720px, 86vw); }
+.tele-hotfix-preview-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  text-align: center;
+}
+.tele-hotfix-preview-state button { padding: 7px 12px; }
