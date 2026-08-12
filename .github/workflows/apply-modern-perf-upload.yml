@@ -1,0 +1,49 @@
+name: Apply modern performance upload pass
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[modern-perf-upload-bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rescue/legacy-modernization
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply patch
+        run: python scripts/apply-modern-perf-upload.py
+      - name: Install and verify
+        run: |
+          npm ci
+          node --check server.js
+          node --check public/app.js
+          node --check public/rescue-runtime.js
+          node --check public/management.js
+          node --check public/sw.js
+          npm run verify
+      - name: Guard upload performance UI wiring
+        shell: bash
+        run: |
+          grep -q "preliminaryUploadFile" server.js
+          grep -q "inputFileId" server.js
+          grep -q "rescueMarkActiveChat" public/rescue-runtime.js
+          grep -q "modern.css" public/index.html
+          grep -q "Tele modern desktop skin" public/modern.css
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js public/rescue-runtime.js public/modern.css public/index.html scripts/rescue-smoke.test.cjs
+          git commit -m "feat(rescue): fix attachments, speed chat switching, and revamp UI [modern-perf-upload-bot]"
+          git push origin HEAD:rescue/legacy-modernization
