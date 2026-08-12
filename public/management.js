@@ -453,8 +453,7 @@
       infoRow('Access', details.accessType || (chat.kind === 'private' ? 'Private chat' : 'Private')),
       infoRow('Members', details.memberCount != null ? String(details.memberCount) : '—'),
       infoRow('Your role', details.statusLabel || 'Member'),
-      infoRow('Auto-delete', formatAutoDelete(details.autoDeleteTime)),
-      infoRow('Notifications', details.muted ? 'Muted' : 'On')
+      infoRow('Auto-delete', formatAutoDelete(details.autoDeleteTime))
     )
     panel.appendChild(overview)
 
@@ -467,7 +466,6 @@
 
     if (chat.kind !== 'private') panel.appendChild(renderInviteSection(data))
     if (chat.kind !== 'private' && permissions.canGetMembers) panel.appendChild(renderMembersSection(data))
-    panel.appendChild(renderNotificationSection(data))
     if (chat.kind !== 'private') panel.appendChild(renderDangerSection(data))
   }
 
@@ -705,62 +703,6 @@
       ui.memberLoading = false
       loadButton.disabled = false
     }
-  }
-
-  function renderNotificationSection (data) {
-    const { chat, details, permissions } = data
-    const box = section('Notifications')
-    const row = elem('div', 'mg-setting-row')
-    const text = elem('div', '')
-    text.append(elem('strong', '', details.muted ? 'Muted' : 'Telegram notifications on'), elem('span', 'muted', details.muted ? 'Unmute this Telegram chat.' : 'Mute this Telegram chat until you turn notifications back on.'))
-    row.appendChild(text)
-    const toggle = button(details.muted ? 'Unmute' : 'Mute', 'ghost', async () => {
-      if (!permissions.canMute) return
-      toggle.disabled = true
-      try {
-        await request('set-managed-muted', { chatId: chat.id, muted: !details.muted })
-        await refreshChatInfo()
-      } catch (e) { toast(e.message, 'error') } finally { toggle.disabled = false }
-    })
-    toggle.disabled = !permissions.canMute
-    row.appendChild(toggle)
-    box.appendChild(row)
-
-    if (window.teleEnableDesktopNotifications) {
-      const desktop = elem('div', 'mg-setting-row')
-      const copy = elem('div', '')
-      const supported = 'Notification' in window
-      const permission = supported ? Notification.permission : 'unsupported'
-      const enabled = !!(window.teleDesktopNotificationsEnabled && window.teleDesktopNotificationsEnabled())
-      copy.append(
-        elem('strong', '', enabled ? 'Desktop notifications enabled' : 'Desktop notifications'),
-        elem('span', 'muted', supported ? `Browser permission: ${permission}. Notifications are delivered while Tele is running.` : 'This browser does not support desktop notifications.')
-      )
-      const controls = elem('div', 'mg-row')
-      const desktopToggle = button(enabled ? 'Disable' : 'Enable', 'ghost small', async () => {
-        desktopToggle.disabled = true
-        try {
-          if (enabled) {
-            window.teleDisableDesktopNotifications()
-            toastOk('Desktop notifications disabled')
-          } else {
-            await window.teleEnableDesktopNotifications()
-            toastOk('Desktop notifications enabled — test notification sent')
-          }
-          refreshChatInfo()
-        } catch (e) { toast(e.message, 'error') } finally { desktopToggle.disabled = false }
-      })
-      desktopToggle.disabled = !supported
-      controls.appendChild(desktopToggle)
-      if (supported && permission === 'granted' && window.teleTestDesktopNotification) {
-        controls.appendChild(button('Test', 'ghost small', async () => {
-          try { await window.teleTestDesktopNotification(); toastOk('Test notification sent') } catch (e) { toast(e.message, 'error') }
-        }))
-      }
-      desktop.append(copy, controls)
-      box.appendChild(desktop)
-    }
-    return box
   }
 
   function renderDangerSection (data) {

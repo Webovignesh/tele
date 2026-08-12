@@ -819,7 +819,6 @@ function rescueRealtimeMessageUpsert (chatId, message) {
   const chatKey = rescueChatKey(chatId)
   rescueUpsertCachedMessage(chatKey, message)
   rescuePatchCompleteFileCache(chatKey, message)
-  rescueMaybeNotifyMessage(chatId, message)
   if (state.activeChatId == null || rescueChatKey(state.activeChatId) !== chatKey) return
 
   const panel = $('#messages')
@@ -895,79 +894,8 @@ handleEvent = function rescueRealtimeHandleEvent (ev) {
   return rescueBaseHandleEvent(ev)
 }
 
-/* ------------------------------ Chat composer + desktop notifications ------------------------------ */
-const rescueNotificationPrefKey = 'tele-desktop-notifications'
+/* ------------------------------ Chat composer ------------------------------ */
 const rescueCompose = { replyTo: null, editMessageId: null, editOriginal: '', attachments: [], oneTime: false }
-let rescueNotificationRegistration = null
-
-function rescueDesktopNotificationsEnabled () {
-  try { return localStorage.getItem(rescueNotificationPrefKey) === '1' && 'Notification' in window && Notification.permission === 'granted' } catch { return false }
-}
-
-async function rescueNotificationServiceRegistration () {
-  if (!('serviceWorker' in navigator)) return null
-  if (rescueNotificationRegistration) return rescueNotificationRegistration
-  const registered = await navigator.serviceWorker.register('/sw.js?v=1', { scope: '/' })
-  rescueNotificationRegistration = await navigator.serviceWorker.ready.catch(() => registered)
-  return rescueNotificationRegistration
-}
-
-async function rescueShowDesktopNotification (title, options = {}) {
-  if (!('Notification' in window) || Notification.permission !== 'granted') throw new Error('Desktop notification permission is not granted')
-  const registration = await rescueNotificationServiceRegistration().catch(() => null)
-  if (registration && registration.showNotification) {
-    await registration.showNotification(title, options)
-    return true
-  }
-  const n = new Notification(title, options)
-  if (options.data && options.data.chatId != null) {
-    n.onclick = () => {
-      window.focus()
-      openChat(options.data.chatId)
-      n.close()
-    }
-  }
-  return true
-}
-
-async function rescueEnableDesktopNotifications () {
-  if (!('Notification' in window)) throw new Error('Desktop notifications are not supported by this browser')
-  const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission()
-  if (permission !== 'granted') throw new Error('Desktop notification permission was not granted. Allow notifications for 127.0.0.1 in the browser site settings.')
-  try { localStorage.setItem(rescueNotificationPrefKey, '1') } catch {}
-  await rescueNotificationServiceRegistration().catch(() => null)
-  await rescueTestDesktopNotification()
-  return true
-}
-
-function rescueDisableDesktopNotifications () {
-  try { localStorage.setItem(rescueNotificationPrefKey, '0') } catch {}
-  return true
-}
-
-async function rescueTestDesktopNotification () {
-  if (!rescueDesktopNotificationsEnabled()) throw new Error('Enable desktop notifications first')
-  return rescueShowDesktopNotification('Tele', {
-    body: 'Notifications are working.',
-    tag: `tele-test-${Date.now()}`,
-    data: { test: true }
-  })
-}
-
-function rescueMaybeNotifyMessage (chatId, message) {
-  if (!message || message.outgoing || !rescueDesktopNotificationsEnabled()) return
-  const chat = state.chats.find(c => rescueChatKey(c.id) === rescueChatKey(chatId))
-  const title = chat ? chat.title : 'Telegram'
-  let body = message.text || ''
-  if (!body && message.media) body = `${message.sender ? message.sender + ': ' : ''}${message.media.type || 'Media'}`
-  else if (message.sender && body) body = `${message.sender}: ${body}`
-  body = String(body || 'New message').slice(0, 180)
-  rescueShowDesktopNotification(title, {
-    body,
-    tag: `tele-chat-${chatId}-${message.id}`,
-    data: { chatId }
-  }).catch(() => {})
-}
 
 function rescueMountComposer () {
   if (document.querySelector('#tele-composer')) return
@@ -1210,17 +1138,5 @@ async function rescueDeleteMessage (message) {
 window.teleReplyToMessage = message => rescueSetComposeContext('reply', message)
 window.teleEditMessage = message => rescueSetComposeContext('edit', message)
 window.teleDeleteMessage = rescueDeleteMessage
-window.teleDesktopNotificationsEnabled = rescueDesktopNotificationsEnabled
-window.teleEnableDesktopNotifications = rescueEnableDesktopNotifications
-window.teleDisableDesktopNotifications = rescueDisableDesktopNotifications
-window.teleTestDesktopNotification = rescueTestDesktopNotification
-
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.addEventListener('message', event => {
-    const data = event.data || {}
-    if (data.type === 'open-chat' && data.chatId != null) openChat(data.chatId)
-  })
-  rescueNotificationServiceRegistration().catch(() => {})
-}
 
 rescueMountComposer()

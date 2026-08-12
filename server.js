@@ -1369,7 +1369,6 @@ function managedPermissions (status, chat, kind, isSavedMessages, canGetMembers)
     canEditUsername: !!(owner && (kind === 'channel' || kind === 'supergroup')),
     canGetMembers: !!canGetMembers,
     canSetPhoto: !!((owner || rights.can_change_info || adminFallback) && kind !== 'private'),
-    canMute: !isSavedMessages
   }
 }
 
@@ -1408,8 +1407,6 @@ async function getManagedChatInfo (chatId) {
     ? (fullInfo && Array.isArray(fullInfo.members) ? fullInfo.members.length : (groupInfo && groupInfo.member_count) || null)
     : (fullInfo && fullInfo.member_count) || (groupInfo && groupInfo.member_count) || (type._ === 'chatTypePrivate' ? 2 : null)
   const inviteLink = fullInfo && fullInfo.invite_link && fullInfo.invite_link.invite_link
-  const notification = chat.notification_settings || {}
-  const muted = notification.use_default_mute_for === false && Number(notification.mute_for || 0) > 0
   const permissions = managedPermissions(status, chat, serialized.kind, isSavedMessages, canGetMembers)
   const activePublicUsernames = groupInfo && groupInfo.usernames && Array.isArray(groupInfo.usernames.active_usernames)
     ? groupInfo.usernames.active_usernames
@@ -1430,7 +1427,6 @@ async function getManagedChatInfo (chatId) {
       administratorCount: (fullInfo && fullInfo.administrator_count) || null,
       inviteLink: inviteLink || null,
       statusLabel: managedStatusLabel(status),
-      muted,
       autoDeleteTime: Number(chat.message_auto_delete_time || 0)
     },
     permissions,
@@ -1607,29 +1603,6 @@ async function removeManagedMember (chatId, userId) {
   return { ok: true }
 }
 
-function managedNotificationSettings (current, muted) {
-  const n = current || {}
-  return {
-    _: 'chatNotificationSettings',
-    use_default_mute_for: false,
-    mute_for: muted ? 2147483647 : 0,
-    use_default_sound: n.use_default_sound !== undefined ? n.use_default_sound : true,
-    sound_id: Number(n.sound_id || 0),
-    use_default_show_preview: n.use_default_show_preview !== undefined ? n.use_default_show_preview : true,
-    show_preview: n.show_preview !== undefined ? n.show_preview : true,
-    use_default_mute_stories: n.use_default_mute_stories !== undefined ? n.use_default_mute_stories : true,
-    mute_stories: !!n.mute_stories,
-    use_default_story_sound: n.use_default_story_sound !== undefined ? n.use_default_story_sound : true,
-    story_sound_id: Number(n.story_sound_id || 0),
-    use_default_show_story_poster: n.use_default_show_story_poster !== undefined ? n.use_default_show_story_poster : true,
-    show_story_poster: n.show_story_poster !== undefined ? n.show_story_poster : true,
-    use_default_disable_pinned_message_notifications: n.use_default_disable_pinned_message_notifications !== undefined ? n.use_default_disable_pinned_message_notifications : true,
-    disable_pinned_message_notifications: !!n.disable_pinned_message_notifications,
-    use_default_disable_mention_notifications: n.use_default_disable_mention_notifications !== undefined ? n.use_default_disable_mention_notifications : true,
-    disable_mention_notifications: !!n.disable_mention_notifications
-  }
-}
-
 
 /* ------------------------------ Interactive chat service ------------------------------ */
 
@@ -1724,24 +1697,26 @@ function managedAttachmentContent (kind, inputFile, caption, oneTime) {
   const selfDestruct = oneTime ? { _: 'messageSelfDestructTypeImmediately' } : null
 
   if (kind === 'photo') {
-    const content = {
+    return {
       _: 'inputMessagePhoto',
       photo: inputFile,
+      thumbnail: null,
       added_sticker_file_ids: [],
       width: 0,
       height: 0,
       caption: formattedCaption,
       show_caption_above_media: false,
+      self_destruct_type: selfDestruct,
       has_spoiler: false
     }
-    if (selfDestruct) content.self_destruct_type = selfDestruct
-    return content
   }
 
   if (kind === 'video') {
-    const content = {
+    return {
       _: 'inputMessageVideo',
       video: inputFile,
+      thumbnail: null,
+      cover: null,
       start_timestamp: 0,
       added_sticker_file_ids: [],
       duration: 0,
@@ -1750,16 +1725,16 @@ function managedAttachmentContent (kind, inputFile, caption, oneTime) {
       supports_streaming: true,
       caption: formattedCaption,
       show_caption_above_media: false,
+      self_destruct_type: selfDestruct,
       has_spoiler: false
     }
-    if (selfDestruct) content.self_destruct_type = selfDestruct
-    return content
   }
 
   if (kind === 'audio') {
     return {
       _: 'inputMessageAudio',
       audio: inputFile,
+      album_cover_thumbnail: null,
       duration: 0,
       title: '',
       performer: '',
@@ -1770,13 +1745,14 @@ function managedAttachmentContent (kind, inputFile, caption, oneTime) {
   return {
     _: 'inputMessageDocument',
     document: inputFile,
+    thumbnail: null,
     disable_content_type_detection: false,
     caption: formattedCaption
   }
 }
 
 function managedLocalInputFile (absolutePath) {
-  return { _: 'inputFileLocal', path: absolutePath }
+  return { '@type': 'inputFileLocal', path: absolutePath }
 }
 
 function managedUploadFileType (kind) {
@@ -1823,7 +1799,7 @@ async function managedPrepareInputFile (absolutePath, kind) {
   // preliminaryUploadFile intentionally remains incomplete until the file is
   // attached to a message. Use the returned id immediately; waiting for
   // remote.is_uploading_completed here deadlocks the send pipeline.
-  return { _: 'inputFileId', id: uploaded.id }
+  return { '@type': 'inputFileId', id: uploaded.id }
 }
 
 function managedSendAttachmentQuery (chatId, replyTo, content) {
@@ -2310,17 +2286,6 @@ wss.on('connection', (ws) => {
           if (info.internal.basicGroupId) managedBasicGroupFullInfoCache.delete(String(info.internal.basicGroupId))
           emitManagementRefresh(payload.chatId)
           return respond(ws, id, true, { inviteLink: link && link.invite_link })
-        }
-        case 'set-managed-muted': {
-          const info = await getManagedChatInfo(payload.chatId)
-          if (!info.permissions.canMute) throw new Error('Notifications cannot be changed for this chat')
-          const chat = await client.invoke({ _: 'getChat', chat_id: payload.chatId })
-          await client.invoke({
-            _: 'setChatNotificationSettings',
-            chat_id: payload.chatId,
-            notification_settings: managedNotificationSettings(chat.notification_settings, !!payload.muted)
-          })
-          return respond(ws, id, true, { ok: true })
         }
         case 'remove-managed-photo': {
           const info = await getManagedChatInfo(payload.chatId)
