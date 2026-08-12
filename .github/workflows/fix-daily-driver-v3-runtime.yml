@@ -1,0 +1,45 @@
+name: Fix daily-driver v3 runtime
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[v3-runtime-bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rescue/legacy-modernization
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply runtime hardening
+        run: |
+          python -m py_compile scripts/fix-daily-driver-v3-runtime.py
+          python scripts/fix-daily-driver-v3-runtime.py
+      - name: Install and verify
+        run: |
+          npm ci
+          node --check public/telegram-daily-driver-v3.js
+          npm run verify
+      - name: Guard runtime behavior
+        shell: bash
+        run: |
+          grep -q "dock.nextElementSibling" public/telegram-daily-driver-v3.js
+          grep -q "teleV3BlankPointer" public/telegram-daily-driver-v3.js
+          grep -q "typeof dragSel" public/telegram-daily-driver-v3.js
+      - name: Commit runtime fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/telegram-daily-driver-v3.js
+          git commit -m "fix(rescue): harden selection and dock lifecycle [v3-runtime-bot]"
+          git push origin HEAD:rescue/legacy-modernization
