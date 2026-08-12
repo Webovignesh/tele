@@ -1,0 +1,509 @@
+/* Tele daily-driver v3 ----------------------------------------------------- */
+
+/* Selection is a real layout row, never an overlay over messages/composer. */
+#selection-bar.selection-dock {
+  position: relative !important;
+  inset: auto !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  transform: none !important;
+  width: auto !important;
+  min-height: 52px !important;
+  margin: 8px 14px 7px !important;
+  padding: 8px 10px 8px 13px !important;
+  flex: 0 0 auto;
+  z-index: 40;
+  border: 1px solid rgba(96, 151, 204, .32) !important;
+  border-radius: 15px !important;
+  background: rgba(18, 30, 42, .98) !important;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .28) !important;
+}
+#selection-bar.selection-dock.hidden { display: none !important; }
+#selection-count { min-width: 82px; font-size: 12px; font-weight: 700; }
+.selection-dock-actions { margin-left: auto; display: flex; flex-wrap: wrap !important; justify-content: flex-end; gap: 7px; }
+.selection-dock-actions button { min-height: 36px !important; padding: 7px 13px !important; border-radius: 10px !important; }
+.tele-composer { flex: 0 0 auto; position: relative; z-index: 30; }
+
+/* Telegram-like message canvas and grouping. */
+.messages {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 1px !important;
+  padding: 18px clamp(18px, 4vw, 72px) 20px !important;
+  background:
+    radial-gradient(circle at 74% -10%, rgba(55, 123, 181, .08), transparent 34%),
+    #09121b !important;
+  overflow-anchor: none;
+}
+.tele-v3-date {
+  position: sticky;
+  top: 8px;
+  z-index: 8;
+  align-self: center;
+  margin: 8px auto;
+  padding: 4px 11px;
+  border: 1px solid rgba(122, 157, 191, .18);
+  border-radius: 999px;
+  background: rgba(24, 39, 54, .92);
+  color: #a2b6c8;
+  font-size: 10px;
+  font-weight: 700;
+  backdrop-filter: blur(10px);
+}
+.tele-v3-message-row {
+  position: relative;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 27px;
+}
+.tele-v3-message-row.incoming { justify-content: flex-start; }
+.tele-v3-message-row.outgoing { justify-content: flex-end; }
+.tele-v3-message-row.group-start { margin-top: 6px; }
+.tele-v3-message-row.group-end { margin-bottom: 3px; }
+.tele-v3-message-row .msg.tele-v3-message-bubble {
+  position: relative;
+  align-self: auto !important;
+  width: fit-content !important;
+  min-width: 66px !important;
+  max-width: min(72%, 720px) !important;
+  margin: 0 !important;
+  padding: 7px 9px 5px !important;
+  border: 0 !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .26) !important;
+  overflow: visible !important;
+}
+.tele-v3-message-row.incoming .msg {
+  margin-right: auto !important;
+  border-radius: 13px 13px 13px 5px !important;
+  background: #172535 !important;
+}
+.tele-v3-message-row.outgoing .msg {
+  margin-left: auto !important;
+  border-radius: 13px 13px 5px 13px !important;
+  background: #245170 !important;
+}
+.tele-v3-message-row:not(.group-start).incoming .msg { border-top-left-radius: 7px !important; }
+.tele-v3-message-row:not(.group-end).incoming .msg { border-bottom-left-radius: 7px !important; }
+.tele-v3-message-row:not(.group-start).outgoing .msg { border-top-right-radius: 7px !important; }
+.tele-v3-message-row:not(.group-end).outgoing .msg { border-bottom-right-radius: 7px !important; }
+.tele-v3-message-row.selected .msg { outline: 2px solid rgba(88, 170, 255, .68); outline-offset: 1px; }
+.tele-v3-message-row .msg-sender {
+  margin: 0 24px 2px 0 !important;
+  color: #67b4ff !important;
+  font-size: 11px !important;
+  font-weight: 750 !important;
+}
+.tele-v3-message-row .msg-text {
+  margin: 0 !important;
+  color: #f0f5fa !important;
+  font-size: 13.5px !important;
+  line-height: 1.4 !important;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tele-v3-message-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  min-height: 11px;
+  margin: 2px 0 -1px 14px;
+  color: rgba(226, 238, 248, .62);
+  font-size: 9px;
+  line-height: 1;
+}
+.tele-v3-delivery { color: #8bc8ff; font-size: 10px; }
+.tele-v3-message-select {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 24px;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.tele-v3-message-row.outgoing .tele-v3-message-select { order: 2; }
+.tele-v3-message-row:hover .tele-v3-message-select,
+.tele-v3-message-row.selected .tele-v3-message-select { opacity: 1; }
+.tele-v3-message-select input {
+  width: 17px !important;
+  height: 17px !important;
+  margin: 0;
+  padding: 0 !important;
+  accent-color: #58aaff;
+}
+.tele-v3-message-more {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 50% !important;
+  background: rgba(5, 12, 19, .34) !important;
+  color: #c9d7e4 !important;
+  font-size: 17px;
+  opacity: 0;
+  transition: opacity .12s ease, background .12s ease;
+}
+.tele-v3-message-row:hover .tele-v3-message-more,
+.tele-v3-message-more:focus-visible { opacity: 1; }
+.tele-v3-message-menu {
+  position: absolute;
+  top: 29px;
+  right: 4px;
+  z-index: 80;
+  min-width: 118px;
+  display: grid;
+  padding: 4px;
+  border: 1px solid rgba(121, 158, 193, .2);
+  border-radius: 10px;
+  background: #111d29;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, .46);
+}
+.tele-v3-message-menu.hidden { display: none !important; }
+.tele-v3-message-menu button {
+  width: 100%;
+  padding: 7px 9px !important;
+  justify-content: flex-start;
+  border: 0 !important;
+  border-radius: 7px !important;
+  background: transparent !important;
+  color: #d9e4ed !important;
+  font-size: 11px;
+  text-align: left;
+}
+.tele-v3-message-menu button:hover { background: #1b2b3b !important; }
+.tele-v3-message-menu button.danger { color: #ff7d88 !important; }
+
+/* Thumbnail-first media. Full Telegram files load only after an explicit click. */
+.tele-v3-media-row {
+  min-width: 0 !important;
+  width: auto !important;
+  margin: 4px -2px 1px !important;
+  padding: 0 !important;
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center !important;
+  gap: 8px !important;
+  border: 0 !important;
+  border-radius: 11px !important;
+  background: rgba(3, 9, 15, .16) !important;
+}
+.tele-v3-media-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 0 !important;
+  border: 0 !important;
+  background: #0b1722 !important;
+  color: #8097ad !important;
+  cursor: pointer;
+}
+.tele-v3-media-thumb--message {
+  width: 210px;
+  max-width: min(48vw, 340px);
+  height: 154px;
+  border-radius: 10px !important;
+}
+.tele-v3-media-thumb--message.tele-v3-media-thumb--audio,
+.tele-v3-media-thumb--message.tele-v3-media-thumb--voice,
+.tele-v3-media-thumb--message.tele-v3-media-thumb--document {
+  width: 54px;
+  height: 54px;
+}
+.tele-v3-media-thumb-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity .15s ease;
+}
+.tele-v3-media-thumb-image.is-loaded { opacity: 1; }
+.tele-v3-media-fallback { display: grid; place-items: center; }
+.tele-v3-media-fallback svg { width: 25px; height: 25px; }
+.tele-v3-media-thumb.has-image .tele-v3-media-fallback { opacity: 0; }
+.tele-v3-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: rgba(3, 10, 17, .72);
+  color: white;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .42);
+}
+.tele-v3-media-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 7px 5px 0;
+}
+.tele-v3-media-name,
+.tele-v3-media-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tele-v3-media-name { color: #edf4fa; font-size: 11px; }
+.tele-v3-media-sub { color: #89a0b5; font-size: 9px; }
+.tele-v3-media-caption { margin-top: 2px; color: #d6e0e8; font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
+
+/* Files remain dense; thumbnail click is preview, row click is selection. */
+.tele-v3-file-card {
+  min-height: 68px !important;
+  padding: 8px 11px !important;
+  gap: 10px !important;
+  transition: border-color .12s ease, background .12s ease !important;
+}
+.tele-v3-file-card:hover { transform: none !important; }
+.tele-v3-file-card.selected {
+  background: #193d5b !important;
+  outline: 1px solid #58aaff !important;
+  box-shadow: none !important;
+}
+.tele-v3-file-thumb {
+  width: 52px !important;
+  height: 52px !important;
+  max-width: none !important;
+  flex: 0 0 52px;
+  border-radius: 10px !important;
+}
+.tele-v3-file-thumb .tele-v3-play { width: 29px; height: 29px; }
+.tele-v3-file-thumb .tele-v3-play svg { width: 14px; height: 14px; }
+.tele-v3-file-body { min-width: 0; }
+.tele-v3-file-statuses { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.tele-v3-file-statuses span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 750;
+}
+.tele-v3-file-statuses .downloaded { color: #69d98e; background: rgba(75, 196, 119, .13); }
+.tele-v3-file-statuses .forwarded { color: #75bfff; background: rgba(88, 170, 255, .13); }
+.tele-v3-file-check { width: 18px !important; height: 18px !important; padding: 0 !important; accent-color: #58aaff; }
+.tele-v3-file-more {
+  min-height: 42px;
+  margin: 3px 0 8px;
+  border: 1px dashed rgba(112, 151, 188, .28) !important;
+  border-radius: 11px !important;
+  background: transparent !important;
+  color: #87a0b7 !important;
+}
+
+/* One robust preview lightbox, created only after a media click. */
+.tele-v3-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 2600;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(2, 7, 12, .82);
+  backdrop-filter: blur(12px);
+}
+.tele-v3-preview.hidden { display: none !important; }
+.tele-v3-preview-shell {
+  width: min(1120px, 94vw);
+  height: min(820px, 92vh);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(124, 160, 194, .28);
+  border-radius: 17px;
+  background: #0b141e;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, .62);
+}
+.tele-v3-preview-head {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 11px 10px 16px;
+  border-bottom: 1px solid rgba(120, 155, 190, .17);
+  background: #111c27;
+}
+.tele-v3-preview-titlebox { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tele-v3-preview-titlebox strong,
+.tele-v3-preview-titlebox span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tele-v3-preview-titlebox strong { font-size: 13px; }
+.tele-v3-preview-titlebox span { color: #899eb2; font-size: 10px; }
+.tele-v3-preview-actions { display: flex; gap: 7px; }
+#tele-v3-preview-close { width: 36px; height: 36px; padding: 0 !important; font-size: 20px; }
+.tele-v3-preview-body {
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  background: #050b11;
+}
+.tele-v3-preview-image,
+.tele-v3-preview-video {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 10px;
+  background: black;
+}
+.tele-v3-preview-audio { width: min(660px, 90%); }
+.tele-v3-preview-pdf { width: 100%; height: 100%; border: 0; border-radius: 9px; background: white; }
+.tele-v3-preview-loading { display: flex; align-items: center; gap: 10px; color: #91a6b9; font-size: 12px; }
+.tele-v3-preview-loading span {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(88, 170, 255, .22);
+  border-top-color: #58aaff;
+  border-radius: 50%;
+  animation: tele-v3-spin .7s linear infinite;
+}
+@keyframes tele-v3-spin { to { transform: rotate(360deg); } }
+.tele-v3-preview-state {
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: #93a8bb;
+  text-align: center;
+}
+.tele-v3-preview-state svg { width: 36px; height: 36px; color: #6f8ca7; }
+.tele-v3-preview-state strong { color: #edf4fa; font-size: 14px; }
+.tele-v3-preview-state span { font-size: 12px; }
+.tele-v3-preview-state small { color: #71879a; line-height: 1.45; }
+.tele-v3-preview-state-actions { margin-top: 7px; display: flex; gap: 8px; }
+
+/* Upload tray: Telegram-like tiles plus real browser upload percentage. */
+.tele-attachment-preview {
+  margin: 0 12px 8px !important;
+  padding: 10px !important;
+  border-radius: 14px !important;
+  background: #111e2b !important;
+}
+.tele-attachment-list {
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)) !important;
+  max-height: 250px !important;
+}
+.tele-upload-card {
+  min-height: 72px !important;
+  grid-template-columns: 56px minmax(0, 1fr) 24px !important;
+  padding: 7px !important;
+  background: #0c1721 !important;
+}
+.tele-upload-visual { width: 56px !important; height: 56px !important; }
+.tele-upload-card[data-state="processing"] { border-color: rgba(229, 173, 69, .55) !important; }
+.tele-upload-card[data-state="processing"] .tele-upload-state { color: #e5bd69 !important; }
+.tele-v3-upload-progress {
+  width: 100%;
+  height: 3px;
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #263748;
+}
+.tele-v3-upload-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #58aaff;
+  transition: width .12s linear;
+}
+.tele-upload-card[data-state="done"] .tele-v3-upload-progress span { background: #4bc477; }
+.tele-upload-card[data-state="error"] .tele-v3-upload-progress span { background: #f05a63; }
+.tele-attachment-footer { padding-top: 7px !important; }
+#tele-compose-input { line-height: 1.35; }
+
+/* Search always uses the live modern renderer; keep the field stable and clean. */
+#chat-search[data-tele-v3-bound="1"] { padding-right: 34px; }
+.chat-item .preview { max-width: 100%; }
+
+/* Downloads tab already names the pane; remove duplicate heading and use space well. */
+#mg-downloads-pane.tele-v3-download-pane .tele-v3-inner-download-header { display: none !important; }
+#mg-downloads-pane.tele-v3-download-pane {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 10px 16px;
+}
+#mg-downloads-pane .tele-v3-download-controls {
+  margin: 0 !important;
+  padding: 14px !important;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px !important;
+  border-radius: 15px !important;
+  background: #121e2a !important;
+}
+#mg-downloads-pane .tele-v3-download-controls .conc {
+  display: grid !important;
+  grid-template-columns: 1fr;
+  gap: 7px !important;
+}
+#mg-downloads-pane .tele-v3-download-controls .conc > span:first-child {
+  font-size: 10px !important;
+  font-weight: 750 !important;
+  letter-spacing: .06em;
+  color: #93a8bc !important;
+}
+#mg-downloads-pane .tele-v3-download-controls .conc .row {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px !important;
+}
+#mg-downloads-pane #dl-dir { width: 100%; min-height: 38px; }
+#mg-downloads-pane #set-dir { min-width: 54px; min-height: 38px; }
+#mg-downloads-pane .dir-current {
+  margin: -7px 0 0 !important;
+  padding: 0 2px !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+#mg-downloads-pane #concurrency { width: 100%; min-width: 0; }
+#mg-downloads-pane #concurrency-val { min-width: 28px; text-align: right; }
+#mg-downloads-pane .tele-v3-download-controls > .row {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px !important;
+}
+#mg-downloads-pane .tele-v3-download-controls > .row button {
+  width: 100%;
+  min-height: 37px !important;
+  padding: 7px 8px !important;
+}
+#download-list { padding: 10px 0 0 !important; }
+
+/* Retire previous full-media-in-message and inline-file players. */
+.tele-message-media,
+.tele-file-inline-video,
+.tele-file-audio,
+.tele-inline-play,
+#tele-preview-modal { display: none !important; }
+
+@media (max-width: 1240px) {
+  .tele-v3-message-row .msg.tele-v3-message-bubble { max-width: 82% !important; }
+  .tele-v3-media-thumb--message { max-width: min(56vw, 320px); }
+}
+
+@media (max-width: 860px) {
+  #selection-bar.selection-dock { margin-inline: 8px !important; }
+  .selection-dock-actions { width: 100%; margin-left: 0; }
+  .tele-v3-message-row .msg.tele-v3-message-bubble { max-width: 90% !important; }
+  .messages { padding-inline: 12px !important; }
+}
