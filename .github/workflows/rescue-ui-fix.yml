@@ -1,0 +1,38 @@
+name: Apply rescue UI refinement
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[rescue-ui-bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rescue/legacy-modernization
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply patch
+        run: node scripts/rescue-ui-fix.cjs
+      - name: Syntax check
+        run: |
+          node --check server.js
+          node --check public/app.js
+      - name: Smoke verify
+        run: npm run verify
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js public/app.js public/style.css
+          git commit -m "feat(rescue): refine forwarding, chat sync, and layout [rescue-ui-bot]"
+          git push origin HEAD:rescue/legacy-modernization
