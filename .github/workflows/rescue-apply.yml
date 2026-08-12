@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Repair patch anchor
+      - name: Repair patch anchors
         shell: bash
         run: |
           python - <<'PY'
@@ -29,6 +29,7 @@ jobs:
           s = p.read_text()
           s = s.replace('"  $(\'#download-selected\').onclick = () => startDownloads([...state.selection.values()])"', '"$(\'#download-selected\').onclick = () => startDownloads([...state.selection.values()])"')
           s = s.replace('"  $(\'#download-selected\').onclick = () => startDownloads([...state.selection.values()])\\n  $(\'#forward-selected\').onclick = forwardSelectedMessages"', '"$(\'#download-selected\').onclick = () => startDownloads([...state.selection.values()])\\n$(\'#forward-selected\').onclick = forwardSelectedMessages"')
+          s = s.replace('<button id=\\"download-selected\\" class=\\"primary\\">Download selected</button>', '<button id=\\"download-selected\\">Download selected</button>')
           p.write_text(s)
           PY
       - name: Apply rescue patch
