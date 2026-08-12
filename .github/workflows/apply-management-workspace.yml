@@ -1,0 +1,44 @@
+name: Apply Telegram management workspace
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[management-workspace-bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rescue/legacy-modernization
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply management integration
+        run: python scripts/apply-management-workspace.py
+      - name: Install and verify
+        run: |
+          npm ci
+          npm run verify
+      - name: Guard management wiring
+        shell: bash
+        run: |
+          grep -q "createNewSupergroupChat" server.js
+          grep -q "case 'get-chat-management'" server.js
+          grep -q "case 'delete-managed-chat'" server.js
+          grep -q "management.js" public/index.html
+          grep -q "management.css" public/index.html
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js public/index.html package.json scripts/rescue-smoke.test.cjs
+          git commit -m "feat(rescue): add Telegram chat management workspace [management-workspace-bot]"
+          git push origin HEAD:rescue/legacy-modernization
