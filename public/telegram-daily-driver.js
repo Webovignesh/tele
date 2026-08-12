@@ -525,3 +525,6 @@ rescueSendComposer = async function teleDailySendComposer () {
 
 /* The old lightbox is deliberately retired. */
 document.querySelector('#tele-preview-modal')?.remove()
+
+const teleDailySendButton = document.querySelector('#tele-compose-send')
+if (teleDailySendButton) teleDailySendButton.onclick = rescueSendComposer

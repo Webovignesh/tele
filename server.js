@@ -534,6 +534,7 @@ async function scanChat (chatId, { queue = false, mode, returnItems = false } = 
       })
       const msgs = (history.messages || []).filter(m => m.sending_state === undefined)
       if (!msgs.length) break
+      const batchItems = []
       for (const m of msgs) {
         const media = extractMedia(m)
         if (media && media.file) {
@@ -554,7 +555,10 @@ async function scanChat (chatId, { queue = false, mode, returnItems = false } = 
             thumbFileId: mediaThumbFileId(media.thumb),
             thumbUrl: null
           }
-          if (returnItems) items.push(item)
+          if (returnItems) {
+            items.push(item)
+            batchItems.push(item)
+          }
           if (queue) {
             dm.add(chatId, chatTitle, m.id, f.id, media.name, f.size || f.expected_size || 0)
             scanState.queued++
@@ -563,7 +567,7 @@ async function scanChat (chatId, { queue = false, mode, returnItems = false } = 
       }
       scanState.scanned += msgs.length
       from = msgs[msgs.length - 1].id
-      emitScan()
+      emitScan(returnItems ? { items: batchItems } : {})
     }
   } finally {
     scanState.active = false
@@ -1568,30 +1572,29 @@ function managedAttachmentKind (fileName, mimeType) {
   return 'document'
 }
 
-function managedAttachmentContent (kind, absolutePath, caption, oneTime) {
-  const file = { _: 'inputFileLocal', path: absolutePath }
+function managedAttachmentContent (kind, inputFile, caption, oneTime) {
   const formattedCaption = { _: 'formattedText', text: String(caption || '').slice(0, 1024), entities: [] }
   const selfDestruct = oneTime ? { _: 'messageSelfDestructTypeImmediately' } : null
+
   if (kind === 'photo') {
-    return {
+    const content = {
       _: 'inputMessagePhoto',
-      photo: file,
-      thumbnail: null,
+      photo: inputFile,
       added_sticker_file_ids: [],
       width: 0,
       height: 0,
       caption: formattedCaption,
       show_caption_above_media: false,
-      self_destruct_type: selfDestruct,
       has_spoiler: false
     }
+    if (selfDestruct) content.self_destruct_type = selfDestruct
+    return content
   }
+
   if (kind === 'video') {
-    return {
+    const content = {
       _: 'inputMessageVideo',
-      video: file,
-      thumbnail: null,
-      cover: null,
+      video: inputFile,
       start_timestamp: 0,
       added_sticker_file_ids: [],
       duration: 0,
@@ -1600,28 +1603,87 @@ function managedAttachmentContent (kind, absolutePath, caption, oneTime) {
       supports_streaming: true,
       caption: formattedCaption,
       show_caption_above_media: false,
-      self_destruct_type: selfDestruct,
       has_spoiler: false
     }
+    if (selfDestruct) content.self_destruct_type = selfDestruct
+    return content
   }
+
   if (kind === 'audio') {
     return {
       _: 'inputMessageAudio',
-      audio: file,
-      album_cover_thumbnail: null,
+      audio: inputFile,
       duration: 0,
       title: '',
       performer: '',
       caption: formattedCaption
     }
   }
+
   return {
     _: 'inputMessageDocument',
-    document: file,
-    thumbnail: null,
+    document: inputFile,
     disable_content_type_detection: false,
     caption: formattedCaption
   }
+}
+
+function managedLocalInputFile (absolutePath) {
+  return { _: 'inputFileLocal', path: absolutePath }
+}
+
+function managedUploadFileType (kind) {
+  if (kind === 'photo') return { _: 'fileTypePhoto' }
+  if (kind === 'video') return { _: 'fileTypeVideo' }
+  if (kind === 'audio') return { _: 'fileTypeAudio' }
+  return { _: 'fileTypeDocument' }
+}
+
+async function managedWaitForPreliminaryUpload (file, timeoutMs = 180000) {
+  if (!file || !file.id) throw new Error('Telegram did not return a file id for the upload')
+  if (file.remote && file.remote.is_uploading_completed) return file
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      client.off('update', onUpdate)
+      if (error) reject(error)
+      else resolve(value)
+    }
+    const onUpdate = update => {
+      if (!update || update._ !== 'updateFile' || !update.file || String(update.file.id) !== String(file.id)) return
+      if (update.file.remote && update.file.remote.is_uploading_completed) finish(null, update.file)
+    }
+    const timer = setTimeout(() => finish(new Error('Telegram upload preparation timed out')), timeoutMs)
+    client.on('update', onUpdate)
+    client.invoke({ _: 'getFile', file_id: file.id }).then(current => {
+      if (current && current.remote && current.remote.is_uploading_completed) finish(null, current)
+    }).catch(() => {})
+  })
+}
+
+async function managedPrepareInputFile (absolutePath, kind) {
+  const uploaded = await client.invoke({
+    _: 'preliminaryUploadFile',
+    file: managedLocalInputFile(absolutePath),
+    file_type: managedUploadFileType(kind),
+    priority: 32
+  })
+  const completed = await managedWaitForPreliminaryUpload(uploaded)
+  return { _: 'inputFileId', id: completed.id }
+}
+
+function managedSendAttachmentQuery (chatId, replyTo, content) {
+  const query = {
+    _: 'sendMessage',
+    chat_id: chatId,
+    input_message_content: content
+  }
+  if (replyTo) query.reply_to = replyTo
+  return query
 }
 
 async function sendManagedAttachmentMessage (chatId, filePath, caption, replyToMessageId, mimeType, fileName, oneTime) {
@@ -1641,25 +1703,36 @@ async function sendManagedAttachmentMessage (chatId, filePath, caption, replyToM
   if (oneTime) {
     const chat = await client.invoke({ _: 'getChat', chat_id: chatId })
     if (!chat || !chat.type || chat.type._ !== 'chatTypePrivate') {
-      throw new Error('View once is available only in private chats')
+      throw new Error('Telegram supports View once only in private chats')
     }
     if (kind !== 'photo' && kind !== 'video') {
       throw new Error('View once is available only for photos and videos')
     }
   }
 
-  // Normal Telegram media should be sent directly as inputFileLocal. TDLib
-  // owns the upload after sendMessage accepts the content; no preliminary
-  // upload/file-id handoff is needed for ordinary attachments.
-  const message = await client.invoke({
-    _: 'sendMessage',
-    chat_id: chatId,
-    topic_id: null,
-    reply_to: replyTo,
-    options: null,
-    reply_markup: null,
-    input_message_content: managedAttachmentContent(kind, absolutePath, caption, !!oneTime)
-  })
+  let message
+  let directError = null
+  try {
+    const content = managedAttachmentContent(kind, managedLocalInputFile(absolutePath), caption, !!oneTime)
+    message = await client.invoke(managedSendAttachmentQuery(chatId, replyTo, content))
+  } catch (error) {
+    directError = error
+    const text = String(error && error.message ? error.message : error)
+    if (!/inputfile|input file|local file|file is not specified/i.test(text)) throw error
+  }
+
+  if (!message) {
+    try {
+      const prepared = await managedPrepareInputFile(absolutePath, kind)
+      const content = managedAttachmentContent(kind, prepared, caption, !!oneTime)
+      message = await client.invoke(managedSendAttachmentQuery(chatId, replyTo, content))
+    } catch (fallbackError) {
+      const first = directError ? String(directError.message || directError) : 'direct local-file send failed'
+      const second = String(fallbackError && fallbackError.message ? fallbackError.message : fallbackError)
+      throw new Error('Telegram attachment send failed. Direct: ' + first + '. Prepared upload: ' + second)
+    }
+  }
+
   emitRealtimeMessage(message).catch(() => {})
   emitChatUpsert(chatId).catch(() => {})
   return serializeRealtimeMessage(message)
@@ -1817,17 +1890,32 @@ async function ensurePreviewFile (fileId) {
   if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Invalid file id')
   const existing = await client.invoke({ _: 'getFile', file_id: id }).catch(() => null)
   if (existing && existing.local && existing.local.is_downloading_completed && existing.local.path) return existing.local.path
-  const downloaded = await client.invoke({
-    _: 'downloadFile',
-    file_id: id,
-    priority: 16,
-    offset: 0,
-    limit: 0,
-    synchronous: true
+  if (existing && existing.local && existing.local.can_be_downloaded === false) throw new Error('Telegram reports that this file cannot be downloaded')
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      client.off('update', onUpdate)
+      if (error) reject(error)
+      else resolve(value)
+    }
+    const inspect = file => {
+      const local = file && file.local
+      if (local && local.is_downloading_completed && local.path) finish(null, local.path)
+    }
+    const onUpdate = update => {
+      if (!update || update._ !== 'updateFile' || !update.file || String(update.file.id) !== String(id)) return
+      inspect(update.file)
+    }
+    const timer = setTimeout(() => finish(new Error('Telegram could not prepare this file for inline playback')), 90000)
+    client.on('update', onUpdate)
+    client.invoke({ _: 'downloadFile', file_id: id, priority: 32, offset: 0, limit: 0, synchronous: false })
+      .then(inspect)
+      .catch(error => finish(error))
   })
-  const local = downloaded && downloaded.local
-  if (!local || !local.is_downloading_completed || !local.path) throw new Error('Telegram could not prepare this file for preview')
-  return local.path
 }
 
 app.get('/api/media-preview/:fileId', async (req, res) => {
@@ -1838,8 +1926,10 @@ app.get('/api/media-preview/:fileId', async (req, res) => {
     const name = sanitize(String(req.query.name || path.basename(localPath)))
     if (/^[\w.+-]+\/[\w.+-]+$/.test(mime)) res.setHeader('Content-Type', mime)
     else res.type(name)
-    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(name)}`)
-    res.sendFile(path.resolve(localPath))
+    res.setHeader('Accept-Ranges', 'bytes')
+    res.setHeader('Cache-Control', 'private, max-age=300')
+    res.setHeader('Content-Disposition', "inline; filename*=UTF-8''" + encodeURIComponent(name))
+    res.sendFile(path.resolve(localPath), { acceptRanges: true })
   } catch (e) {
     res.status(404).json({ error: String(e.message || e) })
   }
@@ -2026,7 +2116,10 @@ wss.on('connection', (ws) => {
           })
           return respond(ws, id, true, { started: true })
         case 'scan-media': {
-          if (scanState && scanState.active) return respond(ws, id, true, { busy: true })
+          if (scanState && scanState.active) {
+            if (scanState.mode === 'count' && String(scanState.chatId) !== String(payload.chatId)) scanState.cancelled = true
+            return respond(ws, id, true, { busy: true })
+          }
           const r = await scanChat(payload.chatId, { queue: false, mode: 'count', returnItems: payload.includeItems })
           return respond(ws, id, true, { found: r.found, scanned: r.scanned, typeCounts: r.typeCounts, items: r.items })
         }
