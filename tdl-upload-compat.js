@@ -1,15 +1,12 @@
 'use strict'
 
-/* TDLib upload compatibility shim.
+/* TDLib attachment compatibility shim.
  *
- * The installed TDLib schema contains nullable upload/file fields on media
- * content (notably inputMessageVideo.cover). They need to be represented as
- * explicit null values when unused. Omitting one can surface as the misleading
- * "InputFile is not specified" error even when the primary video/document file
- * is present.
- *
- * This preloader wraps attachment-related invokes only. All other TDLib calls
- * pass through unchanged.
+ * tdl normally converts `_` discriminator keys to TDLib JSON `@type` keys.
+ * Attachment InputFile objects are normalized to explicit `@type` objects
+ * before they enter tdl so nested local/prepared files cannot be lost while
+ * older and newer TDLib schemas are mixed. Nullable media fields are also
+ * represented explicitly.
  */
 
 const fs = require('node:fs')
@@ -22,25 +19,33 @@ function hasOwn (object, key) {
   return Object.prototype.hasOwnProperty.call(object, key)
 }
 
-function normalizeLocalInputFile (file, slashMode) {
-  if (!file || typeof file !== 'object' || file._ !== 'inputFileLocal') return file
-  let filePath = String(file.path || '')
-  if (filePath) {
-    try {
-      const realpath = fs.realpathSync.native || fs.realpathSync
-      filePath = realpath(filePath)
-    } catch {
-      filePath = path.resolve(filePath)
-    }
-    if (slashMode && process.platform === 'win32') filePath = filePath.replace(/\\/g, '/')
+function tdType (value) {
+  if (!value || typeof value !== 'object') return ''
+  return String(value['@type'] || value._ || '')
+}
+
+function normalizeLocalPath (filePath, slashMode) {
+  let next = String(filePath || '')
+  if (!next) return next
+  try {
+    const realpath = fs.realpathSync.native || fs.realpathSync
+    next = realpath(next)
+  } catch {
+    next = path.resolve(next)
   }
-  return { ...file, path: filePath }
+  if (slashMode && process.platform === 'win32') next = next.replace(/\\/g, '/')
+  return next
 }
 
 function normalizeInputFileHolder (value, slashMode) {
   if (!value || typeof value !== 'object') return value
-  if (value._ === 'inputFileLocal') return normalizeLocalInputFile(value, slashMode)
-  return value
+  const type = tdType(value)
+  if (!/^inputFile(?:Local|Id|Remote|Generated)$/.test(type)) return value
+
+  const next = { ...value, '@type': type }
+  delete next._
+  if (type === 'inputFileLocal') next.path = normalizeLocalPath(next.path, slashMode)
+  return next
 }
 
 function nullable (content, key, value) {
@@ -49,7 +54,8 @@ function nullable (content, key, value) {
 
 function normalizeAttachmentContent (content, slashMode) {
   if (!content || typeof content !== 'object') return content
-  switch (content._) {
+  const type = tdType(content)
+  switch (type) {
     case 'inputMessageVideo':
       return {
         ...content,
@@ -88,21 +94,46 @@ function normalizeAttachmentContent (content, slashMode) {
 
 function isAttachmentQuery (query) {
   if (!query || typeof query !== 'object') return false
-  if (query._ === 'preliminaryUploadFile') return true
-  if (query._ !== 'sendMessage') return false
-  const type = query.input_message_content && query.input_message_content._
-  return ['inputMessageVideo', 'inputMessagePhoto', 'inputMessageAudio', 'inputMessageDocument'].includes(type)
+  const type = tdType(query)
+  if (type === 'preliminaryUploadFile') return true
+  if (type !== 'sendMessage') return false
+  const contentType = tdType(query.input_message_content)
+  return ['inputMessageVideo', 'inputMessagePhoto', 'inputMessageAudio', 'inputMessageDocument'].includes(contentType)
 }
 
 function normalizeAttachmentQuery (query, slashMode) {
   if (!isAttachmentQuery(query)) return query
-  if (query._ === 'preliminaryUploadFile') {
+  if (tdType(query) === 'preliminaryUploadFile') {
     return { ...query, file: normalizeInputFileHolder(query.file, slashMode) }
   }
   return {
     ...query,
     input_message_content: normalizeAttachmentContent(query.input_message_content, slashMode)
   }
+}
+
+function primaryInputFile (query) {
+  if (tdType(query) === 'preliminaryUploadFile') return query.file
+  const content = query && query.input_message_content
+  switch (tdType(content)) {
+    case 'inputMessageVideo': return content.video
+    case 'inputMessagePhoto': return content.photo
+    case 'inputMessageAudio': return content.audio
+    case 'inputMessageDocument': return content.document
+    default: return null
+  }
+}
+
+function validateAttachmentQuery (query) {
+  const file = primaryInputFile(query)
+  const type = tdType(file)
+  if (!file || !/^inputFile(?:Local|Id|Remote|Generated)$/.test(type)) {
+    throw new Error('Tele attachment pipeline lost the TDLib InputFile before invoke')
+  }
+  if (type === 'inputFileLocal' && !String(file.path || '').trim()) {
+    throw new Error('Tele attachment pipeline received an empty local file path')
+  }
+  return query
 }
 
 function inputFileError (error) {
@@ -116,14 +147,14 @@ tdl.createClient = function createCompatibleClient (options) {
   client.invoke = async function compatibleInvoke (query) {
     if (!isAttachmentQuery(query)) return originalInvoke(query)
 
-    const normalized = normalizeAttachmentQuery(query, false)
+    const normalized = validateAttachmentQuery(normalizeAttachmentQuery(query, false))
     try {
       return await originalInvoke(normalized)
     } catch (error) {
       if (!inputFileError(error) || process.platform !== 'win32') throw error
-      /* Retry a local Windows InputFile with a canonical forward-slash path.
-       * inputFileId fallbacks are unchanged by this retry. */
-      return originalInvoke(normalizeAttachmentQuery(query, true))
+      /* Retry only the primary file path in forward-slash form on Windows.
+       * Nested InputFile objects stay explicit TDLib JSON `@type` objects. */
+      return originalInvoke(validateAttachmentQuery(normalizeAttachmentQuery(query, true)))
     }
   }
 
@@ -133,6 +164,8 @@ tdl.createClient = function createCompatibleClient (options) {
 module.exports = {
   normalizeAttachmentQuery,
   normalizeAttachmentContent,
-  normalizeLocalInputFile,
+  normalizeInputFileHolder,
+  normalizeLocalPath,
+  validateAttachmentQuery,
   isAttachmentQuery
 }

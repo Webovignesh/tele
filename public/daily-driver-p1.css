@@ -1,0 +1,145 @@
+/* Daily-driver P1: flat Telegram-like downloads drawer and final spacing pass. */
+
+.app {
+  grid-template-columns: 316px minmax(0, 1fr) 360px !important;
+}
+
+#mg-downloads-pane {
+  min-height: 0;
+  overflow: auto;
+  background: #0f1720;
+}
+
+#mg-downloads-pane .downloads-head {
+  display: none !important;
+}
+
+#mg-downloads-pane .dl-controls {
+  margin: 0 !important;
+  padding: 18px 16px 14px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+#mg-downloads-pane .dl-controls .conc {
+  margin: 0 0 16px !important;
+  padding: 0 0 16px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  border-bottom: 1px solid rgba(126, 157, 187, .13);
+}
+
+#mg-downloads-pane .dl-controls .conc > span:first-child {
+  color: #8fa4b8 !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  letter-spacing: .07em !important;
+  text-transform: uppercase;
+}
+
+#mg-downloads-pane .dl-controls .conc:first-of-type > .row {
+  width: 100%;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) 54px !important;
+  gap: 8px !important;
+  align-items: center !important;
+}
+
+#mg-downloads-pane #dl-dir {
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 38px !important;
+  padding: 0 10px !important;
+  border-radius: 10px !important;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace !important;
+  font-size: 11px !important;
+  text-overflow: ellipsis;
+}
+
+#mg-downloads-pane #set-dir {
+  width: 54px !important;
+  min-width: 54px !important;
+  height: 38px !important;
+  padding: 0 !important;
+  border-radius: 10px !important;
+}
+
+/* The editable field is the single source of truth. Remove the duplicated path card. */
+#mg-downloads-pane .dir-current {
+  display: none !important;
+}
+
+#mg-downloads-pane .dl-controls .conc:nth-of-type(2) > .row {
+  width: 100%;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 12px !important;
+  align-items: center !important;
+}
+
+#mg-downloads-pane #concurrency {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
+#mg-downloads-pane #concurrency-val {
+  width: auto !important;
+  min-width: 24px !important;
+  height: auto !important;
+  padding: 0 !important;
+  display: block !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: #c6d5e4 !important;
+  font-size: 12px !important;
+  text-align: right;
+}
+
+#mg-downloads-pane .dl-controls > .row {
+  width: 100%;
+  margin: 0 !important;
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 8px !important;
+}
+
+#mg-downloads-pane .dl-controls > .row button {
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 36px !important;
+  padding: 6px 8px !important;
+  border-radius: 10px !important;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+#mg-downloads-pane .dl-controls > .row:has(#pack-media) {
+  display: none !important;
+}
+
+#mg-downloads-pane #download-list {
+  margin: 0 !important;
+  padding: 2px 12px 18px !important;
+  border-top: 1px solid rgba(126, 157, 187, .1);
+}
+
+#mg-downloads-pane #download-list > * {
+  margin: 10px 0 0 !important;
+  border-radius: 12px !important;
+}
+
+.messages {
+  scroll-behavior: auto !important;
+  overflow-anchor: none;
+}
+
+@media (max-width: 1360px) {
+  .app { grid-template-columns: 292px minmax(0, 1fr) 330px !important; }
+  #mg-downloads-pane .dl-controls { padding-inline: 12px !important; }
+}

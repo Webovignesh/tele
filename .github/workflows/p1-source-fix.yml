@@ -1,0 +1,38 @@
+name: P1 source cleanup
+
+on:
+  push:
+    branches:
+      - rescue/legacy-modernization
+    paths:
+      - scripts/apply-p1-source-fix.cjs
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply P1 source cleanup
+        run: node scripts/apply-p1-source-fix.cjs
+      - name: Validate patched sources
+        run: npm run check
+      - name: Commit patched sources
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No source changes required"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js public/rescue-runtime.js public/management.js
+          git commit -m "fix(rescue): remove notifications and harden attachment payloads"
+          git push origin HEAD:rescue/legacy-modernization
