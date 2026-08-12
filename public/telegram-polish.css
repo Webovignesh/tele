@@ -1,0 +1,264 @@
+/* Tele daily-driver polish ------------------------------------------------ */
+:root {
+  --tele-surface-0: #091019;
+  --tele-surface-1: #0f1823;
+  --tele-surface-2: #152131;
+  --tele-surface-3: #1a293a;
+  --tele-line: rgba(126, 157, 190, .16);
+  --tele-blue: #58aaff;
+  --tele-green: #4bc477;
+}
+
+/* Sidebar: compact, readable, no emoji chrome. */
+.sidebar { padding-inline: 8px; }
+.channels-filter {
+  margin: 1px 4px 8px;
+  min-height: 36px;
+  padding: 6px 9px;
+  border: 1px solid var(--tele-line);
+  border-radius: 11px;
+  background: rgba(255,255,255,.018);
+  color: #a7b7c8;
+  gap: 8px;
+}
+.channels-filter input {
+  appearance: none;
+  width: 30px;
+  height: 17px;
+  border: 0;
+  border-radius: 999px;
+  padding: 2px;
+  background: #2a3949;
+  position: relative;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+.channels-filter input::after {
+  content: '';
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #dce7f1;
+  left: 2px;
+  top: 2px;
+  transition: transform .15s ease;
+}
+.channels-filter input:checked { background: var(--tele-blue); }
+.channels-filter input:checked::after { transform: translateX(13px); background: #06121e; }
+#chat-count { margin-left: auto; }
+.chat-item .u.chat-kind {
+  width: auto;
+  min-width: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  color: #6f849a;
+}
+.chat-item.active .u.chat-kind { color: #b9dcff; }
+.chat-unread {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--tele-blue);
+  color: #07121e;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+/* Messages: compact Telegram-like bubbles rather than stretched cards. */
+.messages {
+  align-items: stretch;
+  gap: 3px;
+  padding: 16px clamp(16px, 4vw, 64px) 18px;
+}
+.msg {
+  position: relative;
+  width: fit-content;
+  max-width: min(72%, 680px);
+  min-width: 92px;
+  padding: 7px 10px 6px;
+  border: 0;
+  box-shadow: 0 1px 1px rgba(0,0,0,.22);
+}
+.msg.incoming {
+  align-self: flex-start;
+  background: #172231;
+  border-radius: 14px 14px 14px 4px;
+}
+.msg.outgoing {
+  align-self: flex-end;
+  background: #1c4967;
+  border-radius: 14px 14px 4px 14px;
+}
+.msg-head { min-height: 14px; margin-bottom: 2px; align-items: center; }
+.msg.outgoing .msg-sender { display: none; }
+.msg-sender { font-size: 11px; font-weight: 650; }
+.msg-date { font-size: 9px; opacity: .78; white-space: nowrap; }
+.msg-text { font-size: 13.5px; line-height: 1.38; }
+.msg-actions {
+  position: absolute;
+  right: 6px;
+  bottom: -29px;
+  z-index: 12;
+  display: flex;
+  gap: 4px;
+  height: auto;
+  margin: 0;
+  padding: 3px;
+  opacity: 0;
+  pointer-events: none;
+  border: 1px solid var(--tele-line);
+  border-radius: 10px;
+  background: #111c28;
+  box-shadow: 0 8px 24px rgba(0,0,0,.3);
+}
+.msg:hover .msg-actions, .msg:focus-within .msg-actions { opacity: 1; pointer-events: auto; height: auto; }
+.msg-actions button { padding: 4px 7px; font-size: 10px; }
+.msg-select { top: 6px; right: 7px; }
+.msg .media {
+  min-width: min(420px, 55vw);
+  padding: 6px;
+  margin-top: 4px;
+  border-radius: 10px;
+  background: rgba(4,10,16,.22);
+}
+.media-preview-action { flex: 0 0 auto; }
+
+/* File toolbar: newest-first is the invariant; give space to useful controls. */
+.legacy-control-hidden { display: none !important; }
+.files-toolbar {
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 10px 14px;
+  background: #0d151f;
+}
+.files-toolbar .search-box { min-width: 230px; }
+.file-range-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 39px;
+  padding: 4px 5px 4px 9px;
+  border: 1px solid #253649;
+  border-radius: 11px;
+  background: #141f2b;
+}
+.file-range-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .55px; color: #7f94aa; }
+.file-range-tools input {
+  width: 66px;
+  height: 29px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: #0c141e;
+  font-size: 11px;
+  text-align: center;
+}
+.file-range-separator { color: #6d8195; }
+#file-range-summary { padding: 0 5px; font-size: 10px; white-space: nowrap; }
+.gcard { min-height: 64px; height: auto; padding: 7px 10px; gap: 9px; }
+.gcard .gthumb { width: 48px; height: 48px; background: #101b27; }
+.gcard .gthumb .icon { display: flex; align-items: center; justify-content: center; color: #7790a8; opacity: 1; }
+.gcard .gthumb img { background: #07101a; }
+.gcard .gbody { gap: 2px; }
+.gcard .gtype { background: rgba(88,170,255,.12); color: #76baff; border: 1px solid rgba(88,170,255,.22); }
+.file-preview-action { padding: 5px 8px !important; color: #a8bad0 !important; }
+.file-statuses { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.file-status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1px;
+}
+.file-status.downloaded { color: #69d98e; background: rgba(75,196,119,.12); border: 1px solid rgba(75,196,119,.2); }
+.file-status.forwarded { color: #73baff; background: rgba(88,170,255,.12); border: 1px solid rgba(88,170,255,.2); }
+.file-render-more {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #71879c;
+  font-size: 10px;
+}
+
+/* Preview lightbox. */
+.tele-preview-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1900;
+  display: grid;
+  place-items: center;
+  padding: 26px;
+  background: rgba(3,8,13,.78);
+  backdrop-filter: blur(10px);
+}
+.tele-preview-shell {
+  width: min(1040px, 92vw);
+  height: min(760px, 88vh);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+  border: 1px solid #293b4f;
+  border-radius: 17px;
+  background: #0d151f;
+  box-shadow: 0 28px 90px rgba(0,0,0,.6);
+}
+.tele-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px 10px 15px; border-bottom: 1px solid var(--tele-line); }
+.tele-preview-head > div { min-width: 0; display: flex; flex-direction: column; }
+.tele-preview-head strong, .tele-preview-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tele-preview-head span { font-size: 10px; color: #8396aa; }
+.tele-preview-body { min-height: 0; display: grid; place-items: center; padding: 12px; background: #070d14; }
+.tele-preview-body img, .tele-preview-body video { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 9px; }
+.tele-preview-body audio { width: min(620px, 90%); }
+.tele-preview-loading { color: #8296aa; font-size: 12px; }
+
+/* Composer: multi-file queue and one-time control. */
+.tele-attachment-preview { display: flex; flex-direction: column; align-items: stretch; gap: 7px; }
+.tele-attachment-list { display: grid; gap: 5px; max-height: 142px; overflow: auto; }
+.tele-attachment-item { display: flex; align-items: center; gap: 8px; padding: 6px 7px 6px 9px; border-radius: 9px; background: rgba(0,0,0,.14); }
+.tele-attachment-item-info { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.tele-attachment-item-info strong, .tele-attachment-item-info span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tele-attachment-item-info strong { font-size: 11px; }
+.tele-attachment-item-info span { font-size: 9px; }
+.tele-attachment-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tele-one-time { flex-direction: row; align-items: center; gap: 6px; color: #9fb1c4; font-size: 10px; cursor: pointer; }
+.tele-one-time input { width: 15px; height: 15px; padding: 0; accent-color: var(--tele-blue); }
+
+/* Downloads: calmer controls, clearer hierarchy, less dead chrome. */
+#mg-downloads-pane .downloads-head { padding: 11px 12px; }
+#mg-downloads-pane .dl-controls {
+  margin: 8px;
+  padding: 10px;
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--tele-line);
+  border-radius: 13px;
+  background: #131e2a;
+}
+#mg-downloads-pane .conc { gap: 5px; }
+#mg-downloads-pane #dl-dir { background: #0c151f; }
+#mg-downloads-pane .dir-current { padding: 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#mg-downloads-pane .dl-controls > .row { gap: 5px !important; }
+#mg-downloads-pane .dl-controls button { border-radius: 9px; }
+#download-list { padding: 0 8px 12px; }
+.djob { margin-top: 7px; border-radius: 12px !important; border-color: var(--tele-line) !important; background: #131e2a !important; box-shadow: none !important; }
+.djob .bar { height: 3px !important; background: #263547 !important; }
+
+/* Chat info uses quieter cards and explicit access value. */
+.mg-section { box-shadow: none; }
+.mg-info-row { min-height: 31px; }
+
+@media (max-width: 1250px) {
+  .app { grid-template-columns: 280px minmax(0, 1fr) 310px; }
+  .msg { max-width: 82%; }
+  .file-range-tools { width: 100%; }
+}

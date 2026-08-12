@@ -1547,10 +1547,6 @@ $('#file-search').addEventListener('input', e => {
   state.files.query = e.target.value
   searchDebounced()
 })
-$('#file-search').addEventListener('keydown', e => {
-  if (e.key === 'Enter') searchWholeChat()
-})
-$('#search-whole').onclick = searchWholeChat
 $('#clear-search').onclick = () => {
   state.files.mode = 'browse'
   state.files.results = []

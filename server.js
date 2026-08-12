@@ -470,6 +470,7 @@ function startPackSelected (items, chatTitle) {
 
 let scanState = null
 const scanCache = new Map() // chatId -> { found, scanned, typeCounts }
+const mediaIndexCache = new Map() // chatId -> full media snapshot for instant revisits
 
 function emitScan (extra = {}) {
   if (!scanState) return
@@ -492,6 +493,18 @@ function emitScan (extra = {}) {
 }
 
 async function scanChat (chatId, { queue = false, mode, returnItems = false } = {}) {
+  const mediaKey = String(chatId)
+  if (!queue && returnItems) {
+    const cachedIndex = mediaIndexCache.get(mediaKey)
+    if (cachedIndex && Array.isArray(cachedIndex.items)) {
+      return {
+        found: cachedIndex.found,
+        scanned: cachedIndex.scanned,
+        typeCounts: { ...cachedIndex.typeCounts },
+        items: cachedIndex.items.map(item => ({ ...item }))
+      }
+    }
+  }
   if (scanState && scanState.active) throw new Error('A scan is already running')
   const chat = await client.invoke({ _: 'getChat', chat_id: chatId }).catch(() => ({ title: 'Chat' }))
   const chatTitle = chat.title || 'Chat'
@@ -536,8 +549,9 @@ async function scanChat (chatId, { queue = false, mode, returnItems = false } = 
             name: media.name,
             fileSize: f.size || f.expected_size || 0,
             type: media.type,
+            mime: media.mime || 'application/octet-stream',
             caption: media.caption || null,
-            thumbFileId: media.thumb && media.thumb.photo ? media.thumb.photo.id : null,
+            thumbFileId: mediaThumbFileId(media.thumb),
             thumbUrl: null
           }
           if (returnItems) items.push(item)
@@ -555,6 +569,15 @@ async function scanChat (chatId, { queue = false, mode, returnItems = false } = 
     scanState.active = false
     const result = { found: scanState.found, scanned: scanState.scanned, typeCounts: scanState.typeCounts, items }
     scanCache.set(chatId, { found: result.found, scanned: result.scanned, typeCounts: result.typeCounts })
+    if (!queue && returnItems && !scanState.cancelled) {
+      mediaIndexCache.set(String(chatId), {
+        found: result.found,
+        scanned: result.scanned,
+        typeCounts: { ...result.typeCounts },
+        items: result.items.map(item => ({ ...item })),
+        savedAt: Date.now()
+      })
+    }
     emitScan({ done: true })
     return result
   }
@@ -738,6 +761,7 @@ function initClient (config) {
       return
     }
     if (u._ === 'updateDeleteMessages') {
+      deleteMediaIndexMessages(u.chat_id, u.message_ids || [])
       sendAll({
         type: 'event',
         event: {
@@ -878,12 +902,81 @@ function extractMedia (msg) {
     case 'messageVoiceNote':
       return { ...base, type: 'voice', file: c.voice_note.voice, name: `voice_${msg.id}.ogg`, mime: 'audio/ogg', thumb: null }
     case 'messageVideoNote':
-      return { ...base, type: 'video_note', file: c.video_note.video, name: `video_note_${msg.id}.mp4`, mime: 'video/mp4', thumb: c.video_note.thumb }
+      return { ...base, type: 'video_note', file: c.video_note.video, name: `video_note_${msg.id}.mp4`, mime: 'video/mp4', thumb: c.video_note.thumbnail || c.video_note.thumb || null }
     case 'messageSticker':
       return { ...base, type: 'sticker', file: c.sticker.sticker, name: c.sticker.set_name ? `${c.sticker.emoji || 'sticker'}.webp` : `sticker_${msg.id}.webp`, mime: 'image/webp', thumb: null }
     default:
       return null
   }
+}
+
+function mediaThumbFileId (thumb) {
+  if (!thumb) return null
+  if (thumb.file && thumb.file.id) return thumb.file.id
+  if (thumb.photo && thumb.photo.id) return thumb.photo.id
+  return null
+}
+
+function mediaIndexItemFromSerialized (chatId, message) {
+  if (!message || !message.media) return null
+  const media = message.media
+  const file = media.file || null
+  const fileId = media.fileId || (file && file.id)
+  if (!fileId) return null
+  return {
+    key: `${chatId}:${message.id}`,
+    messageId: message.id,
+    chatId,
+    date: message.date || media.date || 0,
+    fileId,
+    name: media.name,
+    fileSize: media.fileSize || (file && (file.size || file.expected_size)) || 0,
+    type: media.type,
+    mime: media.mime || 'application/octet-stream',
+    caption: media.caption || null,
+    thumbFileId: media.thumbFileId || mediaThumbFileId(media.thumb),
+    thumbUrl: media.thumbUrl || null
+  }
+}
+
+function patchMediaIndexMessage (chatId, message) {
+  const key = String(chatId)
+  const cached = mediaIndexCache.get(key)
+  if (!cached || !Array.isArray(cached.items) || !message) return
+  const id = String(message.id)
+  const index = cached.items.findIndex(item => String(item.messageId) === id)
+  const next = mediaIndexItemFromSerialized(chatId, message)
+  if (next) {
+    if (index >= 0) cached.items[index] = next
+    else cached.items.unshift(next)
+  } else if (index >= 0) {
+    cached.items.splice(index, 1)
+  }
+  cached.items.sort((a, b) => {
+    const aa = BigInt(String(a.messageId || 0))
+    const bb = BigInt(String(b.messageId || 0))
+    return aa === bb ? 0 : (aa < bb ? 1 : -1)
+  })
+  cached.found = cached.items.length
+  cached.typeCounts = cached.items.reduce((counts, item) => {
+    counts[item.type] = (counts[item.type] || 0) + 1
+    return counts
+  }, { document: 0, photo: 0, video: 0, gif: 0, audio: 0, voice: 0, video_note: 0, sticker: 0 })
+  cached.savedAt = Date.now()
+}
+
+function deleteMediaIndexMessages (chatId, messageIds) {
+  const key = String(chatId)
+  const cached = mediaIndexCache.get(key)
+  if (!cached || !Array.isArray(cached.items)) return
+  const ids = new Set((messageIds || []).map(String))
+  cached.items = cached.items.filter(item => !ids.has(String(item.messageId)))
+  cached.found = cached.items.length
+  cached.typeCounts = cached.items.reduce((counts, item) => {
+    counts[item.type] = (counts[item.type] || 0) + 1
+    return counts
+  }, { document: 0, photo: 0, video: 0, gif: 0, audio: 0, voice: 0, video_note: 0, sticker: 0 })
+  cached.savedAt = Date.now()
 }
 
 function mainChatOrder (chat) {
@@ -982,9 +1075,10 @@ async function serializeRealtimeMessage (m) {
     const f = item.media.file
     item.media.fileSize = f.size || f.expected_size || 0
     item.media.fileId = f.id
-    if (item.media.thumb && item.media.thumb.photo && item.media.thumb.photo.id) {
+    const thumbFileId = mediaThumbFileId(item.media.thumb)
+    if (thumbFileId) {
       item.media.thumbUrl = null
-      item.media.thumbFileId = item.media.thumb.photo.id
+      item.media.thumbFileId = thumbFileId
     }
   } else {
     item.media = null
@@ -996,6 +1090,7 @@ async function emitRealtimeMessage (message) {
   if (!message || message.chat_id == null) return
   const serialized = await serializeRealtimeMessage(message)
   if (!serialized) return
+  patchMediaIndexMessage(message.chat_id, serialized)
   sendAll({ type: 'event', event: { name: 'message-upsert', chatId: message.chat_id, message: serialized } })
 }
 
@@ -1065,9 +1160,10 @@ async function loadMessages (chatId, fromMessageId, limit) {
       const f = item.media.file
       item.media.fileSize = f.size || f.expected_size || 0
       item.media.fileId = f.id
-      if (item.media.thumb && item.media.thumb.photo && item.media.thumb.photo.id) {
+      const thumbFileId = mediaThumbFileId(item.media.thumb)
+      if (thumbFileId) {
         item.media.thumbUrl = null
-        item.media.thumbFileId = item.media.thumb.photo.id
+        item.media.thumbFileId = thumbFileId
       }
     } else {
       item.media = null
@@ -1164,6 +1260,12 @@ async function getManagedChatInfo (chatId) {
   const notification = chat.notification_settings || {}
   const muted = notification.use_default_mute_for === false && Number(notification.mute_for || 0) > 0
   const permissions = managedPermissions(status, chat, serialized.kind, isSavedMessages, canGetMembers)
+  const activePublicUsernames = groupInfo && groupInfo.usernames && Array.isArray(groupInfo.usernames.active_usernames)
+    ? groupInfo.usernames.active_usernames
+    : []
+  const accessType = type._ === 'chatTypePrivate'
+    ? 'Private chat'
+    : (type._ === 'chatTypeSupergroup' && activePublicUsernames.length ? 'Public' : 'Private')
 
   return {
     chat: {
@@ -1172,6 +1274,7 @@ async function getManagedChatInfo (chatId) {
     },
     details: {
       description: (fullInfo && fullInfo.description) || '',
+      accessType,
       memberCount,
       administratorCount: (fullInfo && fullInfo.administrator_count) || null,
       inviteLink: inviteLink || null,
@@ -1456,7 +1559,72 @@ async function deleteManagedMessage (chatId, messageId, revoke) {
 }
 
 
-async function sendManagedAttachmentMessage (chatId, filePath, caption, replyToMessageId) {
+function managedAttachmentKind (fileName, mimeType) {
+  const name = String(fileName || '').toLowerCase()
+  const mime = String(mimeType || '').toLowerCase()
+  if (/^image\/(jpeg|png)$/.test(mime) || /\.(jpe?g|png)$/.test(name)) return 'photo'
+  if (/^video\//.test(mime) || /\.(mp4|mov|m4v|webm|mkv)$/.test(name)) return 'video'
+  if (/^audio\//.test(mime) || /\.(mp3|m4a|aac|ogg|wav|flac)$/.test(name)) return 'audio'
+  return 'document'
+}
+
+function managedAttachmentContent (kind, absolutePath, caption, oneTime) {
+  const file = { _: 'inputFileLocal', path: absolutePath }
+  const formattedCaption = { _: 'formattedText', text: String(caption || '').slice(0, 1024), entities: [] }
+  const selfDestruct = oneTime ? { _: 'messageSelfDestructTypeImmediately' } : null
+  if (kind === 'photo') {
+    return {
+      _: 'inputMessagePhoto',
+      photo: file,
+      thumbnail: null,
+      added_sticker_file_ids: [],
+      width: 0,
+      height: 0,
+      caption: formattedCaption,
+      show_caption_above_media: false,
+      self_destruct_type: selfDestruct,
+      has_spoiler: false
+    }
+  }
+  if (kind === 'video') {
+    return {
+      _: 'inputMessageVideo',
+      video: file,
+      thumbnail: null,
+      cover: null,
+      start_timestamp: 0,
+      added_sticker_file_ids: [],
+      duration: 0,
+      width: 0,
+      height: 0,
+      supports_streaming: true,
+      caption: formattedCaption,
+      show_caption_above_media: false,
+      self_destruct_type: selfDestruct,
+      has_spoiler: false
+    }
+  }
+  if (kind === 'audio') {
+    return {
+      _: 'inputMessageAudio',
+      audio: file,
+      album_cover_thumbnail: null,
+      duration: 0,
+      title: '',
+      performer: '',
+      caption: formattedCaption
+    }
+  }
+  return {
+    _: 'inputMessageDocument',
+    document: file,
+    thumbnail: null,
+    disable_content_type_detection: false,
+    caption: formattedCaption
+  }
+}
+
+async function sendManagedAttachmentMessage (chatId, filePath, caption, replyToMessageId, mimeType, fileName, oneTime) {
   ensureManagementReady()
   const absolutePath = path.resolve(String(filePath || ''))
   const stat = await fs.promises.stat(absolutePath).catch(() => null)
@@ -1469,17 +1637,20 @@ async function sendManagedAttachmentMessage (chatId, filePath, caption, replyToM
     replyTo = { _: 'inputMessageReplyToMessage', message_id: replyToMessageId, quote: null, checklist_task_id: 0 }
   }
 
-  // Register the local file with TDLib first. Sending by inputFileId is more
-  // reliable on Windows than passing the local InputFile through nested message
-  // content in one call, and gives us a concrete file id to validate.
-  const uploaded = await client.invoke({
-    _: 'preliminaryUploadFile',
-    file: { _: 'inputFileLocal', path: absolutePath },
-    file_type: { _: 'fileTypeDocument' },
-    priority: 32
-  })
-  if (!uploaded || !uploaded.id) throw new Error('Telegram did not accept the staged attachment')
+  const kind = managedAttachmentKind(fileName || absolutePath, mimeType)
+  if (oneTime) {
+    const chat = await client.invoke({ _: 'getChat', chat_id: chatId })
+    if (!chat || !chat.type || chat.type._ !== 'chatTypePrivate') {
+      throw new Error('View once is available only in private chats')
+    }
+    if (kind !== 'photo' && kind !== 'video') {
+      throw new Error('View once is available only for photos and videos')
+    }
+  }
 
+  // Normal Telegram media should be sent directly as inputFileLocal. TDLib
+  // owns the upload after sendMessage accepts the content; no preliminary
+  // upload/file-id handoff is needed for ordinary attachments.
   const message = await client.invoke({
     _: 'sendMessage',
     chat_id: chatId,
@@ -1487,13 +1658,7 @@ async function sendManagedAttachmentMessage (chatId, filePath, caption, replyToM
     reply_to: replyTo,
     options: null,
     reply_markup: null,
-    input_message_content: {
-      _: 'inputMessageDocument',
-      document: { _: 'inputFileId', id: uploaded.id },
-      thumbnail: null,
-      disable_content_type_detection: false,
-      caption: { _: 'formattedText', text: String(caption || '').slice(0, 1024), entities: [] }
-    }
+    input_message_content: managedAttachmentContent(kind, absolutePath, caption, !!oneTime)
   })
   emitRealtimeMessage(message).catch(() => {})
   emitChatUpsert(chatId).catch(() => {})
@@ -1539,8 +1704,9 @@ async function searchMedia (chatId, query, fromMessageId, limit, filter) {
       name: media.name,
       fileSize: f.size || f.expected_size || 0,
       type: media.type,
+      mime: media.mime || 'application/octet-stream',
       caption: media.caption || null,
-      thumbFileId: media.thumb && media.thumb.photo ? media.thumb.photo.id : null,
+      thumbFileId: mediaThumbFileId(media.thumb),
       thumbUrl: null
     })
   }
@@ -1623,7 +1789,18 @@ app.post('/api/chat-attachment/:chatId', async (req, res) => {
     try { caption = decodeURIComponent(caption) } catch {}
     const replyHeader = req.headers['x-reply-to']
     const replyToMessageId = replyHeader ? Number(replyHeader) : null
-    const message = await sendManagedAttachmentMessage(chatId, tempPath, caption, Number.isSafeInteger(replyToMessageId) ? replyToMessageId : null)
+    let mimeType = String(req.headers['x-mime-type'] || 'application/octet-stream')
+    try { mimeType = decodeURIComponent(mimeType) } catch {}
+    const oneTime = String(req.headers['x-one-time'] || '') === '1'
+    const message = await sendManagedAttachmentMessage(
+      chatId,
+      tempPath,
+      caption,
+      Number.isSafeInteger(replyToMessageId) ? replyToMessageId : null,
+      mimeType,
+      fileName,
+      oneTime
+    )
     res.json({ ok: true, message })
   } catch (e) {
     res.status(500).json({ error: String(e.message || e) })
@@ -1632,6 +1809,39 @@ app.post('/api/chat-attachment/:chatId', async (req, res) => {
       const timer = setTimeout(() => fs.promises.rm(uploadDir, { recursive: true, force: true }).catch(() => {}), 6 * 60 * 60 * 1000)
       if (timer.unref) timer.unref()
     }
+  }
+})
+
+async function ensurePreviewFile (fileId) {
+  const id = Number(fileId)
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Invalid file id')
+  const existing = await client.invoke({ _: 'getFile', file_id: id }).catch(() => null)
+  if (existing && existing.local && existing.local.is_downloading_completed && existing.local.path) return existing.local.path
+  const downloaded = await client.invoke({
+    _: 'downloadFile',
+    file_id: id,
+    priority: 16,
+    offset: 0,
+    limit: 0,
+    synchronous: true
+  })
+  const local = downloaded && downloaded.local
+  if (!local || !local.is_downloading_completed || !local.path) throw new Error('Telegram could not prepare this file for preview')
+  return local.path
+}
+
+app.get('/api/media-preview/:fileId', async (req, res) => {
+  try {
+    ensureManagementReady()
+    const localPath = await ensurePreviewFile(req.params.fileId)
+    const mime = String(req.query.mime || '')
+    const name = sanitize(String(req.query.name || path.basename(localPath)))
+    if (/^[\w.+-]+\/[\w.+-]+$/.test(mime)) res.setHeader('Content-Type', mime)
+    else res.type(name)
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(name)}`)
+    res.sendFile(path.resolve(localPath))
+  } catch (e) {
+    res.status(404).json({ error: String(e.message || e) })
   }
 })
 
@@ -1782,6 +1992,7 @@ wss.on('connection', (ws) => {
           if (revoke && !info.permissions.canClearHistoryForAll) throw new Error('Telegram does not allow deleting this history for everyone')
           if (!revoke && !info.permissions.canClearHistoryForSelf) throw new Error('Telegram does not allow deleting this history only for you')
           await client.invoke({ _: 'deleteChatHistory', chat_id: payload.chatId, remove_from_chat_list: false, revoke })
+          mediaIndexCache.delete(String(payload.chatId))
           sendAll({ type: 'event', event: { name: 'history-cleared', chatId: payload.chatId, revoke } })
           return respond(ws, id, true, { ok: true, revoke })
         }

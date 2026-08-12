@@ -10,6 +10,10 @@ const rescueFileCache = new Map()
 const rescueAvatarCache = new Map()
 const rescueFileInflight = new Map()
 const rescueInflight = new Map()
+const rescueDownloadedMarks = rescueLoadMarkSet('tele-downloaded-files-v1')
+const rescueForwardedMarks = rescueLoadMarkSet('tele-forwarded-files-v1')
+let rescueMessageRenderLimit = 120
+let rescueFileRenderLimit = 600
 const rescueCacheLimit = 24
 const rescueMessageLimit = 400
 let rescueOpenGeneration = 0
@@ -41,6 +45,57 @@ function rescueRememberView (view) {
 }
 
 function rescueChatKey (chatId) { return String(chatId) }
+
+function rescueLoadMarkSet (storageKey) {
+  try {
+    const raw = localStorage.getItem(storageKey)
+    return new Set(raw ? JSON.parse(raw).map(String) : [])
+  } catch { return new Set() }
+}
+
+function rescueSaveMarkSet (storageKey, set) {
+  try { localStorage.setItem(storageKey, JSON.stringify([...set])) } catch {}
+}
+
+function rescueMarkDownloaded (chatId, messageId) {
+  if (chatId == null || messageId == null) return
+  rescueDownloadedMarks.add(`${chatId}:${messageId}`)
+  rescueSaveMarkSet('tele-downloaded-files-v1', rescueDownloadedMarks)
+}
+
+function rescueMarkForwarded (chatId, messageId) {
+  if (chatId == null || messageId == null) return
+  rescueForwardedMarks.add(`${chatId}:${messageId}`)
+  rescueSaveMarkSet('tele-forwarded-files-v1', rescueForwardedMarks)
+}
+
+function rescueMessageSignature (messages) {
+  return (messages || []).slice(0, 120).map(m => [
+    String(m.id || ''),
+    String(m.date || ''),
+    String(m.text || ''),
+    String(m.media && (m.media.fileId || (m.media.file && m.media.file.id)) || '')
+  ].join(':')).join('|')
+}
+
+const rescueLegacyRenderMessagesList = renderMessagesList
+renderMessagesList = function rescueWindowedMessageRender () {
+  const all = state.messages
+  if (!Array.isArray(all) || all.length <= rescueMessageRenderLimit) return rescueLegacyRenderMessagesList()
+  state.messages = all.slice(0, rescueMessageRenderLimit)
+  try { return rescueLegacyRenderMessagesList() } finally { state.messages = all }
+}
+
+const rescueMessagesPanelForWindow = $('#messages')
+if (rescueMessagesPanelForWindow) {
+  rescueMessagesPanelForWindow.addEventListener('scroll', () => {
+    if (rescueMessagesPanelForWindow.scrollTop > 80 || rescueMessageRenderLimit >= state.messages.length) return
+    const beforeHeight = rescueMessagesPanelForWindow.scrollHeight
+    rescueMessageRenderLimit = Math.min(state.messages.length, rescueMessageRenderLimit + 120)
+    renderMessagesList()
+    rescueMessagesPanelForWindow.scrollTop = Math.max(1, rescueMessagesPanelForWindow.scrollHeight - beforeHeight)
+  }, true)
+}
 
 function rescueMarkActiveChat (chatId) {
   const wanted = rescueChatKey(chatId)
@@ -74,13 +129,26 @@ function rescueLoadedMediaCount () {
 }
 
 function rescueUpdateMediaLabel () {
-  const count = rescueLoadedMediaCount()
+  const key = state.activeChatId == null ? null : rescueChatKey(state.activeChatId)
+  const snapshot = key ? rescueFileCache.get(key) : null
+  const recentCount = rescueLoadedMediaCount()
+  const count = snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : recentCount
   const label = $('#chat-media-count')
-  if (label) label.textContent = state.activeChatId == null ? '' : `${count} loaded file${count === 1 ? '' : 's'}`
+  if (label) {
+    if (state.activeChatId == null) label.textContent = ''
+    else if (snapshot) label.textContent = `${count} file${count === 1 ? '' : 's'}`
+    else if (state.view === 'files') label.textContent = 'Loading files…'
+    else label.textContent = count ? `${count} recent file${count === 1 ? '' : 's'}` : ''
+  }
   const downloadAll = $('#download-all-media')
   if (downloadAll) {
-    downloadAll.textContent = 'Download all media'
+    downloadAll.textContent = snapshot ? `Download all media (${count})` : 'Download all media'
     downloadAll.disabled = state.activeChatId == null
+  }
+  const selectAll = $('#select-all-media')
+  if (selectAll && (!snapshot || state.view !== 'files')) {
+    selectAll.textContent = 'Select all'
+    selectAll.disabled = true
   }
 }
 
@@ -261,6 +329,8 @@ openChat = async function rescueOpenChat (chatId) {
   rescueOpenGeneration++
   state.activeChatId = chatId
   rescueRememberChat(chatId)
+  rescueMessageRenderLimit = 120
+  rescueFileRenderLimit = 600
   state.selection.clear()
   state.selectedMessages.clear()
   state.loadingMore = false
@@ -278,6 +348,10 @@ openChat = async function rescueOpenChat (chatId) {
   const chat = state.chats.find(c => rescueChatKey(c.id) === rescueChatKey(chatId))
   $('#chat-title').textContent = chat ? chat.title : 'Chat'
   $('#media-grid').innerHTML = ''
+  const resetSelectAll = $('#select-all-media')
+  if (resetSelectAll) { resetSelectAll.textContent = 'Select all'; resetSelectAll.disabled = true }
+  const resetMediaLabel = $('#chat-media-count')
+  if (resetMediaLabel) resetMediaLabel.textContent = ''
 
   const cached = rescueChatCache.get(rescueChatKey(chatId))
   if (cached) {
@@ -324,10 +398,12 @@ openChat = async function rescueOpenChat (chatId) {
     try {
       const data = await request('get-messages', { chatId, fromMessageId: 0, limit: 100 })
       if (rescueChatKey(state.activeChatId) !== rescueChatKey(chatId) || generation !== rescueOpenGeneration) return
+      const beforeSignature = rescueMessageSignature(state.messages)
       rescueMergeMessages(chatId, data.messages || [])
       state.hasMore = !!data.hasMore
       rescueSaveActiveChat()
-      rescueRenderCurrent()
+      if (rescueMessageSignature(state.messages) !== beforeSignature) rescueRenderCurrent()
+      else rescueUpdateMediaLabel()
       setLoadState(state.hasMore ? '' : 'End of history')
     } catch (e) {
       if (rescueChatKey(state.activeChatId) !== rescueChatKey(chatId)) return
@@ -381,6 +457,21 @@ function rescueLoadAvatar (chat, holder) {
   }).catch(() => { chat._avatarPending = false })
 }
 
+function rescueChatTypeSvg (kind) {
+  const common = 'width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
+  if (kind === 'channel') return `<svg ${common}><path d="M4 13h3l9 5V6l-9 5H4z"/><path d="M7 13v5"/><path d="M19 9a4 4 0 0 1 0 6"/></svg>`
+  if (kind === 'group' || kind === 'supergroup') return `<svg ${common}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`
+  return `<svg ${common}><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>`
+}
+
+function rescueMediaTypeSvg (kind) {
+  const common = 'width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
+  if (kind === 'video' || kind === 'video_note') return `<svg ${common}><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9 5 3-5 3z"/></svg>`
+  if (kind === 'photo' || kind === 'sticker') return `<svg ${common}><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 20"/></svg>`
+  if (kind === 'audio' || kind === 'voice') return `<svg ${common}><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>`
+  return `<svg ${common}><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/></svg>`
+}
+
 function rescueSortChatsRecentFirst () {
   state.chats.sort((a, b) => {
     const aa = BigInt(String((a && a.order) || '0'))
@@ -419,8 +510,9 @@ renderChats = function rescueRenderChats () {
       col.appendChild(preview)
     }
     li.appendChild(col)
-    const u = h('div', 'u', typeIcon[chat.kind] || '💬')
-    if (chat.unread > 0) u.textContent += ` · ${chat.unread}`
+    const u = h('div', 'u chat-kind')
+    u.innerHTML = rescueChatTypeSvg(chat.kind)
+    if (chat.unread > 0) u.appendChild(h('span', 'chat-unread', String(chat.unread)))
     li.appendChild(u)
     li.onclick = () => openChat(chat.id)
     list.appendChild(li)
@@ -494,6 +586,171 @@ removeChat = function rescueRemoveChatPersistent (chatId) {
   rescueFileCache.delete(rescueChatKey(chatId))
   rescueAvatarCache.delete(rescueChatKey(chatId))
   return rescueBaseRemoveChat(chatId)
+}
+
+/* File workspace: exact-count range selection, persistent marks and previews. */
+function rescueFileMarkKey (item) { return `${item.chatId}:${item.messageId}` }
+
+function rescueIsPreviewable (item) {
+  return !!item && ['photo', 'video', 'video_note', 'audio', 'voice', 'gif'].includes(item.type)
+}
+
+function rescueEnsurePreviewModal () {
+  let modal = document.querySelector('#tele-preview-modal')
+  if (modal) return modal
+  modal = document.createElement('div')
+  modal.id = 'tele-preview-modal'
+  modal.className = 'tele-preview-modal hidden'
+  modal.innerHTML = `<div class="tele-preview-shell"><div class="tele-preview-head"><div><strong id="tele-preview-title">Preview</strong><span id="tele-preview-meta"></span></div><button id="tele-preview-close" class="ghost small" type="button" aria-label="Close preview">×</button></div><div id="tele-preview-body" class="tele-preview-body"></div></div>`
+  document.body.appendChild(modal)
+  modal.addEventListener('mousedown', e => { if (e.target === modal) modal.classList.add('hidden') })
+  modal.querySelector('#tele-preview-close').onclick = () => modal.classList.add('hidden')
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !modal.classList.contains('hidden')) modal.classList.add('hidden') })
+  return modal
+}
+
+function rescuePreviewFile (item) {
+  if (!item || !item.fileId) return toast('This file is not available for preview yet', 'error')
+  if (!rescueIsPreviewable(item)) {
+    window.open(`/api/media-preview/${encodeURIComponent(item.fileId)}?name=${encodeURIComponent(item.name || 'file')}&mime=${encodeURIComponent(item.mime || '')}`, '_blank', 'noopener')
+    return
+  }
+  const modal = rescueEnsurePreviewModal()
+  const body = modal.querySelector('#tele-preview-body')
+  const title = modal.querySelector('#tele-preview-title')
+  const meta = modal.querySelector('#tele-preview-meta')
+  const url = `/api/media-preview/${encodeURIComponent(item.fileId)}?name=${encodeURIComponent(item.name || 'file')}&mime=${encodeURIComponent(item.mime || '')}`
+  title.textContent = item.name || 'Preview'
+  meta.textContent = `${String(item.type || '').replace('_', ' ')} · ${fmtSize(item.fileSize || 0)}`
+  body.innerHTML = '<div class="tele-preview-loading">Preparing preview…</div>'
+  let node
+  if (item.type === 'photo' || item.type === 'gif') {
+    node = document.createElement('img')
+    node.alt = item.name || ''
+  } else if (item.type === 'video' || item.type === 'video_note') {
+    node = document.createElement('video')
+    node.controls = true
+    node.autoplay = true
+    node.playsInline = true
+  } else {
+    node = document.createElement('audio')
+    node.controls = true
+    node.autoplay = true
+  }
+  node.onload = node.onloadedmetadata = () => { body.innerHTML = ''; body.appendChild(node) }
+  node.onerror = () => { body.innerHTML = '<div class="tele-preview-loading">Preview unavailable. Try Download selected.</div>' }
+  node.src = url
+  if (node.tagName === 'AUDIO') { body.innerHTML = ''; body.appendChild(node) }
+  modal.classList.remove('hidden')
+}
+
+const rescueLegacyBuildGridCard = buildGridCard
+buildGridCard = function rescuePolishedGridCard (item) {
+  const card = rescueLegacyBuildGridCard(item)
+  const key = rescueFileMarkKey(item)
+  const icon = card.querySelector('.gthumb .icon')
+  if (icon) icon.innerHTML = rescueMediaTypeSvg(item.type)
+  const statuses = h('div', 'file-statuses')
+  if (rescueDownloadedMarks.has(key)) statuses.appendChild(h('span', 'file-status downloaded', 'Downloaded'))
+  if (rescueForwardedMarks.has(key)) statuses.appendChild(h('span', 'file-status forwarded', 'Forwarded'))
+  if (statuses.children.length) card.querySelector('.gbody')?.appendChild(statuses)
+  const preview = h('button', 'ghost small file-preview-action', rescueIsPreviewable(item) ? 'Preview' : 'Open')
+  preview.type = 'button'
+  preview.onclick = e => { e.stopPropagation(); rescuePreviewFile(item) }
+  card.insertBefore(preview, card.querySelector('input[type=checkbox]'))
+  return card
+}
+
+const rescueLegacyBuildMediaRow = buildMediaRow
+buildMediaRow = function rescuePolishedMediaRow (message, includeSelection = true) {
+  const row = rescueLegacyBuildMediaRow(message, includeSelection)
+  const item = message && message.media
+  const icon = row.querySelector('.icon')
+  if (icon && item) icon.innerHTML = rescueMediaTypeSvg(item.type)
+  if (item && item.fileId) {
+    const preview = h('button', 'ghost small media-preview-action', rescueIsPreviewable(item) ? 'Preview' : 'Open')
+    preview.type = 'button'
+    preview.onclick = e => { e.stopPropagation(); rescuePreviewFile(item) }
+    row.appendChild(preview)
+  }
+  return row
+}
+
+function rescueUpdateRangeControls (total) {
+  const from = $('#file-range-from')
+  const to = $('#file-range-to')
+  const summary = $('#file-range-summary')
+  if (from) from.max = String(Math.max(1, total))
+  if (to) {
+    to.max = String(Math.max(1, total))
+    if (!to.value || Number(to.value) > total) to.value = String(Math.min(100, Math.max(1, total)))
+  }
+  if (summary) summary.textContent = total ? `${total.toLocaleString()} files` : 'No files'
+}
+
+function rescueSelectFileRange () {
+  const items = filesItems()
+  if (!items.length) return
+  const fromNode = $('#file-range-from')
+  const toNode = $('#file-range-to')
+  let from = Math.max(1, Math.min(items.length, Number(fromNode && fromNode.value) || 1))
+  let to = Math.max(1, Math.min(items.length, Number(toNode && toNode.value) || Math.min(100, items.length)))
+  if (from > to) [from, to] = [to, from]
+  state.selection.clear()
+  state.selectedMessages.clear()
+  for (const item of items.slice(from - 1, to)) state.selection.set(rescueFileMarkKey(item), item)
+  renderFiles()
+  updateSelectionBar()
+}
+
+function rescueMountFileRange () {
+  const toolbar = $('#files-toolbar')
+  if (!toolbar || $('#file-range-tools')) return
+  const range = h('div', 'file-range-tools')
+  range.id = 'file-range-tools'
+  range.innerHTML = `<span class="file-range-label">Range</span><input id="file-range-from" type="number" min="1" value="1" aria-label="Range start"><span class="file-range-separator">–</span><input id="file-range-to" type="number" min="1" value="100" aria-label="Range end"><button id="file-range-select" class="ghost small" type="button">Select</button><span id="file-range-summary" class="muted"></span>`
+  toolbar.appendChild(range)
+  $('#file-range-select').onclick = rescueSelectFileRange
+}
+rescueMountFileRange()
+
+const rescueLegacyRenderFiles = renderFiles
+renderFiles = function rescueFastFileRender () {
+  const grid = $('#media-grid')
+  if (!grid) return
+  const items = filesItems()
+  const visible = items.length > 1200 ? items.slice(0, rescueFileRenderLimit) : items
+  grid.innerHTML = ''
+  for (const item of visible) grid.appendChild(buildGridCard(item))
+  const selectAll = $('#select-all-media')
+  if (selectAll) {
+    selectAll.textContent = items.length ? `Select all (${items.length})` : 'Select all'
+    selectAll.disabled = items.length === 0
+  }
+  rescueUpdateRangeControls(items.length)
+  if (items.length > visible.length) {
+    const more = h('div', 'file-render-more', `Showing ${visible.length.toLocaleString()} of ${items.length.toLocaleString()} · scroll for more`)
+    grid.appendChild(more)
+  }
+}
+
+const rescueFileGridForWindow = $('#media-grid')
+if (rescueFileGridForWindow) {
+  rescueFileGridForWindow.addEventListener('scroll', () => {
+    if (rescueFileGridForWindow.scrollTop + rescueFileGridForWindow.clientHeight < rescueFileGridForWindow.scrollHeight - 240) return
+    const total = filesItems().length
+    if (total <= 1200 || rescueFileRenderLimit >= total || dragSel) return
+    rescueFileRenderLimit = Math.min(total, rescueFileRenderLimit + 600)
+    const top = rescueFileGridForWindow.scrollTop
+    renderFiles()
+    rescueFileGridForWindow.scrollTop = top
+  }, true)
+}
+
+// Keep old controls wired internally but remove them from the daily-driver UI.
+for (const selector of ['#file-sort', '#search-whole', '#pack-media', '#cancel-pack', '#pack-banner', '#zip-results']) {
+  const node = document.querySelector(selector)
+  if (node) node.classList.add('legacy-control-hidden')
 }
 
 // Keep selection actions physically inside the center workspace.
@@ -599,6 +856,20 @@ function rescueRealtimeMessageDelete (chatId, messageIds) {
 
 const rescueBaseHandleEvent = handleEvent
 handleEvent = function rescueRealtimeHandleEvent (ev) {
+  if (ev && ev.name === 'download-done') {
+    const job = ev.job || {}
+    rescueMarkDownloaded(job.chatId, job.messageId)
+    const result = rescueBaseHandleEvent(ev)
+    if (state.view === 'files' && String(job.chatId) === String(state.activeChatId)) renderFiles()
+    return result
+  }
+  if (ev && ev.name === 'forward-done') {
+    const payload = ev.payload || {}
+    for (const id of payload.forwarded || []) rescueMarkForwarded(payload.sourceChatId, id)
+    const result = rescueBaseHandleEvent(ev)
+    if (state.view === 'files' && String(payload.sourceChatId) === String(state.activeChatId)) renderFiles()
+    return result
+  }
   if (ev && ev.name === 'message-upsert') {
     rescueRealtimeMessageUpsert(ev.chatId, ev.message)
     return
@@ -626,7 +897,7 @@ handleEvent = function rescueRealtimeHandleEvent (ev) {
 
 /* ------------------------------ Chat composer + desktop notifications ------------------------------ */
 const rescueNotificationPrefKey = 'tele-desktop-notifications'
-const rescueCompose = { replyTo: null, editMessageId: null, editOriginal: '', attachment: null }
+const rescueCompose = { replyTo: null, editMessageId: null, editOriginal: '', attachments: [], oneTime: false }
 let rescueNotificationRegistration = null
 
 function rescueDesktopNotificationsEnabled () {
@@ -712,30 +983,34 @@ function rescueMountComposer () {
       <button id="tele-compose-cancel" class="ghost small" type="button">Cancel</button>
     </div>
     <div id="tele-attachment-preview" class="tele-attachment-preview hidden">
-      <div><strong id="tele-attachment-name"></strong><span id="tele-attachment-meta"></span></div>
-      <button id="tele-attachment-clear" class="ghost small" type="button">Remove</button>
+      <div id="tele-attachment-list" class="tele-attachment-list"></div>
+      <div class="tele-attachment-footer"><label id="tele-one-time-wrap" class="tele-one-time hidden"><input id="tele-one-time" type="checkbox"><span>View once</span></label><button id="tele-attachment-clear" class="ghost small" type="button">Clear</button></div>
     </div>
     <div class="tele-compose-row">
-      <input id="tele-compose-file" type="file" class="hidden" />
-      <button id="tele-compose-attach" class="ghost tele-compose-attach" type="button" title="Attach file" aria-label="Attach file">📎</button>
+      <input id="tele-compose-file" type="file" class="hidden" multiple />
+      <button id="tele-compose-attach" class="ghost tele-compose-attach" type="button" title="Attach files" aria-label="Attach files"></button>
       <textarea id="tele-compose-input" rows="1" placeholder="Message" aria-label="Message"></textarea>
       <button id="tele-compose-send" type="button">Send</button>
     </div>`
   chat.insertBefore(composer, foot)
   const input = document.querySelector('#tele-compose-input')
   const fileInput = document.querySelector('#tele-compose-file')
+  const attachButton = document.querySelector('#tele-compose-attach')
+  if (attachButton) attachButton.innerHTML = '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>'
   document.querySelector('#tele-compose-send').onclick = rescueSendComposer
   document.querySelector('#tele-compose-cancel').onclick = rescueClearComposeContext
   document.querySelector('#tele-compose-attach').onclick = () => { if (!rescueCompose.editMessageId) fileInput.click() }
   document.querySelector('#tele-attachment-clear').onclick = rescueClearAttachment
-  fileInput.addEventListener('change', () => rescueSetAttachment(fileInput.files && fileInput.files[0]))
+  fileInput.addEventListener('change', () => rescueSetAttachments([...(fileInput.files || [])]))
+  const oneTime = document.querySelector('#tele-one-time')
+  if (oneTime) oneTime.addEventListener('change', () => { rescueCompose.oneTime = !!oneTime.checked })
   composer.addEventListener('dragover', e => { if (state.view === 'messages' && state.activeChatId != null) e.preventDefault() })
   composer.addEventListener('drop', e => {
     if (state.view !== 'messages' || state.activeChatId == null || rescueCompose.editMessageId) return
-    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]
-    if (!file) return
+    const files = e.dataTransfer && e.dataTransfer.files ? [...e.dataTransfer.files] : []
+    if (!files.length) return
     e.preventDefault()
-    rescueSetAttachment(file)
+    rescueSetAttachments(files)
   })
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -760,27 +1035,68 @@ function rescueUpdateComposerVisibility () {
 }
 
 function rescueClearAttachment () {
-  rescueCompose.attachment = null
+  rescueCompose.attachments = []
+  rescueCompose.oneTime = false
   const input = document.querySelector('#tele-compose-file')
   if (input) input.value = ''
   const preview = document.querySelector('#tele-attachment-preview')
   if (preview) preview.classList.add('hidden')
-  const name = document.querySelector('#tele-attachment-name')
-  const meta = document.querySelector('#tele-attachment-meta')
-  if (name) name.textContent = ''
-  if (meta) meta.textContent = ''
+  const list = document.querySelector('#tele-attachment-list')
+  if (list) list.innerHTML = ''
+  const oneTime = document.querySelector('#tele-one-time')
+  if (oneTime) oneTime.checked = false
 }
 
-function rescueSetAttachment (file) {
-  if (!file) return
-  if (file.size > 4 * 1024 * 1024 * 1024) { toast('Attachments larger than 4 GB are not supported', 'error'); return }
-  rescueCompose.attachment = file
+function rescueAttachmentCanViewOnce (file) {
+  if (!file) return false
+  const name = String(file.name || '').toLowerCase()
+  const mime = String(file.type || '').toLowerCase()
+  return /^image\/(jpeg|png)$/.test(mime) || /^video\//.test(mime) || /\.(jpe?g|png|mp4|mov|m4v|webm)$/.test(name)
+}
+
+function rescueRenderAttachments () {
   const preview = document.querySelector('#tele-attachment-preview')
-  const name = document.querySelector('#tele-attachment-name')
-  const meta = document.querySelector('#tele-attachment-meta')
-  if (name) name.textContent = file.name
-  if (meta) meta.textContent = `${fmtSize(file.size)}${file.type ? ' · ' + file.type : ''}`
-  if (preview) preview.classList.remove('hidden')
+  const list = document.querySelector('#tele-attachment-list')
+  const oneTimeWrap = document.querySelector('#tele-one-time-wrap')
+  if (!preview || !list) return
+  list.innerHTML = ''
+  for (const [index, file] of rescueCompose.attachments.entries()) {
+    const row = h('div', 'tele-attachment-item')
+    const info = h('div', 'tele-attachment-item-info')
+    info.append(h('strong', '', file.name), h('span', 'muted', `${fmtSize(file.size)}${file.type ? ' · ' + file.type : ''}`))
+    const remove = h('button', 'ghost small', '×')
+    remove.type = 'button'
+    remove.setAttribute('aria-label', `Remove ${file.name}`)
+    remove.onclick = () => {
+      rescueCompose.attachments.splice(index, 1)
+      rescueCompose.oneTime = false
+      rescueRenderAttachments()
+    }
+    row.append(info, remove)
+    list.appendChild(row)
+  }
+  preview.classList.toggle('hidden', rescueCompose.attachments.length === 0)
+  const activeChat = state.chats.find(chat => String(chat.id) === String(state.activeChatId))
+  const canViewOnce = rescueCompose.attachments.length === 1 && activeChat && activeChat.kind === 'private' && rescueAttachmentCanViewOnce(rescueCompose.attachments[0])
+  if (oneTimeWrap) oneTimeWrap.classList.toggle('hidden', !canViewOnce)
+  if (!canViewOnce) {
+    rescueCompose.oneTime = false
+    const oneTime = document.querySelector('#tele-one-time')
+    if (oneTime) oneTime.checked = false
+  }
+}
+
+function rescueSetAttachments (files) {
+  const valid = (files || []).filter(Boolean)
+  for (const file of valid) {
+    if (file.size > 4 * 1024 * 1024 * 1024) {
+      toast(`${file.name}: files larger than 4 GB are not supported`, 'error')
+      continue
+    }
+    rescueCompose.attachments.push(file)
+  }
+  rescueCompose.oneTime = false
+  rescueRenderAttachments()
 }
 
 function rescueClearComposeContext () {
@@ -824,30 +1140,37 @@ async function rescueSendComposer () {
   const send = document.querySelector('#tele-compose-send')
   if (!input || !send || state.activeChatId == null) return
   const text = input.value.trim()
-  const attachment = rescueCompose.attachment
-  if (!text && !attachment) return
-  if (attachment && rescueCompose.editMessageId) return toast('Finish editing before attaching a file', 'error')
+  const attachments = rescueCompose.attachments.slice()
+  if (!text && !attachments.length) return
+  if (attachments.length && rescueCompose.editMessageId) return toast('Finish editing before attaching files', 'error')
+  if (rescueCompose.oneTime && attachments.length !== 1) return toast('View once supports one photo or video at a time', 'error')
   send.disabled = true
   const oldLabel = send.textContent
-  send.textContent = attachment ? 'Uploading…' : 'Sending…'
+  send.textContent = attachments.length ? (attachments.length > 1 ? `Sending 0/${attachments.length}` : 'Uploading…') : 'Sending…'
   try {
     if (rescueCompose.editMessageId) {
       await request('edit-chat-message', { chatId: state.activeChatId, messageId: rescueCompose.editMessageId, text })
       toastOk('Message edited')
-    } else if (attachment) {
-      const headers = {
-        'Content-Type': 'application/octet-stream',
-        'X-File-Name': encodeURIComponent(attachment.name),
-        'X-Caption': encodeURIComponent(text.slice(0, 1024))
+    } else if (attachments.length) {
+      for (let i = 0; i < attachments.length; i++) {
+        const attachment = attachments[i]
+        if (attachments.length > 1) send.textContent = `Sending ${i + 1}/${attachments.length}`
+        const headers = {
+          'Content-Type': 'application/octet-stream',
+          'X-File-Name': encodeURIComponent(attachment.name),
+          'X-Mime-Type': encodeURIComponent(attachment.type || 'application/octet-stream'),
+          'X-Caption': encodeURIComponent(i === 0 ? text.slice(0, 1024) : ''),
+          'X-One-Time': rescueCompose.oneTime && i === 0 ? '1' : '0'
+        }
+        if (rescueCompose.replyTo && rescueCompose.replyTo.id != null && i === 0) headers['X-Reply-To'] = String(rescueCompose.replyTo.id)
+        const response = await fetch(`/api/chat-attachment/${encodeURIComponent(state.activeChatId)}`, {
+          method: 'POST',
+          headers,
+          body: attachment
+        })
+        const result = await response.json().catch(() => ({}))
+        if (!response.ok) throw new Error(`${attachment.name}: ${result.error || `upload failed (${response.status})`}`)
       }
-      if (rescueCompose.replyTo && rescueCompose.replyTo.id != null) headers['X-Reply-To'] = String(rescueCompose.replyTo.id)
-      const response = await fetch(`/api/chat-attachment/${encodeURIComponent(state.activeChatId)}`, {
-        method: 'POST',
-        headers,
-        body: attachment
-      })
-      const result = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(result.error || `Attachment upload failed (${response.status})`)
     } else {
       await request('send-chat-message', {
         chatId: state.activeChatId,

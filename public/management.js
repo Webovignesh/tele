@@ -450,7 +450,7 @@
     const overview = section('Overview')
     overview.append(
       infoRow('Type', formatKind(chat.kind)),
-      infoRow('Access', chat.kind === 'private' ? 'Private chat' : (details.inviteLink ? 'Invite link' : 'Private')),
+      infoRow('Access', details.accessType || (chat.kind === 'private' ? 'Private chat' : 'Private')),
       infoRow('Members', details.memberCount != null ? String(details.memberCount) : '—'),
       infoRow('Your role', details.statusLabel || 'Member'),
       infoRow('Auto-delete', formatAutoDelete(details.autoDeleteTime)),
