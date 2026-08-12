@@ -779,15 +779,23 @@ function initClient (config) {
     } else if (u._ === 'updateFile') {
       dm.onFileUpdate(u.file)
     } else if (u._ === 'updateNewChat') {
-      sendAll({ type: 'event', event: { name: 'chat-upsert', chat: serializeChat(u.chat) } })
-    } else if (u._ === 'updateChatTitle') {
-      client.invoke({ _: 'getChat', chat_id: u.chat_id }).then(chat => {
-        sendAll({ type: 'event', event: { name: 'chat-upsert', chat: serializeChat(chat) } })
+      serializeChatDetailed(u.chat).then(chat => {
+        sendAll({ type: 'event', event: { name: 'chat-upsert', chat } })
       }).catch(() => {})
-    } else if (u._ === 'updateChatPhoto' || u._ === 'updateChatPosition' || u._ === 'updateChatLastMessage') {
-      client.invoke({ _: 'getChat', chat_id: u.chat_id }).then(chat => {
-        sendAll({ type: 'event', event: { name: 'chat-upsert', chat: serializeChat(chat) } })
+    } else if (u._ === 'updateChatTitle' || u._ === 'updateChatPhoto' || u._ === 'updateChatLastMessage') {
+      client.invoke({ _: 'getChat', chat_id: u.chat_id }).then(serializeChatDetailed).then(chat => {
+        sendAll({ type: 'event', event: { name: 'chat-upsert', chat } })
       }).catch(() => {})
+    } else if (u._ === 'updateChatPosition') {
+      const pos = u.position || {}
+      const isMain = !pos.chat_list || pos.chat_list._ === 'chatListMain'
+      if (isMain && String(pos.order || '0') === '0') {
+        sendAll({ type: 'event', event: { name: 'chat-remove', chatId: u.chat_id } })
+      } else {
+        client.invoke({ _: 'getChat', chat_id: u.chat_id }).then(serializeChatDetailed).then(chat => {
+          sendAll({ type: 'event', event: { name: 'chat-upsert', chat } })
+        }).catch(() => {})
+      }
     }
   })
 }
@@ -855,7 +863,8 @@ function serializeChat (chat) {
     title,
     order: chat.order,
     unread: chat.unread_count || 0,
-    lastMessage: chat.last_message ? chat.last_message.content : null
+    lastMessage: chat.last_message ? chat.last_message.content : null,
+    username: null
   }
   const t = chat.type
   if (t) {
@@ -864,6 +873,21 @@ function serializeChat (chat) {
     else if (t._ === 'chatTypeSupergroup') info.kind = t.is_channel ? 'channel' : 'supergroup'
     else info.kind = 'other'
   }
+  return info
+}
+
+async function serializeChatDetailed (chat) {
+  const info = serializeChat(chat)
+  try {
+    if (chat.type && chat.type._ === 'chatTypePrivate') {
+      const user = await client.invoke({ _: 'getUser', user_id: chat.type.user_id })
+      info.username = user && user.username ? user.username : null
+    } else if (chat.type && chat.type._ === 'chatTypeSupergroup') {
+      const group = await client.invoke({ _: 'getSupergroup', supergroup_id: chat.type.supergroup_id })
+      const names = group && group.usernames && group.usernames.active_usernames
+      info.username = names && names.length ? names[0] : null
+    }
+  } catch {}
   return info
 }
 
@@ -883,7 +907,7 @@ async function loadChats () {
       const chat = await client.invoke({ _: 'getChat', chat_id: id })
       const t = chat.type
       if (t && t._ === 'chatTypeSecret') continue
-      out.push(serializeChat(chat))
+      out.push(await serializeChatDetailed(chat))
     } catch (e) {}
   }
   out.sort((a, b) => (a.order < b.order ? 1 : -1))
@@ -913,6 +937,7 @@ async function loadMessages (chatId, fromMessageId, limit) {
       date: m.date,
       text: m.content && m.content._ === 'messageText' ? (m.content.text?.text || '') : null,
       sender: await resolveSenderName(m),
+      outgoing: !!m.is_outgoing,
       media: extractMedia(m)
     }
     if (item.media && item.media.file) {
@@ -1136,7 +1161,7 @@ wss.on('connection', (ws) => {
             if (payload.excludeChatId != null && String(chatId) === String(payload.excludeChatId)) continue
             const chat = await client.invoke({ _: 'getChat', chat_id: chatId }).catch(() => null)
             if (!chat || (chat.type && chat.type._ === 'chatTypeSecret')) continue
-            chats.push(serializeChat(chat))
+            chats.push(await serializeChatDetailed(chat))
           }
           return respond(ws, id, true, { chats })
         }

@@ -180,6 +180,9 @@ function handleEvent (ev) {
     case 'chat-upsert':
       upsertChat(ev.chat)
       break
+    case 'chat-remove':
+      removeChat(ev.chatId)
+      break
     case 'forward-done':
       toastOk(`Forwarded ${(ev.payload.forwarded || []).length} message(s) to ${ev.payload.destination && ev.payload.destination.title ? ev.payload.destination.title : 'destination'}`)
       break
@@ -311,7 +314,12 @@ function renderChats () {
     li.appendChild(av)
     const col = h('div', 'col')
     col.appendChild(h('div', 't', chat.title))
-    if (chat.lastText) col.appendChild(h('div', 'preview', chat.lastText))
+    const identity = chat.username ? '@' + chat.username : (chat.lastText || '')
+    if (identity) {
+      const preview = h('div', 'preview', identity)
+      preview.title = identity
+      col.appendChild(preview)
+    }
     li.appendChild(col)
     const u = h('div', 'u', typeIcon[chat.kind] || '💬')
     if (chat.unread > 0) u.textContent += ` · ${chat.unread}`
@@ -320,6 +328,22 @@ function renderChats () {
     list.appendChild(li)
   }
   $('#chat-count').textContent = channelsOnly ? `${shown} channels` : `${state.chats.length} chats`
+}
+
+function removeChat (chatId) {
+  const wasActive = String(state.activeChatId) === String(chatId)
+  state.chats = state.chats.filter(c => String(c.id) !== String(chatId))
+  if (wasActive) {
+    state.activeChatId = null
+    state.messages = []
+    state.selection.clear()
+    state.selectedMessages.clear()
+    $('#chat-title').textContent = 'Select a chat'
+    $('#messages').innerHTML = ''
+    $('#media-grid').innerHTML = ''
+  }
+  renderChats()
+  updateSelectionBar()
 }
 
 function upsertChat (chat) {
@@ -452,21 +476,26 @@ function renderMessagesList () {
   const list = $('#messages')
   list.innerHTML = ''
   for (const m of state.messages) {
-    const msgEl = h('div', 'msg')
+    const msgEl = h('div', 'msg' + (m.outgoing ? ' outgoing' : ' incoming'))
     const head = h('div', 'msg-head')
     head.appendChild(h('span', 'msg-sender', m.sender || 'Unknown'))
     head.appendChild(h('span', 'msg-date', new Date(m.date * 1000).toLocaleString()))
     msgEl.appendChild(head)
     if (m.text) msgEl.appendChild(h('div', 'msg-text', m.text))
-    if (m.media) msgEl.appendChild(buildMediaRow(m))
+    if (m.media) msgEl.appendChild(buildMediaRow(m, false))
     const select = h('label', 'msg-select')
     const cb = h('input', '')
     cb.type = 'checkbox'
     const key = `${state.activeChatId}:${m.id}`
     cb.checked = state.selectedMessages.has(key)
     cb.onchange = () => {
-      if (cb.checked) state.selectedMessages.set(key, m)
-      else state.selectedMessages.delete(key)
+      if (cb.checked) {
+        state.selectedMessages.set(key, m)
+        if (m.media) state.selection.set(key, m.media)
+      } else {
+        state.selectedMessages.delete(key)
+        if (m.media) state.selection.delete(key)
+      }
       updateSelectionBar()
     }
     select.appendChild(cb)
@@ -559,7 +588,7 @@ function buildGridCard (item) {
   return card
 }
 
-function buildMediaRow (m) {
+function buildMediaRow (m, includeSelection = true) {
   const media = m.media
   const row = h('div', 'media')
   row.appendChild(h('div', 'icon', mediaIcon[media.type] || '📎'))
@@ -579,7 +608,7 @@ function buildMediaRow (m) {
   if (media.caption) meta.appendChild(h('div', 'msg-caption', escapeHtml(media.caption)))
   row.appendChild(meta)
 
-  row.appendChild(makeCheckbox(media))
+  if (includeSelection) row.appendChild(makeCheckbox(media))
   loadThumb(img, media)
   return row
 }
@@ -1050,37 +1079,85 @@ async function searchForwardDestinations (query = '') {
   return request('search-destinations', { query, excludeChatId: state.activeChatId })
 }
 
-async function forwardSelectedMessages () {
-  if (!state.activeChatId) return
+function ensureForwardModal () {
+  let modal = $('#forward-modal')
+  if (modal) return modal
+  modal = h('div', 'forward-modal hidden')
+  modal.id = 'forward-modal'
+  modal.innerHTML = `<div class="forward-dialog">
+    <div class="forward-head"><div><strong>Forward messages</strong><div id="forward-summary" class="small muted"></div></div><button id="forward-close" class="ghost small">✕</button></div>
+    <input id="forward-search" type="search" placeholder="Search chats or @username…" autocomplete="off">
+    <div id="forward-results" class="forward-results"></div>
+  </div>`
+  document.body.appendChild(modal)
+  $('#forward-close').onclick = closeForwardModal
+  modal.addEventListener('mousedown', e => { if (e.target === modal) closeForwardModal() })
+  $('#forward-search').addEventListener('input', debounce(() => loadForwardDestinations($('#forward-search').value), 180))
+  return modal
+}
+
+function closeForwardModal () {
+  const modal = $('#forward-modal')
+  if (modal) modal.classList.add('hidden')
+}
+
+async function sendForwardTo (chat) {
   const messageIds = selectedForwardIds()
-  if (!messageIds.length) return toast('Select one or more messages first', 'error')
-
-  const typed = prompt('Forward to chat title or @username:')
-  if (!typed) return
-
   try {
-    const candidates = await searchForwardDestinations(typed)
-    let destination = null
-    if (typed.startsWith('@')) destination = { username: typed }
-    else if (candidates.chats && candidates.chats.length) destination = { chatId: candidates.chats[0].id }
-    else destination = { query: typed }
-
     const result = await request('forward-messages', {
       sourceChatId: state.activeChatId,
       messageIds,
-      destination
+      destination: { chatId: chat.id }
     })
     const forwarded = (result.forwarded || []).length
     const skipped = (result.skipped || []).length
     state.selectedMessages.clear()
     state.selection.clear()
+    closeForwardModal()
     updateSelectionBar()
     renderMessagesList()
     renderFiles()
-    toastOk(`Forwarded ${forwarded} message(s)${skipped ? ` · ${skipped} already sent this session` : ''}`)
+    toastOk(`Forwarded ${forwarded} message(s) to ${chat.title}${skipped ? ` · ${skipped} skipped` : ''}`)
+  } catch (e) { toast(e.message, 'error') }
+}
+
+async function loadForwardDestinations (query = '') {
+  const results = $('#forward-results')
+  if (!results) return
+  results.innerHTML = '<div class="forward-loading">Loading chats…</div>'
+  try {
+    const data = await searchForwardDestinations(query)
+    results.innerHTML = ''
+    for (const chat of data.chats || []) {
+      const row = h('button', 'forward-chat')
+      row.type = 'button'
+      const av = h('span', 'forward-avatar', initials(chat.title))
+      av.style.background = avatarColor(chat.title)
+      const body = h('span', 'forward-chat-body')
+      body.appendChild(h('span', 'forward-chat-title', chat.title))
+      const meta = chat.username ? '@' + chat.username : (chat.kind || 'chat')
+      body.appendChild(h('span', 'forward-chat-meta', meta))
+      row.append(av, body)
+      row.onclick = () => sendForwardTo(chat)
+      results.appendChild(row)
+    }
+    if (!results.children.length) results.appendChild(h('div', 'forward-loading', 'No matching chats'))
   } catch (e) {
-    toast(e.message, 'error')
+    results.innerHTML = ''
+    results.appendChild(h('div', 'forward-loading', e.message))
   }
+}
+
+async function forwardSelectedMessages () {
+  if (!state.activeChatId) return
+  const messageIds = selectedForwardIds()
+  if (!messageIds.length) return toast('Select one or more messages first', 'error')
+  const modal = ensureForwardModal()
+  $('#forward-summary').textContent = `${messageIds.length} selected message${messageIds.length === 1 ? '' : 's'}`
+  $('#forward-search').value = ''
+  modal.classList.remove('hidden')
+  $('#forward-search').focus()
+  await loadForwardDestinations('')
 }
 
 async function startDownloads (items) {
@@ -1600,6 +1677,7 @@ $('#mark-completed').onclick = markSelectedCompleted
 $('#unmark-completed').onclick = unmarkSelectedCompleted
 $('#clear-selection').onclick = () => {
   state.selection.clear()
+  state.selectedMessages.clear()
   for (const cb of document.querySelectorAll('#media-grid input[type=checkbox], #messages input[type=checkbox]')) cb.checked = false
   updateSelectionBar()
 }
