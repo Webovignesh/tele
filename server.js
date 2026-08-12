@@ -864,7 +864,8 @@ function serializeChat (chat) {
     order: chat.order,
     unread: chat.unread_count || 0,
     lastMessage: chat.last_message ? chat.last_message.content : null,
-    username: null
+    username: null,
+    photoFileId: chat.photo && chat.photo.small ? chat.photo.small.id : null
   }
   const t = chat.type
   if (t) {
