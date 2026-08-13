@@ -1,0 +1,280 @@
+/* Final stability guard UI. Loaded after all previous rescue styles. */
+
+/* ------------------------------ Files / chat jitter containment ------------------------------ */
+#chat-media-count,
+#load-state {
+  font-variant-numeric: tabular-nums;
+}
+
+#load-state:empty {
+  display: none !important;
+}
+
+.chat-item[hidden] {
+  display: none !important;
+}
+
+.tele-guard-avatar {
+  contain: paint;
+}
+
+/* ------------------------------ Media popup ------------------------------ */
+body:has(#tele-final-preview:not(.hidden)) {
+  overflow: hidden !important;
+}
+
+.tele-final-preview {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 9000 !important;
+  display: grid !important;
+  place-items: center !important;
+  padding: 24px !important;
+  overflow: hidden !important;
+}
+
+.tele-final-preview.hidden {
+  display: none !important;
+}
+
+.tele-final-preview-shell {
+  width: min(900px, calc(100vw - 48px)) !important;
+  height: min(70vh, 640px) !important;
+  max-width: calc(100vw - 48px) !important;
+  max-height: calc(100vh - 48px) !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  display: grid !important;
+  grid-template-rows: auto minmax(0, 1fr) !important;
+  overflow: hidden !important;
+  border-radius: 16px !important;
+}
+
+#tele-final-preview-body {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  display: grid !important;
+  place-items: center !important;
+}
+
+.tele-final-video-shell {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  display: grid !important;
+  place-items: center !important;
+  overflow: hidden !important;
+}
+
+.tele-final-preview-video,
+.tele-final-preview-image {
+  width: auto !important;
+  height: auto !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  object-fit: contain !important;
+  margin: 0 auto !important;
+}
+
+.tele-final-preview-video {
+  background: #000 !important;
+}
+
+.tele-final-preview-audio {
+  width: min(680px, calc(100% - 40px)) !important;
+  max-width: calc(100% - 40px) !important;
+}
+
+/* Files thumbnails are launchers only. Playback belongs to the popup. */
+#media-grid .gthumb video,
+#media-grid .gthumb audio,
+#media-grid .tele-final-file-thumb video,
+#media-grid .tele-final-file-thumb audio {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* ------------------------------ Dedupe confirmation ------------------------------ */
+.tele-dedupe-modal {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 9100 !important;
+  display: grid !important;
+  place-items: center !important;
+  padding: 24px !important;
+  overflow: hidden !important;
+}
+
+.tele-dedupe-modal.hidden {
+  display: none !important;
+}
+
+.tele-dedupe-dialog {
+  width: min(900px, calc(100vw - 48px)) !important;
+  height: min(78vh, 760px) !important;
+  max-width: calc(100vw - 48px) !important;
+  max-height: calc(100vh - 48px) !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  display: grid !important;
+  grid-template-rows: auto minmax(0, 1fr) auto !important;
+  overflow: hidden !important;
+  border-radius: 16px !important;
+}
+
+.tele-dedupe-head {
+  padding: 18px 20px 14px !important;
+}
+
+.tele-dedupe-body {
+  min-width: 0 !important;
+  min-height: 0 !important;
+  padding: 16px 20px 18px !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+.tele-dedupe-path {
+  min-width: 0 !important;
+}
+
+.tele-dedupe-path strong {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  overflow-wrap: anywhere !important;
+}
+
+.tele-dedupe-stats {
+  width: 100% !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 10px !important;
+}
+
+.tele-dedupe-stat {
+  min-width: 0 !important;
+  padding: 12px 14px !important;
+  overflow: hidden !important;
+}
+
+.tele-dedupe-stat span {
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+
+.tele-dedupe-validation {
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 62px !important;
+  margin-top: 14px !important;
+  padding: 12px 14px !important;
+  display: grid !important;
+  grid-template-columns: 28px minmax(0, 1fr) !important;
+  align-items: center !important;
+  gap: 12px !important;
+  overflow: hidden !important;
+}
+
+.tele-dedupe-check {
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  display: grid !important;
+  place-items: center !important;
+  align-self: center !important;
+  margin: 0 !important;
+  white-space: nowrap !important;
+}
+
+.tele-dedupe-validation > div {
+  min-width: 0 !important;
+  width: 100% !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  gap: 4px !important;
+}
+
+.tele-dedupe-validation > div > strong,
+.tele-dedupe-validation > div > span {
+  position: static !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  display: block !important;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  overflow-wrap: anywhere !important;
+  line-height: 1.35 !important;
+}
+
+.tele-dedupe-list-title {
+  position: static !important;
+  width: 100% !important;
+  margin: 18px 0 8px !important;
+  clear: both !important;
+  line-height: 1.3 !important;
+}
+
+.tele-final-dedupe-list,
+.tele-dedupe-list {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-height: min(360px, 38vh) !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  scrollbar-gutter: stable !important;
+}
+
+.tele-dedupe-row {
+  width: 100% !important;
+  min-width: 0 !important;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: center !important;
+  gap: 12px !important;
+}
+
+.tele-dedupe-row-main {
+  min-width: 0 !important;
+}
+
+.tele-dedupe-row-main strong,
+.tele-dedupe-row-main span {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  overflow-wrap: anywhere !important;
+  line-height: 1.3 !important;
+}
+
+.tele-dedupe-actions {
+  padding: 14px 20px 18px !important;
+  background: #111c27 !important;
+}
+
+@media (max-width: 760px) {
+  .tele-final-preview,
+  .tele-dedupe-modal {
+    padding: 10px !important;
+  }
+
+  .tele-final-preview-shell,
+  .tele-dedupe-dialog {
+    width: calc(100vw - 20px) !important;
+    max-width: calc(100vw - 20px) !important;
+    max-height: calc(100vh - 20px) !important;
+  }
+
+  .tele-dedupe-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
