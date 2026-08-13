@@ -21,13 +21,14 @@ assert.match(p0, /xhr\.upload\.onprogress/, 'attachment progress must be measure
 assert.match(p0, /tele-p0-video-shell/, 'video preview must use the same popup viewer family as images')
 assert.match(p0Css, /tele-p0-attachment/, 'attachment queue must use the polished progress surface')
 assert.match(p0Css, /dir-current/, 'download path must have a full-width readable surface')
-
-assert.match(compatSource, /stripNullableInputFiles/, 'upload compatibility must remove unused nullable InputFile fields')
-assert.match(compatSource, /documentFallbackQuery/, 'upload compatibility must include a document fallback path')
+assert.match(compatSource, /inputPhoto/, 'upload compatibility must adapt photos to the current TDLib inputPhoto wrapper')
+assert.match(compatSource, /inputVideo/, 'upload compatibility must adapt videos to the current TDLib inputVideo wrapper')
+assert.match(compatSource, /inputAudio/, 'upload compatibility must adapt audio to the current TDLib inputAudio wrapper')
+assert.match(compatSource, /inputDocument/, 'upload compatibility must adapt documents to the current TDLib inputDocument wrapper')
 assert.match(compatSource, /realpathSync/, 'local InputFile paths must be canonicalized before TDLib upload')
 assert.match(pkg.scripts.start, /tdl-upload-compat\.js/, 'runtime must preload the TDLib attachment compatibility layer')
 
-const { normalizeAttachmentQuery, documentFallbackQuery } = require('../tdl-upload-compat.js')
+const { normalizeAttachmentQuery } = require('../tdl-upload-compat.js')
 const rawVideo = {
   _: 'sendMessage',
   chat_id: 1,
@@ -47,13 +48,31 @@ const rawVideo = {
   }
 }
 const normalizedVideo = normalizeAttachmentQuery(rawVideo, false)
-const video = normalizedVideo.input_message_content
-assert.equal(Object.prototype.hasOwnProperty.call(video, 'thumbnail'), false, 'unused video thumbnail must be omitted')
-assert.equal(Object.prototype.hasOwnProperty.call(video, 'cover'), false, 'unused video cover InputFile must be omitted')
-assert.equal(Object.prototype.hasOwnProperty.call(video, 'self_destruct_type'), false, 'normal video self-destruct field must be omitted')
-assert.equal(video.show_caption_above_media, false)
-assert.equal(video.has_spoiler, false)
-assert.match(video.video.path, /video\.mp4$/, 'primary video InputFile path must survive normalization')
+const videoMessage = normalizedVideo.input_message_content
+assert.equal(videoMessage._, 'inputMessageVideo')
+assert.equal(videoMessage.video._, 'inputVideo')
+assert.equal(videoMessage.video.video._, 'inputFileLocal')
+assert.match(videoMessage.video.video.path, /video\.mp4$/, 'primary video InputFile must survive inside inputVideo')
+assert.equal(videoMessage.video.thumbnail, null)
+assert.equal(videoMessage.video.cover, null)
+assert.equal(videoMessage.show_caption_above_media, false)
+assert.equal(videoMessage.self_destruct_type, null)
+assert.equal(videoMessage.has_spoiler, false)
+
+const normalizedPhoto = normalizeAttachmentQuery({
+  _: 'sendMessage',
+  input_message_content: {
+    _: 'inputMessagePhoto',
+    photo: { _: 'inputFileLocal', path: './sample.png' },
+    thumbnail: null,
+    added_sticker_file_ids: [],
+    width: 0,
+    height: 0,
+    caption: { _: 'formattedText', text: '', entities: [] }
+  }
+}, false)
+assert.equal(normalizedPhoto.input_message_content.photo._, 'inputPhoto')
+assert.equal(normalizedPhoto.input_message_content.photo.photo._, 'inputFileLocal')
 
 const normalizedDocument = normalizeAttachmentQuery({
   _: 'sendMessage',
@@ -64,10 +83,19 @@ const normalizedDocument = normalizeAttachmentQuery({
     caption: { _: 'formattedText', text: '', entities: [] }
   }
 }, false)
-assert.equal(Object.prototype.hasOwnProperty.call(normalizedDocument.input_message_content, 'thumbnail'), false, 'unused document thumbnail must be omitted')
+assert.equal(normalizedDocument.input_message_content.document._, 'inputDocument')
+assert.equal(normalizedDocument.input_message_content.document.document._, 'inputFileLocal')
+assert.equal(normalizedDocument.input_message_content.document.thumbnail, null)
 
-const fallback = documentFallbackQuery(rawVideo, false)
-assert.equal(fallback.input_message_content._, 'inputMessageDocument')
-assert.equal(fallback.input_message_content.document._, 'inputFileLocal')
+const normalizedPrepared = normalizeAttachmentQuery({
+  _: 'sendMessage',
+  input_message_content: {
+    _: 'inputMessagePhoto',
+    photo: { '@type': 'inputFileId', id: 123 },
+    caption: { _: 'formattedText', text: '', entities: [] }
+  }
+}, false)
+assert.equal(normalizedPrepared.input_message_content.photo.photo._, 'inputFileId')
+assert.equal(normalizedPrepared.input_message_content.photo.photo.id, 123)
 
 console.log('P0 smoke checks passed')
