@@ -230,3 +230,193 @@ teleDailyMessageMedia = function teleP1MessageMedia (item) {
   if (audio) audio.preload = 'none'
   return node
 }
+
+/* ------------------------------ Download dedupe preflight ------------------------------ */
+
+const teleP1BaseStartDownloads = startDownloads
+let teleP1DedupeResolve = null
+
+function teleP1FormatDuration (ms) {
+  if (!Number.isFinite(ms) || ms < 1) return '<1 ms'
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  return `${(ms / 1000).toFixed(1)} s`
+}
+
+function teleP1EnsureDedupeModal () {
+  let modal = document.querySelector('#tele-dedupe-modal')
+  if (modal) return modal
+
+  modal = document.createElement('div')
+  modal.id = 'tele-dedupe-modal'
+  modal.className = 'tele-dedupe-modal hidden'
+  modal.innerHTML = `<div class="tele-dedupe-dialog" role="dialog" aria-modal="true" aria-labelledby="tele-dedupe-title">
+    <div class="tele-dedupe-head">
+      <div>
+        <div id="tele-dedupe-title" class="tele-dedupe-title">Check for duplicates</div>
+        <div id="tele-dedupe-subtitle" class="tele-dedupe-subtitle">Scanning your download folder…</div>
+      </div>
+      <button type="button" id="tele-dedupe-close" class="ghost small" aria-label="Close">✕</button>
+    </div>
+    <div id="tele-dedupe-body" class="tele-dedupe-body"></div>
+    <div class="tele-dedupe-actions">
+      <button type="button" id="tele-dedupe-cancel" class="ghost">Cancel</button>
+      <button type="button" id="tele-dedupe-continue" class="primary" disabled>Continue</button>
+    </div>
+  </div>`
+  document.body.appendChild(modal)
+
+  const finish = value => {
+    modal.classList.add('hidden')
+    const resolve = teleP1DedupeResolve
+    teleP1DedupeResolve = null
+    if (resolve) resolve(value)
+  }
+  modal.querySelector('#tele-dedupe-close').onclick = () => finish(false)
+  modal.querySelector('#tele-dedupe-cancel').onclick = () => finish(false)
+  modal.addEventListener('mousedown', event => { if (event.target === modal) finish(false) })
+  return modal
+}
+
+function teleP1ShowDedupeScanning (count) {
+  const modal = teleP1EnsureDedupeModal()
+  modal.classList.remove('hidden')
+  modal.querySelector('#tele-dedupe-subtitle').textContent = `Scanning the selected download path for ${count.toLocaleString()} file${count === 1 ? '' : 's'}…`
+  modal.querySelector('#tele-dedupe-body').innerHTML = `<div class="tele-dedupe-scanning"><span class="tele-dedupe-spinner"></span><div><strong>Cross-checking filename + file size</strong><span>Only an exact name and exact byte-size match is treated as a duplicate.</span></div></div>`
+  const continueButton = modal.querySelector('#tele-dedupe-continue')
+  continueButton.disabled = true
+  continueButton.textContent = 'Scanning…'
+  return modal
+}
+
+function teleP1RenderDedupeReport (report) {
+  const modal = teleP1EnsureDedupeModal()
+  const duplicateCount = Number(report.duplicateCount || 0)
+  const uniqueCount = Number(report.uniqueCount || 0)
+  const selectedCount = Number(report.selectedCount || 0)
+  const existingCount = (report.duplicates || []).filter(row => row.reason === 'existing').length
+  const selectionCount = duplicateCount - existingCount
+  const unknownSizeCount = Number(report.unknownSizeCount || 0)
+
+  modal.querySelector('#tele-dedupe-subtitle').textContent = duplicateCount
+    ? `${duplicateCount.toLocaleString()} duplicate${duplicateCount === 1 ? '' : 's'} found · ${uniqueCount.toLocaleString()} ready to download`
+    : `No duplicates found · ${uniqueCount.toLocaleString()} ready to download`
+
+  const body = modal.querySelector('#tele-dedupe-body')
+  body.innerHTML = ''
+
+  const pathCard = document.createElement('div')
+  pathCard.className = 'tele-dedupe-path'
+  pathCard.innerHTML = `<span>Scanned path</span><strong></strong>`
+  pathCard.querySelector('strong').textContent = report.rootPath || 'Downloads'
+  body.appendChild(pathCard)
+
+  const stats = document.createElement('div')
+  stats.className = 'tele-dedupe-stats'
+  const statData = [
+    ['Selected', selectedCount.toLocaleString()],
+    ['Already there', existingCount.toLocaleString()],
+    ['Repeated selection', selectionCount.toLocaleString()],
+    ['Will download', uniqueCount.toLocaleString()]
+  ]
+  for (const [label, value] of statData) {
+    const card = document.createElement('div')
+    card.className = 'tele-dedupe-stat'
+    card.innerHTML = `<span></span><strong></strong>`
+    card.querySelector('span').textContent = label
+    card.querySelector('strong').textContent = value
+    stats.appendChild(card)
+  }
+  body.appendChild(stats)
+
+  const validation = document.createElement('div')
+  validation.className = 'tele-dedupe-validation'
+  validation.innerHTML = `<span class="tele-dedupe-check">✓</span><div><strong>Exact filename + exact size</strong><span></span></div>`
+  validation.querySelector('div span').textContent = `${Number(report.scannedFiles || 0).toLocaleString()} files scanned in ${teleP1FormatDuration(Number(report.scanMs || 0))}${unknownSizeCount ? ` · ${unknownSizeCount} item${unknownSizeCount === 1 ? '' : 's'} had unknown size and will not be auto-skipped` : ''}`
+  body.appendChild(validation)
+
+  if (duplicateCount) {
+    const listTitle = document.createElement('div')
+    listTitle.className = 'tele-dedupe-list-title'
+    listTitle.textContent = `Duplicates · ${fmtSize(Number(report.duplicateBytes || 0))} skipped`
+    body.appendChild(listTitle)
+
+    const list = document.createElement('div')
+    list.className = 'tele-dedupe-list'
+    const rows = (report.duplicates || []).slice(0, 100)
+    for (const row of rows) {
+      const entry = document.createElement('div')
+      entry.className = 'tele-dedupe-row'
+      const left = document.createElement('div')
+      left.className = 'tele-dedupe-row-main'
+      const name = document.createElement('strong')
+      name.textContent = row.fileName || 'file'
+      const detail = document.createElement('span')
+      detail.textContent = row.reason === 'existing'
+        ? `${fmtSize(Number(row.fileSize || 0))} · ${row.relativePath || 'already in download folder'}`
+        : `${fmtSize(Number(row.fileSize || 0))} · repeated in this selection`
+      left.append(name, detail)
+      const badge = document.createElement('span')
+      badge.className = `tele-dedupe-badge ${row.reason === 'existing' ? 'existing' : 'selection'}`
+      badge.textContent = row.reason === 'existing' ? 'On disk' : 'Repeated'
+      entry.append(left, badge)
+      list.appendChild(entry)
+    }
+    if (duplicateCount > rows.length) {
+      const more = document.createElement('div')
+      more.className = 'tele-dedupe-more'
+      more.textContent = `+ ${(duplicateCount - rows.length).toLocaleString()} more duplicate${duplicateCount - rows.length === 1 ? '' : 's'}`
+      list.appendChild(more)
+    }
+    body.appendChild(list)
+  }
+
+  const continueButton = modal.querySelector('#tele-dedupe-continue')
+  continueButton.disabled = uniqueCount === 0
+  continueButton.textContent = uniqueCount ? `Continue with ${uniqueCount.toLocaleString()}` : 'Nothing to download'
+
+  return new Promise(resolve => {
+    teleP1DedupeResolve = resolve
+    continueButton.onclick = () => {
+      modal.classList.add('hidden')
+      teleP1DedupeResolve = null
+      resolve(true)
+    }
+  })
+}
+
+startDownloads = async function teleP1StartDownloadsWithDedupe (items) {
+  const candidates = (items || []).filter(item => !isCompleted(`${state.activeChatId}:${item.messageId}`))
+  if (!candidates.length) {
+    if (items && items.length) toast('All selected files are already completed')
+    return
+  }
+
+  teleP1ShowDedupeScanning(candidates.length)
+  let report
+  try {
+    report = await request('download-dedupe-preview', {
+      items: candidates.map(item => ({
+        messageId: item.messageId,
+        fileName: item.name,
+        fileSize: item.fileSize
+      }))
+    })
+  } catch (error) {
+    const modal = teleP1EnsureDedupeModal()
+    modal.classList.add('hidden')
+    toast(`Dedupe scan failed: ${error.message}`, 'error')
+    return
+  }
+
+  const proceed = await teleP1RenderDedupeReport(report)
+  if (!proceed) return
+
+  const allowed = new Set((report.uniqueMessageIds || []).map(String))
+  const todo = candidates.filter(item => allowed.has(String(item.messageId)))
+  if (!todo.length) {
+    toast('Everything selected is already present in the download folder')
+    return
+  }
+
+  await teleP1BaseStartDownloads(todo)
+}
