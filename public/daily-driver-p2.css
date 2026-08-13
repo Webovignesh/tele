@@ -1,0 +1,58 @@
+/* Daily-driver P2 reliability polish. */
+
+.chat-avatar {
+  position: relative;
+  overflow: hidden;
+}
+
+.tele-p2-avatar-img,
+.tele-p2-avatar-fallback {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.tele-p2-avatar-img {
+  object-fit: cover;
+  border-radius: inherit;
+}
+
+.tele-p2-avatar-fallback {
+  display: grid;
+  place-items: center;
+}
+
+.tele-p2-avatar-fallback.hidden {
+  display: none !important;
+}
+
+/* The report itself is the audit trail. Keep every duplicate accessible in
+ * the modal instead of replacing the tail with a "+ N more" placeholder. */
+.tele-dedupe-dialog {
+  width: min(980px, calc(100vw - 48px)) !important;
+  max-height: min(900px, calc(100vh - 40px)) !important;
+}
+
+.tele-dedupe-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tele-dedupe-list {
+  max-height: none !important;
+  overflow: visible !important;
+}
+
+.tele-dedupe-row-main {
+  min-width: 0;
+}
+
+.tele-dedupe-row-main strong,
+.tele-dedupe-row-main span {
+  overflow-wrap: anywhere;
+}
+
+.tele-dedupe-more {
+  display: none !important;
+}
