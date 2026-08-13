@@ -6,6 +6,7 @@ const assert = require('node:assert/strict')
 
 const root = path.resolve(__dirname, '..')
 const js = fs.readFileSync(path.join(root, 'public', 'daily-driver-final.js'), 'utf8')
+const guard = fs.readFileSync(path.join(root, 'public', 'daily-driver-final-guard.js'), 'utf8')
 const css = fs.readFileSync(path.join(root, 'public', 'daily-driver-final.css'), 'utf8')
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8')
 
@@ -24,6 +25,11 @@ assert.match(js, /rescueForwardedMarks/)
 assert.match(js, /Continue with/)
 assert.doesNotMatch(js, /\+ .*more duplicate/)
 
+assert.match(guard, /handleEvent = function teleFinalGuardHandleEvent/)
+assert.match(guard, /event\.name === 'media-index-progress'/)
+assert.match(guard, /Cached .* files · syncing in background/)
+assert.match(guard, /Indexing files…/)
+
 assert.match(css, /#chat-list[\s\S]*overflow-x: hidden/)
 assert.match(css, /#media-grid \.gthumb video/)
 assert.match(css, /\.tele-final-preview/)
@@ -32,6 +38,8 @@ assert.match(css, /grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/)
 
 assert.match(html, /daily-driver-final\.css\?v=1/)
 assert.match(html, /daily-driver-final\.js\?v=1/)
-assert.ok(html.indexOf('daily-driver-final.js?v=1') > html.indexOf('daily-driver-p2.js?v=1'), 'final runtime must load last')
+assert.match(html, /daily-driver-final-guard\.js\?v=1/)
+assert.ok(html.indexOf('daily-driver-final.js?v=1') > html.indexOf('daily-driver-p2.js?v=1'), 'final runtime must load after P2')
+assert.ok(html.indexOf('daily-driver-final-guard.js?v=1') > html.indexOf('daily-driver-final.js?v=1'), 'final guard must load last')
 
 console.log('final smoke checks passed')
