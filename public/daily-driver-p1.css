@@ -139,7 +139,287 @@
   overflow-anchor: none;
 }
 
+/* Download dedupe report */
+.tele-dedupe-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(4, 9, 14, .72);
+  backdrop-filter: blur(8px);
+}
+
+.tele-dedupe-modal.hidden {
+  display: none !important;
+}
+
+.tele-dedupe-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(112, 153, 190, .25);
+  border-radius: 18px;
+  background: #111c27;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .48);
+}
+
+.tele-dedupe-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid rgba(126, 157, 187, .13);
+}
+
+.tele-dedupe-title {
+  color: #f4f8fc;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.tele-dedupe-subtitle {
+  margin-top: 5px;
+  color: #91a6ba;
+  font-size: 12px;
+}
+
+.tele-dedupe-body {
+  min-height: 120px;
+  padding: 18px 22px;
+  overflow: auto;
+}
+
+.tele-dedupe-scanning {
+  min-height: 130px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: #d5e2ee;
+}
+
+.tele-dedupe-scanning > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tele-dedupe-scanning span:not(.tele-dedupe-spinner) {
+  color: #869db2;
+  font-size: 12px;
+}
+
+.tele-dedupe-spinner {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border: 3px solid rgba(79, 166, 255, .18);
+  border-top-color: #4fa6ff;
+  border-radius: 50%;
+  animation: tele-dedupe-spin .8s linear infinite;
+}
+
+@keyframes tele-dedupe-spin { to { transform: rotate(360deg); } }
+
+.tele-dedupe-path {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border: 1px solid rgba(126, 157, 187, .14);
+  border-radius: 12px;
+  background: #0d1721;
+}
+
+.tele-dedupe-path span,
+.tele-dedupe-stat span {
+  color: #8399ae;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.tele-dedupe-path strong {
+  overflow-wrap: anywhere;
+  color: #d9e7f3;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.tele-dedupe-stats {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tele-dedupe-stat {
+  min-width: 0;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid rgba(126, 157, 187, .13);
+  border-radius: 12px;
+  background: #14212e;
+}
+
+.tele-dedupe-stat strong {
+  color: #f3f7fb;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.tele-dedupe-validation {
+  margin-top: 12px;
+  padding: 11px 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(68, 199, 132, .18);
+  border-radius: 12px;
+  background: rgba(38, 139, 87, .08);
+}
+
+.tele-dedupe-check {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: rgba(52, 199, 117, .17);
+  color: #5bd390;
+  font-weight: 800;
+}
+
+.tele-dedupe-validation > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tele-dedupe-validation strong {
+  color: #d7e6f2;
+  font-size: 12px;
+}
+
+.tele-dedupe-validation div span {
+  color: #7f97ac;
+  font-size: 11px;
+}
+
+.tele-dedupe-list-title {
+  margin: 18px 0 8px;
+  color: #a9bbcb;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+.tele-dedupe-list {
+  overflow: hidden;
+  border: 1px solid rgba(126, 157, 187, .13);
+  border-radius: 12px;
+}
+
+.tele-dedupe-row {
+  min-width: 0;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid rgba(126, 157, 187, .1);
+  background: #0f1923;
+}
+
+.tele-dedupe-row:last-child { border-bottom: 0; }
+
+.tele-dedupe-row-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tele-dedupe-row-main strong {
+  overflow: hidden;
+  color: #e3edf5;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tele-dedupe-row-main span {
+  overflow: hidden;
+  color: #7990a5;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tele-dedupe-badge {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+.tele-dedupe-badge.existing {
+  background: rgba(255, 181, 72, .13);
+  color: #ffc15d;
+}
+
+.tele-dedupe-badge.selection {
+  background: rgba(94, 168, 255, .13);
+  color: #72b6ff;
+}
+
+.tele-dedupe-more {
+  padding: 10px 12px;
+  color: #8399ae;
+  font-size: 11px;
+  text-align: center;
+  background: #0d1721;
+}
+
+.tele-dedupe-actions {
+  padding: 14px 22px 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  border-top: 1px solid rgba(126, 157, 187, .13);
+}
+
+.tele-dedupe-actions button {
+  min-width: 112px;
+  min-height: 38px;
+  border-radius: 10px;
+}
+
 @media (max-width: 1360px) {
   .app { grid-template-columns: 292px minmax(0, 1fr) 330px !important; }
   #mg-downloads-pane .dl-controls { padding-inline: 12px !important; }
+}
+
+@media (max-width: 720px) {
+  .tele-dedupe-modal { padding: 10px; }
+  .tele-dedupe-dialog { width: 100%; max-height: calc(100vh - 20px); }
+  .tele-dedupe-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tele-dedupe-head,
+  .tele-dedupe-body,
+  .tele-dedupe-actions { padding-inline: 14px; }
 }
