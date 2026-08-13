@@ -22,18 +22,21 @@ assert.match(p0, /tele-p0-video-shell/, 'video preview must use the same popup v
 assert.match(p0Css, /tele-p0-attachment/, 'attachment queue must use the polished progress surface')
 assert.match(p0Css, /dir-current/, 'download path must have a full-width readable surface')
 
-assert.match(compatSource, /cover:/, 'video upload compatibility must include the nullable cover field')
-assert.match(compatSource, /album_cover_thumbnail:/, 'audio upload compatibility must include nullable album-cover thumbnail')
+assert.match(compatSource, /stripNullableInputFiles/, 'upload compatibility must remove unused nullable InputFile fields')
+assert.match(compatSource, /documentFallbackQuery/, 'upload compatibility must include a document fallback path')
 assert.match(compatSource, /realpathSync/, 'local InputFile paths must be canonicalized before TDLib upload')
 assert.match(pkg.scripts.start, /tdl-upload-compat\.js/, 'runtime must preload the TDLib attachment compatibility layer')
 
-const { normalizeAttachmentQuery } = require('../tdl-upload-compat.js')
-const normalizedVideo = normalizeAttachmentQuery({
+const { normalizeAttachmentQuery, documentFallbackQuery } = require('../tdl-upload-compat.js')
+const rawVideo = {
   _: 'sendMessage',
   chat_id: 1,
   input_message_content: {
     _: 'inputMessageVideo',
     video: { _: 'inputFileLocal', path: './.management_uploads/example/video.mp4' },
+    thumbnail: null,
+    cover: null,
+    self_destruct_type: null,
     start_timestamp: 0,
     added_sticker_file_ids: [],
     duration: 0,
@@ -42,11 +45,12 @@ const normalizedVideo = normalizeAttachmentQuery({
     supports_streaming: true,
     caption: { _: 'formattedText', text: '', entities: [] }
   }
-}, false)
+}
+const normalizedVideo = normalizeAttachmentQuery(rawVideo, false)
 const video = normalizedVideo.input_message_content
-assert.equal(video.thumbnail, null, 'unused video thumbnail must be explicit null')
-assert.equal(video.cover, null, 'unused video cover InputFile must be explicit null')
-assert.equal(video.self_destruct_type, null, 'normal video self-destruct field must be explicit null')
+assert.equal(Object.prototype.hasOwnProperty.call(video, 'thumbnail'), false, 'unused video thumbnail must be omitted')
+assert.equal(Object.prototype.hasOwnProperty.call(video, 'cover'), false, 'unused video cover InputFile must be omitted')
+assert.equal(Object.prototype.hasOwnProperty.call(video, 'self_destruct_type'), false, 'normal video self-destruct field must be omitted')
 assert.equal(video.show_caption_above_media, false)
 assert.equal(video.has_spoiler, false)
 assert.match(video.video.path, /video\.mp4$/, 'primary video InputFile path must survive normalization')
@@ -56,9 +60,14 @@ const normalizedDocument = normalizeAttachmentQuery({
   input_message_content: {
     _: 'inputMessageDocument',
     document: { _: 'inputFileLocal', path: './sample.pdf' },
+    thumbnail: null,
     caption: { _: 'formattedText', text: '', entities: [] }
   }
 }, false)
-assert.equal(normalizedDocument.input_message_content.thumbnail, null, 'unused document thumbnail must be explicit null')
+assert.equal(Object.prototype.hasOwnProperty.call(normalizedDocument.input_message_content, 'thumbnail'), false, 'unused document thumbnail must be omitted')
+
+const fallback = documentFallbackQuery(rawVideo, false)
+assert.equal(fallback.input_message_content._, 'inputMessageDocument')
+assert.equal(fallback.input_message_content.document._, 'inputFileLocal')
 
 console.log('P0 smoke checks passed')
