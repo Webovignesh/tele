@@ -1,0 +1,170 @@
+/* Last-mile UI normalization. Loaded after every rescue/final stylesheet. */
+
+/* ------------------------------ Chat list icons ------------------------------ */
+.chat-item .u.tele-ui-chat-meta {
+  min-width: 28px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 6px !important;
+  color: #7f95a9 !important;
+  line-height: 1 !important;
+}
+
+.tele-ui-kind-icon {
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  display: inline-grid !important;
+  place-items: center !important;
+  color: #6f879d !important;
+}
+
+.chat-item.active .tele-ui-kind-icon {
+  color: #d6e8f8 !important;
+}
+
+.tele-ui-kind-icon svg,
+#files-toolbar .search-icon svg {
+  width: 100% !important;
+  height: 100% !important;
+  display: block !important;
+  fill: none !important;
+  stroke: currentColor !important;
+  stroke-width: 1.8 !important;
+  stroke-linecap: round !important;
+  stroke-linejoin: round !important;
+}
+
+.tele-ui-unread {
+  min-width: 18px !important;
+  height: 18px !important;
+  padding: 0 5px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 999px !important;
+  background: #3f9bea !important;
+  color: #fff !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  font-variant-numeric: tabular-nums;
+}
+
+#files-toolbar .search-icon {
+  width: 16px !important;
+  height: 16px !important;
+  display: inline-grid !important;
+  place-items: center !important;
+  color: #7890a6 !important;
+  font-size: 0 !important;
+}
+
+/* ------------------------------ Dedupe confirmation ------------------------------ */
+/* Hard reset because earlier rescue styles used different flex/position rules. */
+#tele-dedupe-body .tele-dedupe-validation {
+  position: relative !important;
+  float: none !important;
+  transform: none !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 74px !important;
+  margin: 14px 0 0 !important;
+  padding: 13px 16px !important;
+  box-sizing: border-box !important;
+  display: grid !important;
+  grid-template-columns: 32px minmax(0, 1fr) !important;
+  grid-template-rows: 1fr !important;
+  align-items: center !important;
+  justify-items: stretch !important;
+  gap: 12px !important;
+  overflow: hidden !important;
+}
+
+#tele-dedupe-body .tele-dedupe-validation > * {
+  position: static !important;
+  inset: auto !important;
+  float: none !important;
+  transform: none !important;
+  margin: 0 !important;
+}
+
+#tele-dedupe-body .tele-ui-dedupe-check {
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
+  min-height: 32px !important;
+  padding: 0 !important;
+  display: grid !important;
+  place-items: center !important;
+  align-self: center !important;
+  justify-self: start !important;
+  border-radius: 50% !important;
+  background: rgba(52, 199, 117, .16) !important;
+  color: #5bd390 !important;
+  font-size: 15px !important;
+  font-weight: 800 !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+}
+
+#tele-dedupe-body .tele-ui-dedupe-copy {
+  width: 100% !important;
+  min-width: 0 !important;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  grid-template-rows: auto auto !important;
+  align-content: center !important;
+  align-items: start !important;
+  gap: 4px !important;
+  overflow: visible !important;
+}
+
+#tele-dedupe-body .tele-ui-dedupe-copy > strong,
+#tele-dedupe-body .tele-ui-dedupe-copy > span {
+  position: static !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  display: block !important;
+  float: none !important;
+  transform: none !important;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  overflow-wrap: anywhere !important;
+  word-break: normal !important;
+}
+
+#tele-dedupe-body .tele-ui-dedupe-copy > strong {
+  color: #d7e6f2 !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  line-height: 1.35 !important;
+}
+
+#tele-dedupe-body .tele-ui-dedupe-detail {
+  color: #7f97ac !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  line-height: 1.35 !important;
+}
+
+/* Keep the duplicate title/list completely outside the validation card. */
+#tele-dedupe-body .tele-dedupe-list-title {
+  position: relative !important;
+  z-index: 1 !important;
+  display: block !important;
+  width: 100% !important;
+  margin: 20px 0 9px !important;
+  padding: 0 !important;
+  clear: both !important;
+}
+
+@media (max-width: 760px) {
+  .tele-dedupe-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
