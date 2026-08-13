@@ -27,32 +27,41 @@ assert.match(p1Css, /#mg-downloads-pane \.dl-controls/, 'downloads drawer must u
 assert.match(p1Css, /\.dir-current[^]*display: none/, 'duplicate download path card must be removed')
 assert.match(p1Css, /grid-template-columns: minmax\(0, 1fr\) 54px/, 'download folder row must reserve readable path width')
 
-assert.match(server, /return \{ '@type': 'inputFileLocal', path: absolutePath \}/, 'server must construct explicit TDLib local InputFile objects')
-assert.match(server, /return \{ '@type': 'inputFileId', id: uploaded\.id \}/, 'prepared uploads must construct explicit TDLib InputFileId objects')
-assert.match(server, /thumbnail: null/, 'optional attachment thumbnails must be explicit null')
-assert.match(server, /cover: null/, 'optional video cover must be explicit null')
-assert.match(server, /album_cover_thumbnail: null/, 'optional audio album cover thumbnail must be explicit null')
-assert.match(compatSource, /'@type': type/, 'compat layer must preserve explicit nested TDLib InputFile type tags')
+assert.match(server, /return \{ '@type': 'inputFileLocal', path: absolutePath \}/, 'server must construct TDLib local InputFile objects')
+assert.match(server, /return \{ '@type': 'inputFileId', id: uploaded\.id \}/, 'prepared uploads must construct TDLib InputFileId objects')
+assert.match(compatSource, /stripNullableInputFiles/, 'compat layer must strip unused nullable upload fields before TDLib invoke')
+assert.match(compatSource, /documentFallbackQuery/, 'compat layer must provide a document fallback for stubborn media InputFile failures')
 assert.match(compatSource, /validateAttachmentQuery/, 'compat layer must reject a lost primary InputFile before TDLib invoke')
 
 const notificationRuntime = [p1, rescue, management, server].join('\n')
 assert.doesNotMatch(notificationRuntime, /Notification\.requestPermission|new Notification|showNotification|rescueNotificationServiceRegistration|renderNotificationSection|Desktop notifications|set-managed-muted|managedNotificationSettings/, 'notification implementation must be removed from active runtime sources')
 assert.equal(fs.existsSync('public/sw.js'), false, 'notification service worker must be deleted')
 
-const { normalizeAttachmentQuery, validateAttachmentQuery } = require('../tdl-upload-compat.js')
-const normalized = normalizeAttachmentQuery({
+const { normalizeAttachmentQuery, validateAttachmentQuery, documentFallbackQuery } = require('../tdl-upload-compat.js')
+const rawVideo = {
   _: 'sendMessage',
   chat_id: 1,
   input_message_content: {
     _: 'inputMessageVideo',
-    video: { _: 'inputFileLocal', path: './sample.mp4' },
+    video: { '@type': 'inputFileLocal', path: './sample.mp4' },
     thumbnail: null,
     cover: null,
+    self_destruct_type: null,
     caption: { _: 'formattedText', text: '', entities: [] }
   }
-}, false)
-assert.equal(normalized.input_message_content.video['@type'], 'inputFileLocal')
-assert.equal(normalized.input_message_content.video._, undefined)
+}
+const normalized = normalizeAttachmentQuery(rawVideo, false)
+assert.equal(normalized.input_message_content.video._, 'inputFileLocal')
+assert.equal(normalized.input_message_content.video['@type'], undefined)
+assert.equal(Object.prototype.hasOwnProperty.call(normalized.input_message_content, 'thumbnail'), false)
+assert.equal(Object.prototype.hasOwnProperty.call(normalized.input_message_content, 'cover'), false)
+assert.equal(Object.prototype.hasOwnProperty.call(normalized.input_message_content, 'self_destruct_type'), false)
 assert.doesNotThrow(() => validateAttachmentQuery(normalized))
+
+const fallback = documentFallbackQuery(rawVideo, false)
+assert.equal(fallback.input_message_content._, 'inputMessageDocument')
+assert.equal(fallback.input_message_content.document._, 'inputFileLocal')
+assert.equal(Object.prototype.hasOwnProperty.call(fallback.input_message_content, 'thumbnail'), false)
+assert.doesNotThrow(() => validateAttachmentQuery(fallback))
 
 console.log('P1 smoke checks passed')
