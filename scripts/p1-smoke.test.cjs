@@ -29,15 +29,18 @@ assert.match(p1Css, /grid-template-columns: minmax\(0, 1fr\) 54px/, 'download fo
 
 assert.match(server, /return \{ '@type': 'inputFileLocal', path: absolutePath \}/, 'server must construct TDLib local InputFile objects')
 assert.match(server, /return \{ '@type': 'inputFileId', id: uploaded\.id \}/, 'prepared uploads must construct TDLib InputFileId objects')
-assert.match(compatSource, /stripNullableInputFiles/, 'compat layer must strip unused nullable upload fields before TDLib invoke')
-assert.match(compatSource, /documentFallbackQuery/, 'compat layer must provide a document fallback for stubborn media InputFile failures')
+assert.match(compatSource, /inputPhoto/, 'compat layer must wrap photo InputFile in current TDLib inputPhoto')
+assert.match(compatSource, /inputVideo/, 'compat layer must wrap video InputFile in current TDLib inputVideo')
+assert.match(compatSource, /inputAudio/, 'compat layer must wrap audio InputFile in current TDLib inputAudio')
+assert.match(compatSource, /inputDocument/, 'compat layer must wrap document InputFile in current TDLib inputDocument')
 assert.match(compatSource, /validateAttachmentQuery/, 'compat layer must reject a lost primary InputFile before TDLib invoke')
 
 const notificationRuntime = [p1, rescue, management, server].join('\n')
 assert.doesNotMatch(notificationRuntime, /Notification\.requestPermission|new Notification|showNotification|rescueNotificationServiceRegistration|renderNotificationSection|Desktop notifications|set-managed-muted|managedNotificationSettings/, 'notification implementation must be removed from active runtime sources')
 assert.equal(fs.existsSync('public/sw.js'), false, 'notification service worker must be deleted')
 
-const { normalizeAttachmentQuery, validateAttachmentQuery, documentFallbackQuery } = require('../tdl-upload-compat.js')
+const { normalizeAttachmentQuery, validateAttachmentQuery } = require('../tdl-upload-compat.js')
+
 const rawVideo = {
   _: 'sendMessage',
   chat_id: 1,
@@ -47,21 +50,55 @@ const rawVideo = {
     thumbnail: null,
     cover: null,
     self_destruct_type: null,
+    start_timestamp: 0,
+    added_sticker_file_ids: [],
+    duration: 0,
+    width: 0,
+    height: 0,
+    supports_streaming: true,
     caption: { _: 'formattedText', text: '', entities: [] }
   }
 }
-const normalized = normalizeAttachmentQuery(rawVideo, false)
-assert.equal(normalized.input_message_content.video._, 'inputFileLocal')
-assert.equal(normalized.input_message_content.video['@type'], undefined)
-assert.equal(Object.prototype.hasOwnProperty.call(normalized.input_message_content, 'thumbnail'), false)
-assert.equal(Object.prototype.hasOwnProperty.call(normalized.input_message_content, 'cover'), false)
-assert.equal(Object.prototype.hasOwnProperty.call(normalized.input_message_content, 'self_destruct_type'), false)
-assert.doesNotThrow(() => validateAttachmentQuery(normalized))
+const normalizedVideo = normalizeAttachmentQuery(rawVideo, false)
+assert.equal(normalizedVideo.input_message_content._, 'inputMessageVideo')
+assert.equal(normalizedVideo.input_message_content.video._, 'inputVideo')
+assert.equal(normalizedVideo.input_message_content.video.video._, 'inputFileLocal')
+assert.equal(normalizedVideo.input_message_content.video.video['@type'], undefined)
+assert.equal(normalizedVideo.input_message_content.video.thumbnail, null)
+assert.equal(normalizedVideo.input_message_content.video.cover, null)
+assert.equal(normalizedVideo.input_message_content.self_destruct_type, null)
+assert.doesNotThrow(() => validateAttachmentQuery(normalizedVideo))
 
-const fallback = documentFallbackQuery(rawVideo, false)
-assert.equal(fallback.input_message_content._, 'inputMessageDocument')
-assert.equal(fallback.input_message_content.document._, 'inputFileLocal')
-assert.equal(Object.prototype.hasOwnProperty.call(fallback.input_message_content, 'thumbnail'), false)
-assert.doesNotThrow(() => validateAttachmentQuery(fallback))
+const normalizedPhoto = normalizeAttachmentQuery({
+  _: 'sendMessage',
+  chat_id: 1,
+  input_message_content: {
+    _: 'inputMessagePhoto',
+    photo: { '@type': 'inputFileLocal', path: './sample.png' },
+    thumbnail: null,
+    added_sticker_file_ids: [],
+    width: 0,
+    height: 0,
+    caption: { _: 'formattedText', text: '', entities: [] }
+  }
+}, false)
+assert.equal(normalizedPhoto.input_message_content.photo._, 'inputPhoto')
+assert.equal(normalizedPhoto.input_message_content.photo.photo._, 'inputFileLocal')
+assert.doesNotThrow(() => validateAttachmentQuery(normalizedPhoto))
+
+const normalizedDocument = normalizeAttachmentQuery({
+  _: 'sendMessage',
+  chat_id: 1,
+  input_message_content: {
+    _: 'inputMessageDocument',
+    document: { '@type': 'inputFileLocal', path: './sample.pdf' },
+    thumbnail: null,
+    disable_content_type_detection: false,
+    caption: { _: 'formattedText', text: '', entities: [] }
+  }
+}, false)
+assert.equal(normalizedDocument.input_message_content.document._, 'inputDocument')
+assert.equal(normalizedDocument.input_message_content.document.document._, 'inputFileLocal')
+assert.doesNotThrow(() => validateAttachmentQuery(normalizedDocument))
 
 console.log('P1 smoke checks passed')
