@@ -1,8 +1,8 @@
-/* Last-mile UI normalization. Loaded after every rescue/final stylesheet. */
+/* Final UI ownership styles. Loaded last. */
 
-/* ------------------------------ Chat list icons ------------------------------ */
+/* ------------------------------ Chat list ------------------------------ */
 .chat-item .u.tele-ui-chat-meta {
-  min-width: 28px !important;
+  min-width: 30px !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: flex-end !important;
@@ -10,7 +10,6 @@
   color: #7f95a9 !important;
   line-height: 1 !important;
 }
-
 .tele-ui-kind-icon {
   width: 18px !important;
   height: 18px !important;
@@ -19,11 +18,7 @@
   place-items: center !important;
   color: #6f879d !important;
 }
-
-.chat-item.active .tele-ui-kind-icon {
-  color: #d6e8f8 !important;
-}
-
+.chat-item.active .tele-ui-kind-icon { color: #d6e8f8 !important; }
 .tele-ui-kind-icon svg,
 #files-toolbar .search-icon svg {
   width: 100% !important;
@@ -35,7 +30,6 @@
   stroke-linecap: round !important;
   stroke-linejoin: round !important;
 }
-
 .tele-ui-unread {
   min-width: 18px !important;
   height: 18px !important;
@@ -50,7 +44,6 @@
   font-weight: 700 !important;
   font-variant-numeric: tabular-nums;
 }
-
 #files-toolbar .search-icon {
   width: 16px !important;
   height: 16px !important;
@@ -60,111 +53,193 @@
   font-size: 0 !important;
 }
 
-/* ------------------------------ Dedupe confirmation ------------------------------ */
-/* Hard reset because earlier rescue styles used different flex/position rules. */
-#tele-dedupe-body .tele-dedupe-validation {
-  position: relative !important;
-  float: none !important;
-  transform: none !important;
-  width: 100% !important;
-  min-width: 0 !important;
-  min-height: 74px !important;
-  margin: 14px 0 0 !important;
-  padding: 13px 16px !important;
-  box-sizing: border-box !important;
+/* ------------------------------ Files stability ------------------------------ */
+#media-grid {
+  overflow-anchor: none !important;
+}
+#media-grid .gcard {
+  contain: layout paint !important;
+}
+#media-grid .gthumb,
+#media-grid .gthumb img {
+  width: 58px !important;
+  height: 58px !important;
+  min-width: 58px !important;
+  min-height: 58px !important;
+  max-width: 58px !important;
+  max-height: 58px !important;
+  object-fit: cover !important;
+}
+#media-grid .gthumb video,
+#media-grid .gthumb audio {
+  display: none !important;
+}
+
+/* ------------------------------ Preview sizing ------------------------------ */
+body:has(#tele-final-preview:not(.hidden)) { overflow: hidden !important; }
+.tele-final-preview {
+  position: fixed !important;
+  inset: 0 !important;
   display: grid !important;
-  grid-template-columns: 32px minmax(0, 1fr) !important;
-  grid-template-rows: 1fr !important;
-  align-items: center !important;
-  justify-items: stretch !important;
-  gap: 12px !important;
+  place-items: center !important;
+  padding: 24px !important;
   overflow: hidden !important;
 }
-
-#tele-dedupe-body .tele-dedupe-validation > * {
-  position: static !important;
-  inset: auto !important;
-  float: none !important;
-  transform: none !important;
-  margin: 0 !important;
+.tele-final-preview.hidden { display: none !important; }
+.tele-final-preview-shell {
+  width: min(880px, calc(100vw - 48px)) !important;
+  height: min(72vh, 620px) !important;
+  max-width: calc(100vw - 48px) !important;
+  max-height: calc(100vh - 48px) !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  display: grid !important;
+  grid-template-rows: auto minmax(0, 1fr) !important;
+  overflow: hidden !important;
 }
+#tele-final-preview-body,
+.tele-final-video-shell {
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  display: grid !important;
+  place-items: center !important;
+  overflow: hidden !important;
+}
+.tele-final-preview-image,
+.tele-final-preview-video {
+  display: block !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  object-fit: contain !important;
+  margin: auto !important;
+}
+.tele-final-preview-video { background: #000 !important; }
 
+/* ------------------------------ Dedupe confirmation ------------------------------ */
+#tele-dedupe-body .tele-dedupe-validation {
+  all: unset !important;
+  box-sizing: border-box !important;
+  width: 100% !important;
+  min-height: 72px !important;
+  margin: 14px 0 0 !important;
+  padding: 14px 16px !important;
+  display: grid !important;
+  grid-template-columns: 32px minmax(0, 1fr) !important;
+  align-items: center !important;
+  gap: 12px !important;
+  border: 1px solid rgba(68, 199, 132, .18) !important;
+  border-radius: 12px !important;
+  background: rgba(38, 139, 87, .08) !important;
+  overflow: hidden !important;
+}
 #tele-dedupe-body .tele-ui-dedupe-check {
   width: 32px !important;
   height: 32px !important;
   min-width: 32px !important;
   min-height: 32px !important;
-  padding: 0 !important;
   display: grid !important;
   place-items: center !important;
-  align-self: center !important;
-  justify-self: start !important;
   border-radius: 50% !important;
   background: rgba(52, 199, 117, .16) !important;
   color: #5bd390 !important;
   font-size: 15px !important;
   font-weight: 800 !important;
   line-height: 1 !important;
-  white-space: nowrap !important;
-  overflow: hidden !important;
 }
-
 #tele-dedupe-body .tele-ui-dedupe-copy {
-  width: 100% !important;
   min-width: 0 !important;
   display: grid !important;
-  grid-template-columns: minmax(0, 1fr) !important;
   grid-template-rows: auto auto !important;
-  align-content: center !important;
-  align-items: start !important;
   gap: 4px !important;
-  overflow: visible !important;
+  align-content: center !important;
 }
-
 #tele-dedupe-body .tele-ui-dedupe-copy > strong,
 #tele-dedupe-body .tele-ui-dedupe-copy > span {
   position: static !important;
+  inset: auto !important;
+  float: none !important;
+  transform: none !important;
   width: 100% !important;
   min-width: 0 !important;
   margin: 0 !important;
   padding: 0 !important;
   display: block !important;
-  float: none !important;
-  transform: none !important;
   white-space: normal !important;
   overflow: visible !important;
   text-overflow: clip !important;
   overflow-wrap: anywhere !important;
   word-break: normal !important;
 }
-
 #tele-dedupe-body .tele-ui-dedupe-copy > strong {
   color: #d7e6f2 !important;
   font-size: 12px !important;
   font-weight: 700 !important;
   line-height: 1.35 !important;
 }
-
 #tele-dedupe-body .tele-ui-dedupe-detail {
   color: #7f97ac !important;
   font-size: 11px !important;
   font-weight: 500 !important;
   line-height: 1.35 !important;
 }
-
-/* Keep the duplicate title/list completely outside the validation card. */
 #tele-dedupe-body .tele-dedupe-list-title {
-  position: relative !important;
-  z-index: 1 !important;
+  position: static !important;
   display: block !important;
   width: 100% !important;
   margin: 20px 0 9px !important;
   padding: 0 !important;
   clear: both !important;
 }
+.tele-final-dedupe-list,
+.tele-dedupe-list {
+  max-height: min(360px, 38vh) !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  scrollbar-gutter: stable !important;
+}
+
+/* ------------------------------ Downloads ------------------------------ */
+#download-stats {
+  display: block !important;
+  min-height: 16px !important;
+  margin-top: 2px !important;
+  color: #8fa8bd !important;
+  font-size: 11px !important;
+  line-height: 1.35 !important;
+  white-space: normal !important;
+  font-variant-numeric: tabular-nums !important;
+}
+#download-list .djob {
+  contain: layout paint !important;
+}
+#download-list .djob .actions {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+}
+#download-list .djob .actions a {
+  font-size: 11px !important;
+  padding: 4px 8px !important;
+  background: var(--ok) !important;
+  border-radius: 7px !important;
+  text-decoration: none !important;
+  color: #07110a !important;
+  font-weight: 600 !important;
+}
 
 @media (max-width: 760px) {
-  .tele-dedupe-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  .tele-dedupe-stats { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .tele-final-preview { padding: 12px !important; }
+  .tele-final-preview-shell {
+    width: calc(100vw - 24px) !important;
+    height: min(76vh, 620px) !important;
+    max-width: calc(100vw - 24px) !important;
+    max-height: calc(100vh - 24px) !important;
   }
 }
