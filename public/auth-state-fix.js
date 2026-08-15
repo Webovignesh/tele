@@ -140,6 +140,12 @@
       script.dataset.teleFilesStability = '1'
       document.body.appendChild(script)
     }
+    if (!document.querySelector('script[data-filegram-files-view]')) {
+      const view = document.createElement('script')
+      view.src = 'files-view.js?v=1'
+      view.dataset.filegramFilesView = '1'
+      document.body.appendChild(view)
+    }
   }
 
   function scheduleFinalStabilityLayer () {
