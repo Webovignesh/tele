@@ -747,9 +747,16 @@
     }
   }
 
+  /* Queue figures come from state.queueStats, the server's aggregate over the
+   * whole queue. state.downloads is only the projection the server has pushed
+   * (roughly one concurrency window plus finished jobs), so counting it made
+   * Total report 8 for a 20,000-file queue. Falls back to the projection only
+   * when no aggregate has arrived yet. */
   function syncStats () {
+    const queue = state.queueStats
     let done = 0
-    for (const job of state.downloads.values()) if (job.status === 'done') done++
+    if (queue) done = Number(queue.done || 0)
+    else for (const job of state.downloads.values()) if (job.status === 'done') done++
     const doneEl = document.querySelector('[data-stat="fg-done"]')
     if (doneEl) {
       const text = done.toLocaleString()
@@ -757,7 +764,7 @@
     }
     const totalEl = document.querySelector('#fg-stats-total strong')
     if (totalEl) {
-      const total = state.downloads.size
+      const total = queue ? Number(queue.total || 0) : state.downloads.size
       const text = `${total.toLocaleString()} file${total === 1 ? '' : 's'}`
       if (totalEl.textContent !== text) totalEl.textContent = text
     }
@@ -867,7 +874,7 @@
       const result = base(event)
       if (!event) return result
       if (event.name === 'auth' && event.payload && event.payload.me) captureAccount(event.payload.me)
-      if (event.name === 'download-update' || event.name === 'download-done') queueMicrotask(syncStats)
+      if (event.name === 'download-update' || event.name === 'download-done' || event.name === 'download-stats') queueMicrotask(syncStats)
       if (event.name === 'chat-upsert' || event.name === 'chat-remove') queueMicrotask(applyChatFilters)
       return result
     }
@@ -883,6 +890,39 @@
       if (data && data.me) captureAccount(data.me)
       return result
     }
+  }
+
+  /* ...but that wrapper only helps if it is installed before the runtime's one
+   * boot-time get-status resolves, and it usually is not. app.js does
+   * `request('get-status').then(applyStatus)` inside ws.onopen, which evaluates
+   * `applyStatus` at that moment; a localhost socket normally opens before this
+   * file has executed, so the payload is handed to a pre-shell wrapper and the
+   * `me` field is dropped. auth-state-fix's microtask re-request has the same
+   * problem and additionally skips while the socket is still CONNECTING. Nothing
+   * requests status again, and `auth` is only replayed on a fresh
+   * authorizationStateReady transition, so a reload of an already-signed-in
+   * session would keep the placeholder name indefinitely.
+   *
+   * So the shell asks for its own identity instead of depending on that race.
+   * Read-only request; it owns no data and mutates no server state. The timer
+   * self-clears on success and is hard-capped, so it cannot become the kind of
+   * orphaned interval that previously blanked the downloads list.
+   */
+  function pullIdentity () {
+    if (account.name || account.username) return true
+    if (typeof request !== 'function') return false
+    if (typeof ws === 'undefined' || !ws || ws.readyState !== WebSocket.OPEN) return false
+    request('get-status')
+      .then(data => { if (data && data.me) captureAccount(data.me) })
+      .catch(() => {})
+    return false
+  }
+
+  if (!pullIdentity()) {
+    let tries = 0
+    const identityTimer = setInterval(() => {
+      if (pullIdentity() || ++tries >= 20) clearInterval(identityTimer)
+    }, 500)
   }
 
   if (typeof renderChats === 'function') {

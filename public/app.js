@@ -8,7 +8,11 @@ const state = {
   messages: [],
   selection: new Map(), // key `${chatId}:${messageId}` -> item
   selectedMessages: new Map(), // key `${chatId}:${messageId}` -> full message for Forward
-  downloads: new Map(), // jobId -> job
+  downloads: new Map(), // jobId -> job (a PROJECTION of the server queue, not the queue)
+  // Authoritative queue aggregate from the server. state.downloads only holds
+  // jobs the server has emitted (i.e. roughly the active workers plus finished
+  // ones), so it must never be used to derive Total/Remaining.
+  queueStats: null,
   prevSpeed: new Map(),
   samples: new Map(), // jobId -> [{time, downloaded}] for speed smoothing
   hasMore: true,
@@ -159,6 +163,10 @@ function handleEvent (ev) {
     case 'download-update':
       upsertDownload(ev.job)
       break
+    case 'download-stats':
+      state.queueStats = ev.stats || null
+      renderDownloads()
+      break
     case 'download-done':
       upsertDownload(ev.job)
       markCompleted(`${ev.job.chatId}:${ev.job.messageId}`)
@@ -213,6 +221,7 @@ function applyStatus (data) {
   setDirLabel(data.downloadsDir)
   request('get-downloads', {}).then(d => {
     for (const job of d.jobs || []) state.downloads.set(job.jobId, job)
+    if (d.stats) state.queueStats = d.stats
     state.concurrency = d.concurrency || state.concurrency
     $('#concurrency').value = state.concurrency
     $('#concurrency-val').textContent = state.concurrency
@@ -1597,24 +1606,28 @@ $('#cancel-pack').onclick = () => request('cancel-pack', {}).catch(() => {})
 
 $('#pause-all').onclick = () => request('pause-all', {}).catch(() => {})
 $('#resume-all').onclick = () => request('resume-all', {}).catch(() => {})
+// Bulk actions are single server-wide calls. Looping state.downloads here would
+// only ever reach the jobs this browser happens to know about (about one
+// concurrency window), never the real queue.
 $('#cancel-all').onclick = async () => {
-  const active = [...state.downloads.values()].filter(j => j.status === 'queued' || j.status === 'downloading' || j.status === 'paused').length
-  if (!active) return
-  if (!confirm(`Cancel ${active} active download(s)?`)) return
+  const remaining = state.queueStats ? Number(state.queueStats.remaining || 0) : 0
+  if (!remaining) return
+  if (!confirm(`Cancel all ${remaining.toLocaleString()} unfinished download(s)?`)) return
   const res = await request('cancel-all', {}).catch(() => null)
-  if (res && res.cancelled != null) {
-    for (const [id, j] of state.downloads) {
-      if (j.status === 'queued' || j.status === 'downloading' || j.status === 'paused') j.status = 'cancelled'
-    }
-    renderDownloads()
+  if (!res) return
+  if (res.stats) state.queueStats = res.stats
+  for (const j of state.downloads.values()) {
+    if (j.status === 'queued' || j.status === 'downloading' || j.status === 'paused') j.status = 'cancelled'
   }
+  renderDownloads()
 }
-$('#clear-done').onclick = () => {
-  for (const [id, j] of state.downloads) {
+$('#clear-done').onclick = async () => {
+  const res = await request('clear-done', {}).catch(() => null)
+  if (res && res.stats) state.queueStats = res.stats
+  for (const [id, j] of [...state.downloads]) {
     if (j.status === 'done' || j.status === 'error' || j.status === 'cancelled') {
       state.downloads.delete(id)
       state.prevSpeed.delete(id)
-      request('remove-download', { jobId: id }).catch(() => {})
     }
   }
   renderDownloads()

@@ -111,11 +111,84 @@ function respond (ws, id, ok, data, error) {
 
 /* ------------------------------ Download manager ------------------------------ */
 
+/* Queue state machine. The server owns the whole queue; the browser only ever
+ * sees a projection of it, so every bulk operation and every statistic must be
+ * derived here and never from what the client happens to have received.
+ *
+ *   queued  -> downloading -> done
+ *              |  |  |
+ *              |  |  +------> error
+ *              |  +---------> paused -> queued (resume)
+ *              +------------> cancelled
+ *   queued  -> paused | cancelled          (never started)
+ *
+ * PENDING = 'queued', ACTIVE = 'downloading', and done/error/cancelled are
+ * terminal. Cancellable work is exactly queued | downloading | paused.
+ */
+const CANCELLABLE = ['queued', 'downloading', 'paused']
+const TERMINAL = ['done', 'error', 'cancelled']
+
 class DownloadManager {
   constructor () {
     this.jobs = new Map()
     this.activeCount = 0
     this.lastEmit = new Map()
+    // Set while a bulk operation walks the queue. tryRun() is a no-op during
+    // that window so cancelling job 1 of 20,000 cannot start job 9 only for the
+    // same pass to cancel it a moment later (an O(n^2) scan storm plus a burst
+    // of pointless TDLib downloadFile round-trips).
+    this.bulk = false
+    this.statsTimer = null
+  }
+
+  /* Aggregate over the FULL queue. This is the only sanctioned source for the
+   * Speed / Downloaded / Remaining / Total figures. */
+  stats () {
+    let queued = 0
+    let downloading = 0
+    let paused = 0
+    let done = 0
+    let error = 0
+    let cancelled = 0
+    let speed = 0
+    let downloadedBytes = 0
+    let expectedBytes = 0
+    for (const job of this.jobs.values()) {
+      switch (job.status) {
+        case 'queued': queued++; break
+        case 'downloading': downloading++; speed += Math.max(0, Number(job.speed || 0)); break
+        case 'paused': paused++; break
+        case 'done': done++; break
+        case 'error': error++; break
+        case 'cancelled': cancelled++; break
+      }
+      downloadedBytes += Math.max(0, Number(job.downloaded || 0))
+      expectedBytes += Math.max(0, Number(job.fileSize || 0))
+    }
+    return {
+      total: this.jobs.size,
+      queued,
+      downloading,
+      paused,
+      done,
+      error,
+      cancelled,
+      // Work that still needs to finish, whether or not it has started.
+      remaining: queued + downloading + paused,
+      speed,
+      downloadedBytes,
+      expectedBytes,
+      concurrency: CONCURRENCY
+    }
+  }
+
+  /* Coalesced so a 20k enqueue produces a handful of broadcasts, not 20k. */
+  scheduleStats () {
+    if (this.statsTimer) return
+    this.statsTimer = setTimeout(() => {
+      this.statsTimer = null
+      sendAll({ type: 'event', event: { name: 'download-stats', stats: this.stats() } })
+    }, 200)
   }
 
   add (chatId, chatTitle, messageId, fileId, fileName, fileSize) {
@@ -137,16 +210,34 @@ class DownloadManager {
       active: false
     }
     this.jobs.set(jobId, job)
+    // Enqueue is not broadcast per job: a "download all" on a 20k channel would
+    // otherwise push 20k socket frames. The coalesced aggregate keeps the client
+    // honest about queue size without that flood.
+    this.scheduleStats()
     this.tryRun()
     return jobId
   }
 
   tryRun () {
+    if (this.bulk) return
     while (this.activeCount < CONCURRENCY) {
       const next = [...this.jobs.values()].find(j => j.status === 'queued')
       if (!next) break
       this.activeCount++
       this.startJob(next)
+    }
+  }
+
+  /* Runs fn with the scheduler suspended, then pumps once. */
+  runBulk (fn) {
+    const wasBulk = this.bulk
+    this.bulk = true
+    try {
+      return fn()
+    } finally {
+      this.bulk = wasBulk
+      if (!this.bulk) this.tryRun()
+      this.scheduleStats()
     }
   }
 
@@ -168,14 +259,16 @@ class DownloadManager {
         limit: 0,
         synchronous: false
       })
-      if (job.status === 'paused') return
+      // downloadFile can resolve after the job was cancelled or paused. Both are
+      // deliberate terminations, so neither may be overwritten by done/error.
+      if (job.status === 'paused' || job.status === 'cancelled') return
       const local = res && res.local
       if (local && local.is_downloading_completed && local.path) {
         job.downloaded = job.fileSize || local.downloaded_size || 0
         this.finalize(job, local.path)
       }
     } catch (e) {
-      if (job.status === 'paused') return
+      if (job.status === 'paused' || job.status === 'cancelled') return
       job.status = 'error'
       job.error = String(e.message || e)
       this.finishJob(job)
@@ -255,23 +348,63 @@ class DownloadManager {
   }
 
   pauseAll () {
-    const ids = [...this.jobs.values()].filter(j => j.status === 'queued' || j.status === 'downloading').map(j => j.jobId)
-    for (const id of ids) this.pause(id)
-    return ids.length
+    return this.runBulk(() => {
+      const ids = [...this.jobs.values()].filter(j => j.status === 'queued' || j.status === 'downloading').map(j => j.jobId)
+      for (const id of ids) this.pause(id)
+      return ids.length
+    })
   }
 
   resumeAll () {
     const ids = [...this.jobs.values()].filter(j => j.status === 'paused').map(j => j.jobId)
+    // Not wrapped in runBulk: resuming is precisely the case where the pump has
+    // to start work, and pause() already released every slot.
     for (const id of ids) this.resume(id)
+    this.scheduleStats()
     return ids.length
   }
 
+  /* Cancels the ENTIRE queue: active, pending and paused alike. Nothing may
+   * auto-start afterwards, which holds because tryRun only ever selects
+   * 'queued' and every cancellable job leaves this loop as 'cancelled'. */
   cancelAll () {
-    const ids = [...this.jobs.values()]
-      .filter(j => j.status === 'queued' || j.status === 'downloading' || j.status === 'paused')
-      .map(j => j.jobId)
-    for (const id of ids) this.cancel(id)
-    return ids.length
+    return this.runBulk(() => {
+      const ids = [...this.jobs.values()]
+        .filter(j => CANCELLABLE.includes(j.status))
+        .map(j => j.jobId)
+      for (const id of ids) this.cancel(id)
+      return ids.length
+    })
+  }
+
+  /* Removes finished entries only. Never touches live work. */
+  clearDone () {
+    return this.runBulk(() => {
+      let removed = 0
+      for (const job of [...this.jobs.values()]) {
+        if (TERMINAL.includes(job.status)) {
+          this.jobs.delete(job.jobId)
+          this.lastEmit.delete(job.jobId)
+          removed++
+        }
+      }
+      return removed
+    })
+  }
+
+  /* Cancels everything still running, then empties the queue and history. */
+  clearAll () {
+    return this.runBulk(() => {
+      let cancelled = 0
+      for (const job of [...this.jobs.values()]) {
+        if (CANCELLABLE.includes(job.status) && this.cancel(job.jobId)) cancelled++
+      }
+      const removed = this.jobs.size
+      this.jobs.clear()
+      this.lastEmit.clear()
+      this.activeCount = 0
+      return { cancelled, removed }
+    })
   }
 
   cancel (jobId) {
@@ -289,12 +422,29 @@ class DownloadManager {
     return false
   }
 
+  /* Removing a live job must terminate it first. Deleting the record alone left
+   * the TDLib download running and never released the concurrency slot, so the
+   * queue permanently lost a worker and the pump immediately started more jobs
+   * that reappeared in the list the user had just cleared. */
   remove (jobId) {
-    return this.jobs.delete(jobId)
+    const job = this.jobs.get(jobId)
+    if (!job) return false
+    if (CANCELLABLE.includes(job.status)) {
+      if (job.active) {
+        client.invoke({ _: 'cancelDownloadFile', file_id: job.fileId, only_if_pending: false }).catch(() => {})
+      }
+      job.status = 'cancelled'
+      this.finishJob(job)
+    }
+    this.jobs.delete(jobId)
+    this.lastEmit.delete(jobId)
+    this.scheduleStats()
+    return true
   }
 
   emitJob (job) {
     const { destPath, ...rest } = job
+    this.scheduleStats()
     sendAll({ type: 'event', event: { name: 'download-update', job: rest } })
     if (job.status === 'done') {
       sendAll({ type: 'event', event: { name: 'download-done', job: { ...rest, destPath: destPath.replace(downloadsDir, '').replace(/\\/g, '/') } } })
@@ -2389,17 +2539,21 @@ wss.on('connection', (ws) => {
         case 'resume-job':
           return respond(ws, id, true, { ok: dm.resume(payload.jobId) })
         case 'pause-all':
-          return respond(ws, id, true, { paused: dm.pauseAll() })
+          return respond(ws, id, true, { paused: dm.pauseAll(), stats: dm.stats() })
         case 'resume-all':
-          return respond(ws, id, true, { resumed: dm.resumeAll() })
+          return respond(ws, id, true, { resumed: dm.resumeAll(), stats: dm.stats() })
         case 'cancel-all':
-          return respond(ws, id, true, { cancelled: dm.cancelAll() })
+          return respond(ws, id, true, { cancelled: dm.cancelAll(), stats: dm.stats() })
+        case 'clear-done':
+          return respond(ws, id, true, { removed: dm.clearDone(), stats: dm.stats() })
+        case 'clear-all':
+          return respond(ws, id, true, { ...dm.clearAll(), stats: dm.stats() })
         case 'cancel-download':
           return respond(ws, id, true, { ok: dm.cancel(payload.jobId) })
         case 'remove-download':
           return respond(ws, id, true, { ok: dm.remove(payload.jobId) })
         case 'get-downloads':
-          return respond(ws, id, true, { jobs: dm.snapshot(), concurrency: CONCURRENCY })
+          return respond(ws, id, true, { jobs: dm.snapshot(), concurrency: CONCURRENCY, stats: dm.stats() })
         case 'get-thumb': {
           const p = await downloadThumb(payload.fileId)
           return respond(ws, id, true, { path: p && p.startsWith(downloadsDir) ? p.replace(downloadsDir, '').replace(/\\/g, '/') : null })

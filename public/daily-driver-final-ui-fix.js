@@ -625,10 +625,24 @@
     })
     const fragment = document.createDocumentFragment()
     for (const row of display.slice(0, DOWNLOAD_LIST_LIMIT)) fragment.appendChild(renderDownloadJob(row.job, row.speed))
-    if (state.downloads.size > DOWNLOAD_LIST_LIMIT) fragment.appendChild(h('div', 'tele-ui-download-list-note', `Showing ${DOWNLOAD_LIST_LIMIT.toLocaleString()} priority jobs of ${state.downloads.size.toLocaleString()}. Controls and stats apply to all.`))
+    /* Counters come from the server aggregate over the FULL queue. The loop
+     * above only saw state.downloads, which holds the jobs this browser has
+     * been told about — with concurrency 8 that is about 8 rows even when the
+     * queue holds 20,000, which is why Total used to read 8. Byte totals and
+     * live speed stay local because they are sampled per visible job. */
+    const queue = state.queueStats
+    const total = queue ? Number(queue.total || 0) : state.downloads.size
+    const remaining = queue ? Number(queue.remaining || 0) : active + queued + paused
+    if (queue) {
+      done = Number(queue.done || 0)
+      failed = Number(queue.error || 0)
+      cancelled = Number(queue.cancelled || 0)
+      paused = Number(queue.paused || 0)
+      queued = Number(queue.queued || 0)
+      active = Number(queue.downloading || 0)
+    }
+    if (total > display.length) fragment.appendChild(h('div', 'tele-ui-download-list-note', `Showing ${Math.min(display.length, DOWNLOAD_LIST_LIMIT).toLocaleString()} of ${total.toLocaleString()} jobs. Controls and stats apply to the whole queue.`))
     list.replaceChildren(fragment)
-    const total = state.downloads.size
-    const remaining = active + queued + paused
     const pct = expectedBytes > 0 ? Math.min(100, downloadedBytes / expectedBytes * 100) : 0
     const eta = totalSpeed > 0 && expectedBytes > downloadedBytes ? fmtEta((expectedBytes - downloadedBytes) / totalSpeed) : ''
     const parts = []
@@ -646,16 +660,42 @@
   }
   renderDownloads = renderDownloadsNow
 
-  async function runRequestQueue (jobs, action, concurrency = 6) {
-    let cursor = 0
-    const workers = Array.from({ length: Math.min(concurrency, jobs.length) }, async () => {
-      while (cursor < jobs.length) {
-        const job = jobs[cursor++]
-        try { await request(action, { jobId: job.jobId }) } catch {}
-        if (cursor % 24 === 0) await new Promise(resolve => setTimeout(resolve, 0))
-      }
-    })
-    await Promise.all(workers)
+  /* Bulk operations are ONE server-wide request each.
+   *
+   * They used to fan out per-job requests over state.downloads, which is only
+   * the set of jobs the server has emitted — a job is first emitted when it
+   * starts, so with concurrency 8 a 20,000-file queue looked like 8 jobs and
+   * "Cancel all" cancelled 8. The server owns the queue and already exposes
+   * whole-queue endpoints, so the correct client behaviour is to call one and
+   * then re-sync from the authoritative snapshot. */
+  async function applyQueueAction (type, payload = {}) {
+    let response = null
+    try {
+      response = await request(type, payload)
+    } catch {
+      /* fall through to the resync below so the UI cannot be left optimistic */
+    }
+    if (response && response.stats) state.queueStats = response.stats
+    try {
+      const snapshot = await request('get-downloads', {})
+      state.downloads.clear()
+      state.samples.clear()
+      for (const job of snapshot.jobs || []) state.downloads.set(job.jobId, job)
+      if (snapshot.stats) state.queueStats = snapshot.stats
+    } catch {}
+    scheduleDownloads(true)
+    return response
+  }
+
+  function queueCount (field) {
+    if (state.queueStats) return Number(state.queueStats[field] || 0)
+    let count = 0
+    for (const job of state.downloads.values()) {
+      if (field === 'remaining' && ['queued', 'downloading', 'paused'].includes(job.status)) count++
+      else if (field === 'total') count++
+      else if (job.status === field) count++
+    }
+    return count
   }
 
   function replaceButton (selector, handler) {
@@ -668,33 +708,38 @@
   }
 
   replaceButton('#pause-all', () => {
-    const jobs = [...state.downloads.values()].filter(job => job.status === 'queued' || job.status === 'downloading')
-    for (const job of jobs) setJobOptimistic(job, 'paused')
-    scheduleDownloads(true)
-    runRequestQueue(jobs, 'pause-job').catch(() => {})
-  })
-  replaceButton('#resume-all', () => {
-    const jobs = [...state.downloads.values()].filter(job => job.status === 'paused')
-    for (const job of jobs) setJobOptimistic(job, 'queued')
-    scheduleDownloads(true)
-    runRequestQueue(jobs, 'resume-job').catch(() => {})
-  })
-  replaceButton('#cancel-all', () => {
-    const jobs = [...state.downloads.values()].filter(job => ['queued', 'downloading', 'paused'].includes(job.status))
-    if (!jobs.length) return
-    if (!confirm(`Cancel ${jobs.length.toLocaleString()} active download(s)?`)) return
-    for (const job of jobs) setJobOptimistic(job, 'cancelling')
-    scheduleDownloads(true)
-    runRequestQueue(jobs, 'cancel-download').catch(() => {})
-  })
-  replaceButton('#clear-done', () => {
-    const jobs = [...state.downloads.values()].filter(job => ['done', 'error', 'cancelled'].includes(job.status))
-    for (const job of jobs) {
-      state.downloads.delete(job.jobId)
-      state.samples.delete(job.jobId)
+    for (const job of state.downloads.values()) {
+      if (job.status === 'queued' || job.status === 'downloading') setJobOptimistic(job, 'paused')
     }
     scheduleDownloads(true)
-    runRequestQueue(jobs, 'remove-download').catch(() => {})
+    applyQueueAction('pause-all').catch(() => {})
+  })
+  replaceButton('#resume-all', () => {
+    for (const job of state.downloads.values()) {
+      if (job.status === 'paused') setJobOptimistic(job, 'queued')
+    }
+    scheduleDownloads(true)
+    applyQueueAction('resume-all').catch(() => {})
+  })
+  replaceButton('#cancel-all', () => {
+    const remaining = queueCount('remaining')
+    if (!remaining) return
+    if (!confirm(`Cancel all ${remaining.toLocaleString()} unfinished download(s)?`)) return
+    for (const job of state.downloads.values()) {
+      if (['queued', 'downloading', 'paused'].includes(job.status)) setJobOptimistic(job, 'cancelling')
+    }
+    scheduleDownloads(true)
+    applyQueueAction('cancel-all').catch(() => {})
+  })
+  replaceButton('#clear-done', () => {
+    for (const job of [...state.downloads.values()]) {
+      if (['done', 'error', 'cancelled'].includes(job.status)) {
+        state.downloads.delete(job.jobId)
+        state.samples.delete(job.jobId)
+      }
+    }
+    scheduleDownloads(true)
+    applyQueueAction('clear-done').catch(() => {})
   })
 
   function installClearAll () {
@@ -707,17 +752,17 @@
     clearAll.textContent = 'Clear all'
     clearDone.insertAdjacentElement('afterend', clearAll)
     clearAll.addEventListener('click', () => {
-      const jobs = [...state.downloads.values()]
-      if (!jobs.length) return
-      const activeJobs = jobs.filter(job => ['queued', 'downloading', 'paused', 'cancelling'].includes(job.status))
-      if (activeJobs.length && !confirm(`Cancel and clear all ${jobs.length.toLocaleString()} download entries?`)) return
+      const total = queueCount('total')
+      if (!total) return
+      // Unfinished work is cancelled before the history is emptied, so confirm
+      // whenever anything is still live.
+      const remaining = queueCount('remaining')
+      if (remaining && !confirm(`Cancel ${remaining.toLocaleString()} unfinished download(s) and clear all ${total.toLocaleString()} entries?`)) return
       state.downloads.clear()
       state.samples.clear()
+      state.queueStats = null
       scheduleDownloads(true)
-      ;(async () => {
-        if (activeJobs.length) await runRequestQueue(activeJobs, 'cancel-download')
-        await runRequestQueue(jobs, 'remove-download')
-      })().catch(() => {})
+      applyQueueAction('clear-all').catch(() => {})
     })
   }
 
