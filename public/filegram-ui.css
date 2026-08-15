@@ -2128,7 +2128,7 @@ button.secondary {
 }
 
 .mg-drawer-tab {
-  height: 32px;
+  height: 34px;
   background: transparent;
   color: var(--fg-text-muted);
   border: 1px solid var(--fg-border);
@@ -2148,6 +2148,266 @@ button.secondary {
   background: var(--fg-accent-subtle);
   color: var(--fg-accent);
   border-color: var(--fg-border-accent);
+  font-weight: var(--fg-weight-semibold);
+}
+
+/* ---------- Chat Info Pane ---------- */
+.mg-drawer-pane {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.mg-drawer-pane.hidden {
+  display: none;
+}
+
+.mg-info-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--fg-space-8);
+  color: var(--fg-text-muted);
+  font-size: var(--fg-text-sm);
+}
+
+.mg-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--fg-space-2);
+  padding: var(--fg-space-8) var(--fg-space-4);
+  text-align: center;
+}
+
+.mg-empty strong {
+  font-size: var(--fg-text-md);
+  color: var(--fg-text);
+}
+
+.mg-empty span {
+  font-size: var(--fg-text-sm);
+  color: var(--fg-text-muted);
+}
+
+/* Info hero */
+.mg-info-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--fg-space-3);
+  padding: var(--fg-space-5) var(--fg-space-4) var(--fg-space-4);
+  border-bottom: 1px solid var(--fg-border);
+}
+
+.mg-info-avatar {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--fg-radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fg-text-2xl);
+  font-weight: var(--fg-weight-bold);
+  color: #fff;
+  overflow: hidden;
+  position: relative;
+}
+
+.mg-info-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--fg-radius-full);
+}
+
+.mg-info-title {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  text-align: center;
+}
+
+.mg-info-title h3 {
+  font-size: var(--fg-text-lg);
+  font-weight: var(--fg-weight-semibold);
+  color: var(--fg-text);
+  margin: 0;
+}
+
+.mg-info-title .muted {
+  font-size: var(--fg-text-sm);
+  color: var(--fg-text-muted);
+}
+
+/* Info sections */
+.mg-section {
+  padding: var(--fg-space-3) var(--fg-space-4);
+  border-bottom: 1px solid var(--fg-border);
+}
+
+.mg-section h4 {
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-semibold);
+  color: var(--fg-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin: 0 0 var(--fg-space-2);
+}
+
+.mg-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--fg-space-2) 0;
+  font-size: var(--fg-text-sm);
+  border-bottom: 1px solid rgba(134, 163, 194, 0.06);
+}
+
+.mg-info-row:last-child {
+  border-bottom: none;
+}
+
+.mg-info-row > span:first-child {
+  color: var(--fg-text-muted);
+  font-size: var(--fg-text-xs);
+}
+
+.mg-info-row > span:last-child {
+  color: var(--fg-text);
+  font-weight: var(--fg-weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.mg-description {
+  font-size: var(--fg-text-sm);
+  color: var(--fg-text-secondary);
+  line-height: 1.5;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* Edit section within chat info */
+.mg-section textarea,
+.mg-section input[type="text"] {
+  width: 100%;
+  padding: var(--fg-space-2) var(--fg-space-3);
+  background: var(--fg-surface-2);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  color: var(--fg-text);
+  font-size: var(--fg-text-sm);
+  font-family: var(--fg-font);
+  outline: none;
+  transition: border-color var(--fg-duration-fast) var(--fg-ease);
+  resize: vertical;
+}
+
+.mg-section textarea:focus,
+.mg-section input[type="text"]:focus {
+  border-color: var(--fg-accent);
+}
+
+.mg-section select {
+  height: 30px;
+  padding: 0 var(--fg-space-2);
+  background: var(--fg-surface-2);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  color: var(--fg-text);
+  font-size: var(--fg-text-sm);
+  outline: none;
+}
+
+/* Invite link section */
+.mg-invite-link {
+  display: flex;
+  align-items: center;
+  gap: var(--fg-space-2);
+  padding: var(--fg-space-2);
+  background: var(--fg-surface-2);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-xs);
+  font-family: var(--fg-font-mono);
+  color: var(--fg-accent);
+  word-break: break-all;
+}
+
+/* Members list */
+.mg-member-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fg-space-2);
+}
+
+.mg-member-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--fg-space-2);
+  padding: var(--fg-space-1) 0;
+}
+
+.mg-member-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--fg-radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fg-text-xs);
+  font-weight: var(--fg-weight-semibold);
+  color: #fff;
+}
+
+.mg-member-name {
+  font-size: var(--fg-text-sm);
+  color: var(--fg-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mg-member-role {
+  font-size: var(--fg-text-xs);
+  color: var(--fg-text-muted);
+}
+
+/* Danger section */
+.mg-section .danger-outline {
+  width: 100%;
+  height: 32px;
+  background: transparent;
+  color: var(--fg-danger);
+  border: 1px solid rgba(240, 78, 90, 0.3);
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-medium);
+  cursor: pointer;
+  transition: all var(--fg-duration-fast) var(--fg-ease);
+}
+
+.mg-section .danger-outline:hover {
+  background: var(--fg-danger-subtle);
+  border-color: var(--fg-danger);
+}
+
+/* Photo management */
+.mg-photo-tools {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--fg-space-2);
+  align-items: center;
+}
+
+.mg-photo-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: var(--fg-space-2);
 }
 
 /* ---------- Utility ---------- */
