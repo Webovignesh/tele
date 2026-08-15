@@ -48,6 +48,9 @@ let CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 8))
 let client = null
 let ready = false
 let authState = null
+// Last known signed-in identity, so a browser reload can restore the account
+// display without waiting for another authorizationStateReady transition.
+let currentUser = null
 let lastChatOffset = { order: '9223372036854775807', chat_id: 0 }
 
 const senderCache = new Map()
@@ -802,10 +805,21 @@ function handleAuthState (state) {
   if (state._ === 'authorizationStateReady') {
     ready = true
     client.invoke({ _: 'getMe' }).then(me => {
-      sendAll({ type: 'event', event: { name: 'auth', payload: { status: 'ready', me: { id: me.id, name: [me.first_name, me.last_name].filter(Boolean).join(' '), username: me.username } } } })
+      currentUser = {
+        id: me.id,
+        name: [me.first_name, me.last_name].filter(Boolean).join(' '),
+        username: me.username,
+        // Reuses the existing /api/media-preview file resolver on the client;
+        // no separate profile photo pipeline is introduced.
+        photoFileId: me.profile_photo && me.profile_photo.small ? me.profile_photo.small.id : null
+      }
+      sendAll({ type: 'event', event: { name: 'auth', payload: { status: 'ready', me: currentUser } } })
     }).catch(() => {})
   } else if (state._ === 'authorizationStateWaitPhoneNumber') {
     ready = false
+    // A fresh phone prompt means the previous session is gone; do not let the
+    // old identity leak into the next login.
+    currentUser = null
     sendAll({ type: 'event', event: { name: 'login-prompt', kind: 'phone', info: null } })
   } else if (state._ === 'authorizationStateWaitCode') {
     ready = false
@@ -2215,7 +2229,8 @@ wss.on('connection', (ws) => {
             ready,
             concurrency: CONCURRENCY,
             downloadsDir,
-            authState: authState ? authState._ : null
+            authState: authState ? authState._ : null,
+            me: ready ? currentUser : null
           })
         }
         case 'login-input':

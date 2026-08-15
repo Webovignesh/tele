@@ -128,7 +128,13 @@
     button.title = 'Log out of Telegram on this FileGram installation'
     button.addEventListener('click', async () => {
       if (button.disabled) return
-      if (!confirm('Log out of Telegram on this FileGram installation?')) return
+      // The shell presents an in-app confirmation dialog and sets this flag
+      // before invoking the button, so the native prompt is skipped. Any other
+      // caller still gets the confirmation. The logout pipeline below is
+      // unchanged.
+      const preconfirmed = button.dataset.fgPreconfirmed === '1'
+      delete button.dataset.fgPreconfirmed
+      if (!preconfirmed && !confirm('Log out of Telegram on this FileGram installation?')) return
       button.disabled = true
       button.textContent = 'Logging out…'
       try {
