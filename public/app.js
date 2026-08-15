@@ -249,8 +249,10 @@ function showLoginPrompt (kind, info) {
     input.placeholder = '+15551234567'
     input.value = ''
   } else if (kind === 'code') {
-    const type = info && info.type ? ` (${info.type})` : ''
-    hint.textContent = `Enter the login code sent to your Telegram${type}:`
+    const rawType = info && info.type
+    const typeStr = rawType && typeof rawType === 'object' ? (rawType._ || rawType['@type'] || '') : String(rawType || '')
+    const typeLabel = typeStr ? ` (${typeStr.replace(/^authenticationCodeType/i, '').replace(/([A-Z])/g, ' $1').trim()})` : ''
+    hint.textContent = `Enter the login code sent to your Telegram${typeLabel}:`
     input.type = 'text'
     input.placeholder = '12345'
     input.value = ''
@@ -1639,4 +1641,5 @@ $('#concurrency').addEventListener('input', e => {
 
 connect()
 if (history.scrollRestoration) history.scrollRestoration = 'manual'
-setInterval(renderDownloads, 1000)
+// Legacy 1s repaint removed — final-ui-fix.js owns the download render cycle
+// with a 220ms throttle and proper speed sampling.
