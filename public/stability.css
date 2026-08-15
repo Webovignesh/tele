@@ -1,0 +1,110 @@
+/* Final stability/polish layer: compact account controls, download telemetry,
+   and predictable large-list geometry. */
+
+.sidebar-head {
+  gap: 10px;
+}
+
+.tele-account-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.tele-logout {
+  min-width: 68px;
+  white-space: nowrap;
+}
+
+.tele-ui-download-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.tele-ui-download-summary > div {
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--border, #26384a);
+  border-radius: 10px;
+  background: rgba(255,255,255,.025);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tele-ui-download-summary span {
+  color: var(--muted, #8294a8);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.tele-ui-download-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text, #edf5ff);
+  font-size: 15px;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+
+.downloads .dl-controls {
+  contain: layout style;
+}
+
+.downloads .dl-controls > .row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.downloads .dl-controls > .row > button {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+}
+
+#clear-all-downloads {
+  grid-column: 1 / -1;
+}
+
+#download-list {
+  contain: layout style;
+}
+
+#download-list .djob {
+  content-visibility: auto;
+  contain-intrinsic-size: 110px;
+}
+
+.tele-ui-download-list-note {
+  padding: 12px;
+  color: var(--muted, #8294a8);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+#media-grid {
+  overflow-anchor: none;
+  contain: strict;
+}
+
+#media-grid .gcard {
+  contain: layout paint style;
+}
+
+.tele-ui-virtual-spacer {
+  width: 100%;
+  pointer-events: none;
+}
+
+@media (max-width: 1180px) {
+  .tele-ui-download-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+}
