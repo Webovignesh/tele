@@ -61,6 +61,22 @@
     head.appendChild(account)
   }
 
+  function loadFinalStabilityLayer () {
+    if (!document.querySelector('link[data-tele-stability]')) {
+      const link = document.createElement('link')
+      link.rel = 'stylesheet'
+      link.href = 'stability.css?v=1'
+      link.dataset.teleStability = '1'
+      document.head.appendChild(link)
+    }
+    if (!document.querySelector('script[data-tele-files-stability]')) {
+      const script = document.createElement('script')
+      script.src = 'files-stability.js?v=1'
+      script.dataset.teleFilesStability = '1'
+      document.body.appendChild(script)
+    }
+  }
+
   const originalShowLoginPrompt = showLoginPrompt
   showLoginPrompt = function teleShowLoginPrompt (kind, info) {
     originalShowLoginPrompt(kind, info)
@@ -99,4 +115,7 @@
       request('get-status').then(applyStatus).catch(() => {})
     }
   })
+
+  if (document.readyState === 'complete') loadFinalStabilityLayer()
+  else window.addEventListener('load', loadFinalStabilityLayer, { once: true })
 })()
