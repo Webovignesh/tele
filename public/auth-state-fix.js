@@ -2,9 +2,17 @@
 
 /* Keep the login screen synchronized with TDLib even when the authorization
  * transition happened before the browser websocket connected. Also owns the
- * small session UX: India-first phone input and explicit logout.
+ * small session UX: India-first phone input, explicit logout, FileGram branding,
+ * and the final stability layer loader.
  */
-;(function teleAuthStateFix () {
+;(function fileGramAuthStateFix () {
+  function applyBrand () {
+    document.title = 'FileGram'
+    document.querySelectorAll('#login-screen h1, #config-screen h1').forEach(el => { el.textContent = 'FileGram' })
+    const boot = document.querySelector('#boot-status')
+    if (boot && /Tele/i.test(boot.textContent || '')) boot.textContent = 'Connecting to FileGram…'
+  }
+
   const promptForAuthState = (authState) => {
     switch (String(authState || '')) {
       case 'authorizationStateWaitPhoneNumber': return 'phone'
@@ -36,10 +44,10 @@
     button.type = 'button'
     button.className = 'ghost small tele-logout'
     button.textContent = 'Log out'
-    button.title = 'Log out of Telegram on this Tele installation'
+    button.title = 'Log out of Telegram on this FileGram installation'
     button.addEventListener('click', async () => {
       if (button.disabled) return
-      if (!confirm('Log out of Telegram on this Tele installation?')) return
+      if (!confirm('Log out of Telegram on this FileGram installation?')) return
       button.disabled = true
       button.textContent = 'Logging out…'
       try {
@@ -50,6 +58,10 @@
         state.messages = []
         state.selection.clear()
         state.selectedMessages.clear()
+        const list = document.querySelector('#chat-list')
+        if (list) list.innerHTML = ''
+        const count = document.querySelector('#chat-count')
+        if (count) count.textContent = '0 channels'
         showLoginPrompt('phone', null)
       } catch (error) {
         button.disabled = false
@@ -78,7 +90,8 @@
   }
 
   const originalShowLoginPrompt = showLoginPrompt
-  showLoginPrompt = function teleShowLoginPrompt (kind, info) {
+  showLoginPrompt = function fileGramShowLoginPrompt (kind, info) {
+    applyBrand()
     originalShowLoginPrompt(kind, info)
     const button = document.querySelector('#login-submit')
     if (button) button.disabled = false
@@ -91,7 +104,8 @@
   }
 
   const originalApplyStatus = applyStatus
-  applyStatus = function teleApplyStatus (data) {
+  applyStatus = function fileGramApplyStatus (data) {
+    applyBrand()
     originalApplyStatus(data)
     if (data && data.status === 'ready') installLogout()
     if (!data || data.status !== 'waiting-input') return
@@ -100,7 +114,7 @@
   }
 
   const originalHandleEvent = handleEvent
-  handleEvent = function teleAuthHandleEvent (event) {
+  handleEvent = function fileGramAuthHandleEvent (event) {
     const result = originalHandleEvent(event)
     if (event && event.name === 'auth') queueMicrotask(installLogout)
     if (event && event.name === 'login-prompt' && event.kind === 'phone') {
@@ -109,6 +123,7 @@
     return result
   }
 
+  applyBrand()
   queueMicrotask(() => {
     installLogout()
     if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
