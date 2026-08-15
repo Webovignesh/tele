@@ -62,9 +62,17 @@
     input.type = 'tel'
     input.inputMode = 'numeric'
     input.autocomplete = 'tel-national'
-    input.placeholder = 'Phone number'
-    input.value = String(input.value || '').replace(/^\+?91\s*/, '')
+    input.placeholder = '10-digit phone number'
+    input.maxLength = 10
+    input.value = normalizeIndianLocalNumber(input.value)
     try { input.focus(); input.setSelectionRange(input.value.length, input.value.length) } catch {}
+  }
+
+  function normalizeIndianLocalNumber (value) {
+    let digits = String(value || '').replace(/\D/g, '')
+    if (digits.startsWith('91') && digits.length > 10) digits = digits.slice(2)
+    if (digits.startsWith('0') && digits.length > 10) digits = digits.slice(1)
+    return digits.slice(0, 10)
   }
 
   function codeDeliveryLabel (info) {
@@ -72,9 +80,9 @@
     const type = raw && typeof raw === 'object' ? (raw._ || raw['@type'] || '') : String(raw || '')
     if (/TelegramMessage/i.test(type)) return 'Telegram message'
     if (/Sms/i.test(type)) return 'SMS'
+    if (/MissedCall/i.test(type)) return 'missed call'
     if (/Call/i.test(type)) return 'phone call'
     if (/Fragment/i.test(type)) return 'Fragment'
-    if (/MissedCall/i.test(type)) return 'missed call'
     return ''
   }
 
@@ -152,7 +160,8 @@
       if (input) {
         input.inputMode = 'numeric'
         input.autocomplete = 'one-time-code'
-        input.placeholder = '12345'
+        input.maxLength = 12
+        input.placeholder = 'Login code'
       }
     }
   }
@@ -162,17 +171,39 @@
     const kind = document.querySelector('#login-hint')?.dataset.kind
     const input = document.querySelector('#login-input')
     if (kind !== 'phone') return originalSubmitLoginInput()
-    const localNumber = String(input && input.value || '').replace(/\D/g, '')
-    if (!localNumber) return
-    const button = document.querySelector('#login-submit')
+
+    const localNumber = normalizeIndianLocalNumber(input && input.value)
     const error = document.querySelector('#login-error')
-    if (button) button.disabled = true
+    const button = document.querySelector('#login-submit')
+    if (input) input.value = localNumber
     if (error) error.textContent = ''
+
+    if (!/^[6-9]\d{9}$/.test(localNumber)) {
+      if (error) error.textContent = 'Enter a valid 10-digit Indian mobile number.'
+      if (input) input.focus()
+      return
+    }
+
+    if (button) button.disabled = true
     request('login-input', { kind: 'phone', value: `+91${localNumber}` })
       .catch(e => {
-        if (error) error.textContent = e.message
+        if (error) error.textContent = String(e && e.message ? e.message : e)
         if (button) button.disabled = false
       })
+  }
+
+  function rebindLoginSubmit () {
+    const button = document.querySelector('#login-submit')
+    const input = document.querySelector('#login-input')
+    if (button) button.onclick = () => submitLoginInput()
+    if (input && input.dataset.filegramAuthKey !== '1') {
+      input.dataset.filegramAuthKey = '1'
+      input.addEventListener('keydown', e => {
+        if (e.key !== 'Enter') return
+        e.preventDefault()
+        submitLoginInput()
+      }, true)
+    }
   }
 
   const originalApplyStatus = applyStatus
@@ -193,8 +224,10 @@
   }
 
   applyBrand()
+  rebindLoginSubmit()
   queueMicrotask(() => {
     installLogout()
+    rebindLoginSubmit()
     if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
       request('get-status').then(applyStatus).catch(() => {})
     }
