@@ -8,6 +8,13 @@ node_modules/
 downloads/
 .thumbs/
 
+# Build/runtime output
+.turbo/
+runtime/
+release/
+dist/
+build/
+
 # Machine-local application state
 config.json
 settings.json
@@ -17,6 +24,7 @@ settings.json
 
 # Logs / test output
 *.log
+probe-*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
