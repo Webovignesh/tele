@@ -1,0 +1,38 @@
+name: Tele CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Syntax checks
+        run: |
+          node --check server.js
+          node --check public/app.js
+          node --check public/rescue-runtime.js
+          node --check public/daily-driver-final.js
+          node --check public/daily-driver-final-guard.js
+          node --check public/daily-driver-final-ui-fix.js
+      - run: npm run verify
+      - name: Runtime wiring
+        shell: bash
+        run: |
+          grep -q 'rescue-runtime.js' public/index.html
+          grep -q 'daily-driver-final-ui-fix.js' public/index.html
+          grep -q 'photoFileId' server.js
