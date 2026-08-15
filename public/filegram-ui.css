@@ -1221,25 +1221,46 @@ li.chat-item {
 }
 
 .downloads-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--fg-space-3) var(--fg-space-4);
-  min-height: 48px;
+  display: none; /* Hidden — replaced by drawer tabs from management.js */
+}
+
+/* Hide toggle-drawer since management.js tabs now control visibility */
+#toggle-drawer {
+  display: none;
+}
+
+/* Management drawer tabs override */
+.mg-drawer-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--fg-space-1);
+  padding: var(--fg-space-2) var(--fg-space-3);
   border-bottom: 1px solid var(--fg-border);
+  background: var(--fg-surface-0);
 }
 
-.downloads-head .dl-title {
-  display: flex;
-  align-items: center;
-  gap: var(--fg-space-2);
+.mg-drawer-tab {
+  height: 34px;
+  background: transparent;
+  color: var(--fg-text-muted);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-medium);
+  cursor: pointer;
+  transition: all var(--fg-duration-fast) var(--fg-ease);
 }
 
-.downloads-head .dl-title h3 {
-  font-size: var(--fg-text-md);
-  font-weight: var(--fg-weight-semibold);
+.mg-drawer-tab:hover {
+  background: var(--fg-surface-hover);
   color: var(--fg-text);
-  margin: 0;
+}
+
+.mg-drawer-tab.active {
+  background: var(--fg-accent-subtle);
+  color: var(--fg-accent);
+  border-color: var(--fg-border-accent);
+  font-weight: var(--fg-weight-semibold);
 }
 
 #download-stats {
@@ -1248,43 +1269,59 @@ li.chat-item {
   font-variant-numeric: tabular-nums;
 }
 
-/* Download summary stats */
+/* Download summary stats — the big tile numbers */
 .tele-ui-download-summary,
 #tele-ui-download-summary {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: var(--fg-space-2);
-  padding: var(--fg-space-3) var(--fg-space-4);
-  border-bottom: 1px solid var(--fg-border);
+  gap: var(--fg-space-1);
+  padding: var(--fg-space-4) var(--fg-space-4) var(--fg-space-3);
 }
 
 .tele-ui-download-summary > div {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
+  padding: var(--fg-space-2) 0;
 }
 
 .tele-ui-download-summary > div > span {
-  font-size: var(--fg-text-xs);
+  font-size: 10px;
   color: var(--fg-text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.5px;
+  font-weight: var(--fg-weight-medium);
 }
 
 .tele-ui-download-summary > div > strong {
-  font-size: var(--fg-text-md);
+  font-size: var(--fg-text-lg);
   font-weight: var(--fg-weight-bold);
   color: var(--fg-text);
   font-variant-numeric: tabular-nums;
+  line-height: 1.2;
 }
 
-.tele-ui-download-summary > div:first-child > strong {
+/* Color coding: Speed=accent, Downloaded=success, Remaining=warning, Total=text */
+.tele-ui-download-summary > div:nth-child(1) > strong {
   color: var(--fg-accent);
 }
 
-.tele-ui-download-summary > div:last-child > strong {
+.tele-ui-download-summary > div:nth-child(2) > strong {
+  color: var(--fg-success);
+}
+
+.tele-ui-download-summary > div:nth-child(3) > strong {
   color: var(--fg-warning);
+}
+
+.tele-ui-download-summary > div:nth-child(4) > strong {
+  color: var(--fg-text-secondary);
+}
+
+/* Total files line below stats */
+.tele-ui-download-summary + .dl-controls::before {
+  content: none; /* handled by the summary itself */
 }
 
 /* Download controls */
@@ -1294,22 +1331,29 @@ li.chat-item {
   flex-direction: column;
   gap: var(--fg-space-3);
   border-bottom: 1px solid var(--fg-border);
-  overflow-y: auto;
 }
 
 .dl-controls .conc {
   display: flex;
   flex-direction: column;
-  gap: var(--fg-space-1);
+  gap: var(--fg-space-2);
   font-size: var(--fg-text-sm);
   color: var(--fg-text-secondary);
 }
 
 .dl-controls .conc > span:first-child {
-  font-size: var(--fg-text-xs);
+  font-size: 10px;
   color: var(--fg-text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.5px;
+  font-weight: var(--fg-weight-medium);
+}
+
+/* Save-to row */
+.dl-controls .conc > .row {
+  display: flex;
+  gap: var(--fg-space-2);
+  align-items: center;
 }
 
 .dl-controls .row {
@@ -1320,19 +1364,39 @@ li.chat-item {
 
 #dl-dir {
   width: 100%;
-  height: 28px;
+  height: 30px;
   padding: 0 var(--fg-space-2);
   background: var(--fg-surface-2);
   border: 1px solid var(--fg-border);
-  border-radius: var(--fg-radius-xs);
+  border-radius: var(--fg-radius-sm);
   color: var(--fg-text);
   font-size: var(--fg-text-xs);
   font-family: var(--fg-font-mono);
   outline: none;
+  transition: border-color var(--fg-duration-fast) var(--fg-ease);
 }
 
 #dl-dir:focus {
   border-color: var(--fg-accent);
+}
+
+#set-dir {
+  flex-shrink: 0;
+  height: 30px;
+  min-width: 56px;
+  padding: 0 var(--fg-space-3);
+  background: var(--fg-surface-2);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  color: var(--fg-text-secondary);
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-medium);
+}
+
+#set-dir:hover {
+  background: var(--fg-surface-hover);
+  color: var(--fg-text);
+  border-color: var(--fg-border-strong);
 }
 
 .dir-current,
@@ -1343,21 +1407,143 @@ li.chat-item {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-family: var(--fg-font-mono);
 }
 
+/* Parallel files slider */
 #concurrency {
   width: 100%;
-  height: 4px;
+  height: 6px;
   accent-color: var(--fg-accent);
+  cursor: pointer;
+  border-radius: 3px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--fg-surface-3);
+}
+
+#concurrency::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  background: var(--fg-accent);
+  border-radius: var(--fg-radius-full);
+  border: 2px solid var(--fg-surface-0);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
   cursor: pointer;
 }
 
+#concurrency::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: var(--fg-accent);
+  border-radius: var(--fg-radius-full);
+  border: 2px solid var(--fg-surface-0);
+  cursor: pointer;
+}
+
+#concurrency::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--fg-surface-3);
+}
+
+#concurrency::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--fg-surface-3);
+  border: none;
+}
+
 #concurrency-val {
-  font-size: var(--fg-text-base);
-  font-weight: var(--fg-weight-semibold);
+  font-size: var(--fg-text-lg);
+  font-weight: var(--fg-weight-bold);
   color: var(--fg-accent);
-  min-width: 20px;
+  min-width: 24px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Bulk action buttons */
+#pause-all,
+#resume-all {
+  height: 32px;
+  padding: 0 var(--fg-space-3);
+  background: var(--fg-surface-2);
+  color: var(--fg-text-secondary);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-medium);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--fg-space-1);
+}
+
+#pause-all:hover:not(:disabled),
+#resume-all:hover:not(:disabled) {
+  background: var(--fg-surface-hover);
+  border-color: var(--fg-border-strong);
+  color: var(--fg-text);
+}
+
+#cancel-all {
+  height: 32px;
+  padding: 0 var(--fg-space-3);
+  background: var(--fg-danger-subtle);
+  color: var(--fg-danger);
+  border: 1px solid rgba(240, 78, 90, 0.25);
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-medium);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#cancel-all:hover:not(:disabled) {
+  background: rgba(240, 78, 90, 0.18);
+  border-color: var(--fg-danger);
+}
+
+#clear-done {
+  height: 32px;
+  padding: 0 var(--fg-space-3);
+  background: var(--fg-surface-2);
+  color: var(--fg-text-secondary);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-medium);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#clear-done:hover:not(:disabled) {
+  background: var(--fg-surface-hover);
+  border-color: var(--fg-border-strong);
+  color: var(--fg-text);
+}
+
+#clear-all-downloads {
+  height: 32px;
+  padding: 0 var(--fg-space-3);
+  background: var(--fg-danger);
+  color: #fff;
+  border: none;
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-semibold);
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#clear-all-downloads:hover:not(:disabled) {
+  background: #e03a45;
 }
 
 /* Download list */
@@ -1367,10 +1553,17 @@ li.chat-item {
   padding: var(--fg-space-2) var(--fg-space-3);
 }
 
+.tele-ui-download-list-note {
+  font-size: var(--fg-text-xs);
+  color: var(--fg-text-muted);
+  text-align: center;
+  padding: var(--fg-space-2);
+}
+
 .djob {
   padding: var(--fg-space-2) var(--fg-space-3);
   border-radius: var(--fg-radius-sm);
-  margin-bottom: 2px;
+  margin-bottom: 1px;
   transition: background var(--fg-duration-fast) var(--fg-ease);
 }
 
@@ -1394,6 +1587,7 @@ li.chat-item {
   font-size: var(--fg-text-xs);
   color: var(--fg-text-muted);
   margin-top: 2px;
+  font-variant-numeric: tabular-nums;
 }
 
 .djob .sub .status-tag {
@@ -1416,6 +1610,10 @@ li.chat-item {
   color: var(--fg-warning);
 }
 
+.djob.cancelled .sub .status-tag {
+  color: var(--fg-text-muted);
+}
+
 .djob .bar {
   height: 3px;
   background: var(--fg-surface-3);
@@ -1428,7 +1626,7 @@ li.chat-item {
   height: 100%;
   background: var(--fg-accent);
   border-radius: 2px;
-  transition: width var(--fg-duration-normal) var(--fg-ease);
+  transition: width var(--fg-duration-normal) linear;
 }
 
 .djob.done .bar > div {
@@ -1437,6 +1635,10 @@ li.chat-item {
 
 .djob.error .bar > div {
   background: var(--fg-danger);
+}
+
+.djob.paused .bar > div {
+  background: var(--fg-warning);
 }
 
 .djob .error-text {
@@ -1453,6 +1655,32 @@ li.chat-item {
   display: flex;
   gap: var(--fg-space-1);
   margin-top: var(--fg-space-1);
+  opacity: 0;
+  transition: opacity var(--fg-duration-fast) var(--fg-ease);
+}
+
+.djob:hover .actions {
+  opacity: 1;
+}
+
+.djob .actions button,
+.djob .actions a {
+  height: 22px;
+  padding: 0 var(--fg-space-2);
+  font-size: 10px;
+  border-radius: var(--fg-radius-xs);
+}
+
+.djob .actions a {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  background: var(--fg-success);
+  color: #fff;
+  font-weight: var(--fg-weight-semibold);
+  font-size: 10px;
+  padding: 0 var(--fg-space-2);
+  border-radius: var(--fg-radius-xs);
 }
 
 /* ---------- Buttons ---------- */
