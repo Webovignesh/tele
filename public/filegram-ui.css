@@ -223,37 +223,51 @@ html, body {
   user-select: none;
 }
 
-.channels-filter input[type="checkbox"] {
-  width: 32px;
-  height: 16px;
-  accent-color: var(--fg-accent);
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  background: var(--fg-surface-3);
-  border-radius: 8px;
-  position: relative;
-  transition: background var(--fg-duration-fast) var(--fg-ease);
+/* Toggle switch. Applies wherever #channels-only lives, so it survives the
+   shell moving the node from .channels-filter into .fg-channels-toggle. */
+.channels-filter input[type="checkbox"],
+.fg-channels-toggle input[type="checkbox"],
+#channels-only {
+  width: 30px !important;
+  height: 17px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  flex-shrink: 0 !important;
+  cursor: pointer !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  background: var(--fg-surface-3) !important;
+  border: 1px solid var(--fg-border) !important;
+  border-radius: 999px !important;
+  position: relative !important;
+  transition: background var(--fg-duration-fast) var(--fg-ease), border-color var(--fg-duration-fast) var(--fg-ease) !important;
 }
 
-.channels-filter input[type="checkbox"]::after {
+.channels-filter input[type="checkbox"]::after,
+.fg-channels-toggle input[type="checkbox"]::after,
+#channels-only::after {
   content: '';
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
   background: var(--fg-text-muted);
   border-radius: 50%;
   transition: transform var(--fg-duration-fast) var(--fg-ease), background var(--fg-duration-fast) var(--fg-ease);
 }
 
-.channels-filter input[type="checkbox"]:checked {
-  background: var(--fg-accent);
+.channels-filter input[type="checkbox"]:checked,
+.fg-channels-toggle input[type="checkbox"]:checked,
+#channels-only:checked {
+  background: var(--fg-accent) !important;
+  border-color: var(--fg-accent) !important;
 }
 
-.channels-filter input[type="checkbox"]:checked::after {
-  transform: translateX(16px);
+.channels-filter input[type="checkbox"]:checked::after,
+.fg-channels-toggle input[type="checkbox"]:checked::after,
+#channels-only:checked::after {
+  transform: translateX(13px);
   background: #fff;
 }
 
@@ -464,31 +478,198 @@ li.chat-item.active {
   color: var(--fg-danger);
 }
 
-/* Sidebar bottom account row */
+/* ---------- Shared icon primitives ---------- */
+.fg-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 0;
+}
+
+.fg-icon svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.fg-btn-label {
+  white-space: nowrap;
+}
+
+.fg-icon-button {
+  width: 32px !important;
+  height: 32px !important;
+  padding: 0 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  border-radius: var(--fg-radius-sm) !important;
+  color: var(--fg-text-muted) !important;
+  cursor: pointer;
+}
+
+.fg-icon-button:hover {
+  background: var(--fg-surface-hover) !important;
+  color: var(--fg-text) !important;
+}
+
+/* ---------- Sidebar search with shortcut hint ---------- */
+.fg-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 6px;
+  padding: 0 10px;
+  height: 32px;
+  background: var(--fg-surface-2);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  transition: border-color var(--fg-duration-fast) var(--fg-ease);
+}
+
+.fg-search-wrap:focus-within {
+  border-color: var(--fg-accent);
+}
+
+.fg-search-icon {
+  color: var(--fg-text-muted);
+}
+
+.fg-search-wrap #chat-search {
+  flex: 1;
+  min-width: 0;
+  width: auto !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  height: 100% !important;
+  background: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+  color: var(--fg-text) !important;
+  font-size: var(--fg-text-sm) !important;
+  outline: none !important;
+}
+
+.fg-kbd {
+  flex-shrink: 0;
+  padding: 2px 5px;
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-xs);
+  background: var(--fg-surface-3);
+  color: var(--fg-text-muted);
+  font: var(--fg-weight-medium) 10px/1 var(--fg-font);
+  letter-spacing: 0.3px;
+  user-select: none;
+}
+
+/* ---------- Sidebar filter segments ---------- */
+.fg-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 12px 8px;
+}
+
+.fg-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--fg-radius-full);
+  color: var(--fg-text-muted);
+  font-size: var(--fg-text-xs);
+  font-weight: var(--fg-weight-medium);
+  cursor: pointer;
+  transition: background var(--fg-duration-fast) var(--fg-ease), color var(--fg-duration-fast) var(--fg-ease);
+}
+
+.fg-seg:hover {
+  background: var(--fg-surface-hover);
+  color: var(--fg-text-secondary);
+}
+
+.fg-seg.is-active {
+  background: var(--fg-surface-3);
+  color: var(--fg-text);
+}
+
+.fg-seg-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--fg-accent);
+  color: #fff;
+  border-radius: var(--fg-radius-full);
+  font-size: 9px;
+  font-weight: var(--fg-weight-bold);
+  font-variant-numeric: tabular-nums;
+}
+
+.fg-seg-badge[hidden] {
+  display: none;
+}
+
+.fg-channels-toggle {
+  display: inline-flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 7px !important;
+  margin: 0 0 0 auto !important;
+  padding: 0 !important;
+  font-size: var(--fg-text-xs) !important;
+  color: var(--fg-text-muted) !important;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.fg-channels-toggle > span {
+  order: 0;
+}
+
+.fg-filter-row #chat-count {
+  display: none;
+}
+
+/* ---------- Sidebar bottom account row ---------- */
 .fg-sidebar-account {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border-top: 1px solid var(--fg-border);
   background: var(--fg-surface-0);
   flex-shrink: 0;
 }
 
 .fg-settings-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--fg-radius-full);
+  width: 30px;
+  height: 30px;
+  border-radius: var(--fg-radius-sm);
   background: var(--fg-surface-2);
   border: 1px solid var(--fg-border);
   color: var(--fg-text-muted);
-  font-size: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition: all var(--fg-duration-fast) var(--fg-ease);
   flex-shrink: 0;
+  padding: 0;
 }
 
 .fg-settings-btn:hover {
@@ -496,41 +677,68 @@ li.chat-item.active {
   color: var(--fg-text);
 }
 
+.fg-account-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--fg-radius-full);
+  background: var(--fg-surface-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: var(--fg-weight-bold);
+  color: #fff;
+  flex-shrink: 0;
+}
+
 .fg-account-info {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
 }
 
 .fg-account-name {
-  font-size: var(--fg-text-sm);
+  font-size: var(--fg-text-xs);
   font-weight: var(--fg-weight-semibold);
   color: var(--fg-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.35;
 }
 
 .fg-account-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 10px;
   color: var(--fg-success);
+  line-height: 1.35;
+}
+
+.fg-account-status::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .fg-account-menu {
-  width: 28px;
-  height: 28px;
-  border-radius: var(--fg-radius-full);
+  width: 26px;
+  height: 26px;
+  border-radius: var(--fg-radius-sm);
   background: transparent;
   border: none;
   color: var(--fg-text-muted);
-  font-size: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   flex-shrink: 0;
+  padding: 0;
 }
 
 .fg-account-menu:hover {
@@ -811,13 +1019,16 @@ li.chat-item.active {
 .filegram-file-pager .filegram-page-nav {
   display: flex;
   align-items: center;
-  gap: var(--fg-space-2);
+  gap: 10px;
 }
 
 .filegram-file-pager button {
-  min-width: 32px;
-  height: 28px;
-  padding: 0 var(--fg-space-3);
+  min-width: 30px;
+  height: 30px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border-radius: var(--fg-radius-sm);
   border: 1px solid var(--fg-border);
   background: var(--fg-surface-2);
@@ -837,6 +1048,37 @@ li.chat-item.active {
 .filegram-file-pager button:disabled {
   opacity: 0.35;
   cursor: default;
+}
+
+/* Next is the forward-motion affordance, so it carries the accent. */
+.filegram-file-pager .fg-page-next:not(:disabled) {
+  background: var(--fg-accent-subtle);
+  border-color: var(--fg-border-accent);
+  color: var(--fg-accent);
+}
+
+.filegram-file-pager .fg-page-next:not(:disabled):hover {
+  background: var(--fg-accent);
+  border-color: var(--fg-accent);
+  color: #fff;
+}
+
+.filegram-file-pager .fg-chevron {
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.75;
+}
+
+.filegram-file-pager .fg-page-word {
+  color: var(--fg-text-muted);
+  font-size: var(--fg-text-sm);
+}
+
+/* First/last are secondary; keep them compact next to the labelled controls. */
+.filegram-file-pager [data-page-action="first"],
+.filegram-file-pager [data-page-action="last"] {
+  padding: 0 8px;
+  color: var(--fg-text-muted);
 }
 
 .filegram-file-pager input[type="number"] {
@@ -1364,27 +1606,43 @@ li.chat-item.active {
 }
 
 .mg-drawer-tab {
+  position: relative !important;
   height: 36px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 7px !important;
   background: transparent !important;
   color: var(--fg-text-muted) !important;
-  border: 1px solid var(--fg-border-strong) !important;
-  border-radius: var(--fg-radius-full) !important;
+  border: none !important;
+  border-radius: 0 !important;
   font-size: var(--fg-text-sm) !important;
   font-weight: var(--fg-weight-medium) !important;
   cursor: pointer !important;
-  transition: all var(--fg-duration-fast) var(--fg-ease) !important;
+  transition: color var(--fg-duration-fast) var(--fg-ease) !important;
 }
 
 .mg-drawer-tab:hover {
-  background: var(--fg-surface-hover) !important;
-  color: var(--fg-text) !important;
+  background: transparent !important;
+  color: var(--fg-text-secondary) !important;
 }
 
 .mg-drawer-tab.active {
-  background: var(--fg-accent) !important;
-  color: #fff !important;
-  border-color: var(--fg-accent) !important;
+  background: transparent !important;
+  color: var(--fg-accent) !important;
+  border: none !important;
   font-weight: var(--fg-weight-semibold) !important;
+}
+
+.mg-drawer-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--fg-accent);
+  border-radius: 1px 1px 0 0;
 }
 
 #download-stats {
@@ -1397,59 +1655,120 @@ li.chat-item.active {
 .tele-ui-download-summary,
 #tele-ui-download-summary {
   display: grid !important;
-  grid-template-columns: repeat(4, 1fr) !important;
-  gap: var(--fg-space-2) !important;
-  padding: var(--fg-space-3) var(--fg-space-4) !important;
-  border-bottom: 1px solid var(--fg-border) !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 4px !important;
+  margin: 12px 14px 0 !important;
+  padding: 12px 10px 10px !important;
+  border: 1px solid var(--fg-border) !important;
+  border-radius: var(--fg-radius-md) !important;
+  background: var(--fg-surface-1) !important;
 }
 
 .tele-ui-download-summary > div {
   display: flex !important;
   flex-direction: column !important;
-  align-items: center !important;
-  gap: 3px !important;
-  padding: var(--fg-space-2) var(--fg-space-1) !important;
-  border: 1px solid var(--fg-border) !important;
-  border-radius: var(--fg-radius-sm) !important;
-  background: var(--fg-surface-2) !important;
+  align-items: flex-start !important;
+  gap: 2px !important;
+  padding: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  min-width: 0 !important;
 }
 
 .tele-ui-download-summary > div > span {
-  font-size: 10px;
+  font-size: 9px;
   color: var(--fg-text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.15px;
   font-weight: var(--fg-weight-medium);
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .tele-ui-download-summary > div > strong {
-  font-size: var(--fg-text-lg);
+  font-size: var(--fg-text-md);
   font-weight: var(--fg-weight-bold);
   color: var(--fg-text);
   font-variant-numeric: tabular-nums;
-  line-height: 1.2;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
-/* Color coding: Speed=accent, Downloaded=success, Remaining=warning, Total=text */
-.tele-ui-download-summary > div:nth-child(1) > strong {
+/* Three visible metrics matching the concept: Speed, Downloaded, Remaining.
+   The legacy "Current" (active job count) and "Total" tiles are hidden — Total
+   is shown by .fg-download-total below, and the active count remains in
+   #download-stats. Nothing is relabelled, so no metric is misrepresented. */
+.tele-ui-download-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+}
+
+.tele-ui-download-summary > div:has([data-stat="current"]),
+.tele-ui-download-summary > div:has([data-stat="total"]) {
+  display: none !important;
+}
+
+.tele-ui-download-summary > div:has([data-stat="speed"]) > strong {
   color: var(--fg-accent);
 }
 
-.tele-ui-download-summary > div:nth-child(2) > strong {
+.tele-ui-download-summary > div:has([data-stat="fg-done"]) > strong {
   color: var(--fg-success);
 }
 
-.tele-ui-download-summary > div:nth-child(3) > strong {
-  color: var(--fg-warning);
+.tele-ui-download-summary > div:has([data-stat="remaining"]) > strong {
+  color: #b47cff;
+  font-size: var(--fg-text-lg);
 }
 
-.tele-ui-download-summary > div:nth-child(4) > strong {
-  color: var(--fg-text-secondary);
+/* Aggregate speed sparkline. Spans the tile row beneath the numbers and only
+   draws once real byte deltas have been sampled from state.downloads. */
+.fg-spark {
+  grid-column: 1 / -1;
+  height: 18px;
+  margin-top: 8px;
+  min-width: 0;
 }
 
-/* Total files line below stats */
-.tele-ui-download-summary + .dl-controls::before {
-  content: none; /* handled by the summary itself */
+.fg-spark svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.fg-spark polyline {
+  fill: none;
+  stroke: var(--fg-accent);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Mirrored totals line under the statistics panel. */
+.fg-download-total {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 12px 14px 0;
+}
+
+.fg-download-total > span {
+  font-size: 9.5px;
+  color: var(--fg-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: var(--fg-weight-medium);
+}
+
+.fg-download-total > strong {
+  font-size: var(--fg-text-md);
+  font-weight: var(--fg-weight-bold);
+  color: var(--fg-text);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Download controls */
@@ -1480,11 +1799,17 @@ li.chat-item.active {
   font-weight: var(--fg-weight-medium) !important;
 }
 
-/* Save-to row */
+/* Save-to and Parallel-files rows both use .conc > .row */
 .dl-controls .conc > .row {
   display: flex !important;
-  gap: var(--fg-space-2) !important;
+  gap: 8px !important;
   align-items: center !important;
+  width: 100% !important;
+}
+
+/* The concurrency row is slider + numeric readout. */
+.dl-controls .conc > .row:has(#concurrency) {
+  gap: 12px !important;
 }
 
 .dl-controls .row {
@@ -1596,86 +1921,83 @@ li.chat-item.active {
   font-variant-numeric: tabular-nums;
 }
 
-/* Bulk action buttons */
+/* Bulk action buttons. Hierarchy: neutral for reversible actions, tinted for
+   destructive-but-recoverable, solid for the fully destructive Clear all. */
 #pause-all,
-#resume-all {
-  height: 36px !important;
-  padding: 0 var(--fg-space-3) !important;
+#resume-all,
+#clear-done {
+  height: 38px !important;
+  padding: 0 12px !important;
   background: var(--fg-surface-2) !important;
   color: var(--fg-text-secondary) !important;
-  border: 1px solid var(--fg-border-strong) !important;
-  border-radius: var(--fg-radius-full) !important;
+  border: 1px solid var(--fg-border) !important;
+  border-radius: var(--fg-radius-md) !important;
   font-size: var(--fg-text-sm) !important;
   font-weight: var(--fg-weight-medium) !important;
-  display: flex !important;
+  display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
-  gap: var(--fg-space-1) !important;
+  gap: 7px !important;
 }
 
 #pause-all:hover:not(:disabled),
-#resume-all:hover:not(:disabled) {
+#resume-all:hover:not(:disabled),
+#clear-done:hover:not(:disabled) {
   background: var(--fg-surface-hover) !important;
-  border-color: var(--fg-text-muted) !important;
+  border-color: var(--fg-border-strong) !important;
   color: var(--fg-text) !important;
+}
+
+#resume-all .fg-icon {
+  color: var(--fg-success) !important;
+}
+
+#pause-all .fg-icon {
+  color: var(--fg-accent) !important;
+}
+
+#clear-done .fg-icon {
+  color: var(--fg-text-muted) !important;
 }
 
 #cancel-all {
-  height: 36px !important;
-  padding: 0 var(--fg-space-3) !important;
-  background: rgba(240, 100, 100, 0.15) !important;
-  color: #f06464 !important;
-  border: 1px solid rgba(240, 100, 100, 0.3) !important;
-  border-radius: var(--fg-radius-full) !important;
+  height: 38px !important;
+  padding: 0 12px !important;
+  background: rgba(240, 78, 90, 0.12) !important;
+  color: #f0646e !important;
+  border: 1px solid rgba(240, 78, 90, 0.28) !important;
+  border-radius: var(--fg-radius-md) !important;
   font-size: var(--fg-text-sm) !important;
   font-weight: var(--fg-weight-medium) !important;
-  display: flex !important;
+  display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
+  gap: 7px !important;
 }
 
 #cancel-all:hover:not(:disabled) {
-  background: rgba(240, 100, 100, 0.25) !important;
-  border-color: #f06464 !important;
-}
-
-#clear-done {
-  height: 36px !important;
-  padding: 0 var(--fg-space-3) !important;
-  background: var(--fg-surface-2) !important;
-  color: var(--fg-text-secondary) !important;
-  border: 1px solid var(--fg-border-strong) !important;
-  border-radius: var(--fg-radius-full) !important;
-  font-size: var(--fg-text-sm) !important;
-  font-weight: var(--fg-weight-medium) !important;
-  display: flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-}
-
-#clear-done:hover:not(:disabled) {
-  background: var(--fg-surface-hover) !important;
-  border-color: var(--fg-text-muted) !important;
-  color: var(--fg-text) !important;
+  background: rgba(240, 78, 90, 0.2) !important;
+  border-color: #f0646e !important;
 }
 
 #clear-all-downloads {
-  height: 36px !important;
-  padding: 0 var(--fg-space-3) !important;
-  background: linear-gradient(135deg, #f06464, #e84393) !important;
+  height: 38px !important;
+  padding: 0 12px !important;
+  background: #e8404f !important;
   color: #fff !important;
   border: none !important;
-  border-radius: var(--fg-radius-full) !important;
+  border-radius: var(--fg-radius-md) !important;
   font-size: var(--fg-text-sm) !important;
   font-weight: var(--fg-weight-semibold) !important;
   grid-column: 1 / -1 !important;
-  display: flex !important;
+  display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
+  gap: 7px !important;
 }
 
 #clear-all-downloads:hover:not(:disabled) {
-  background: linear-gradient(135deg, #e55555, #d63384) !important;
+  background: #f24d5c !important;
 }
 
 /* Download list */
@@ -1836,38 +2158,44 @@ button:disabled {
   cursor: default;
 }
 
-/* Primary button - Download all media (green pill) */
+/* Primary button - Download all media */
 #download-all-media,
 #download-selected {
-  height: 34px !important;
-  padding: 0 var(--fg-space-5) !important;
-  background: #1a9956 !important;
+  height: 32px !important;
+  padding: 0 14px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  background: #1f9d57 !important;
   color: #fff !important;
   font-weight: var(--fg-weight-semibold) !important;
   font-size: var(--fg-text-sm) !important;
-  border-radius: var(--fg-radius-full) !important;
+  border-radius: var(--fg-radius-sm) !important;
   border: none !important;
   white-space: nowrap !important;
 }
 
 #download-all-media:hover:not(:disabled),
 #download-selected:hover:not(:disabled) {
-  background: #1fb564 !important;
+  background: #24b263 !important;
 }
 
 #download-all-media:disabled,
 #download-selected:disabled {
-  opacity: 0.5 !important;
+  opacity: 0.45 !important;
 }
 
 /* Chat info button in header */
 #mg-open-info {
-  height: 34px !important;
-  padding: 0 var(--fg-space-4) !important;
-  background: transparent !important;
+  height: 32px !important;
+  padding: 0 12px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  background: var(--fg-surface-2) !important;
   color: var(--fg-text-secondary) !important;
-  border: 1px solid var(--fg-border-strong) !important;
-  border-radius: var(--fg-radius-full) !important;
+  border: 1px solid var(--fg-border) !important;
+  border-radius: var(--fg-radius-sm) !important;
   font-size: var(--fg-text-sm) !important;
   font-weight: var(--fg-weight-medium) !important;
 }
@@ -1875,18 +2203,23 @@ button:disabled {
 #mg-open-info:hover {
   background: var(--fg-surface-hover) !important;
   color: var(--fg-text) !important;
-  border-color: var(--fg-text-muted) !important;
+  border-color: var(--fg-border-strong) !important;
 }
 
 /* Select all button */
 #select-all-media {
-  height: 34px !important;
-  padding: 0 var(--fg-space-4) !important;
+  height: 32px !important;
+  padding: 0 12px !important;
   background: transparent !important;
   color: var(--fg-text-secondary) !important;
-  border: 1px solid var(--fg-border-strong) !important;
-  border-radius: var(--fg-radius-full) !important;
+  border: 1px solid var(--fg-border) !important;
+  border-radius: var(--fg-radius-sm) !important;
   font-size: var(--fg-text-sm) !important;
+}
+
+#select-all-media:hover:not(:disabled) {
+  background: var(--fg-surface-hover) !important;
+  color: var(--fg-text) !important;
 }
 
 /* Ghost buttons */
