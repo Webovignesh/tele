@@ -4,7 +4,6 @@ node_modules/
 # Telegram runtime state
 .td_database/
 .td_files/
-.filegram_index/
 .management_uploads/
 downloads/
 .thumbs/
