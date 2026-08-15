@@ -1,7 +1,7 @@
 {
   "name": "tele-scraper",
   "version": "1.0.0",
-  "description": "",
+  "description": "Local Telegram media browser and download manager powered by TDLib.",
   "main": "server.js",
   "scripts": {
     "start": "node -r ./tdl-upload-compat.js -r ./download-dedupe-preload.js -r ./thumb-cache-preload.js server.js",
@@ -9,13 +9,19 @@
     "test": "node scripts/rescue-smoke.test.cjs && node scripts/p0-smoke.test.cjs && node scripts/p1-smoke.test.cjs && node scripts/p2-smoke.test.cjs && node scripts/final-smoke.test.cjs",
     "verify": "npm run check && npm test"
   },
-  "keywords": [],
+  "keywords": [
+    "telegram",
+    "tdlib",
+    "media",
+    "downloader"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
     "archiver": "^8.0.0",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "prebuilt-tdlib": "^0.1008066.0",
     "tdl": "^8.1.0",
     "ws": "^8.21.1"
