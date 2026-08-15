@@ -256,6 +256,36 @@
     return avatar
   }
 
+  function guardChatById (chatId) {
+    if (chatId == null) return null
+    return (state.chats || []).find(chat => chat && guardKey(chat.id) === guardKey(chatId)) || null
+  }
+
+  /* Active chat header avatar (#fg-chat-avatar).
+   *
+   * Nothing populated this node, so the header showed an empty dark circle: it was
+   * never a failing image load. It reuses guardAvatar, the same loader, retry
+   * policy and DOM-level cache the sidebar rows use, so no second downloader is
+   * introduced and the browser serves the identical /api/media-preview URL from
+   * cache. Photo when available, coloured initials otherwise; never empty.
+   *
+   * guardAvatar returns the node it was given when the photo id is unchanged, so
+   * repeat opens neither rebuild nor reload. */
+  function guardPaintHeaderAvatar () {
+    const host = document.querySelector('#fg-chat-avatar')
+    if (!host) return
+    const chatId = state.activeChatId
+    if (chatId == null) {
+      host.replaceChildren()
+      return
+    }
+    const chat = guardChatById(chatId)
+    if (!chat) return
+    const current = host.firstElementChild
+    const next = guardAvatar(chat, current)
+    if (next !== current) host.replaceChildren(next)
+  }
+
   function guardRenderChats () {
     const list = document.querySelector('#chat-list')
     const search = document.querySelector('#chat-search')
@@ -362,6 +392,9 @@
     if (state.activeChatId != null && guardKey(state.activeChatId) === guardKey(chat.id)) {
       const title = document.querySelector('#chat-title')
       if (title && chat.title) title.textContent = chat.title
+      // A chat's photo often arrives after it was opened, so refresh the header
+      // here too rather than only on open.
+      guardPaintHeaderAvatar()
     }
     guardRenderChats()
   }
@@ -391,10 +424,12 @@
     const result = await guardBaseOpenChat(chatId)
     guardRenderChats()
     guardUpdateMediaLabel()
+    guardPaintHeaderAvatar()
     return result
   }
 
   guardRebindFilters()
   guardRenderChats()
   guardUpdateMediaLabel()
+  guardPaintHeaderAvatar()
 })()

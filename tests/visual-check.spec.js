@@ -247,3 +247,380 @@ test('download statistics use queue semantics', async ({ page }) => {
   }
   await page.screenshot({ path: 'tests/shot-7-downloads.png' })
 })
+
+/* ==========================================================================
+ * Files: real paged rows, no virtual/infinite scroll surface
+ * ========================================================================== */
+
+async function openFirstChatFiles (page) {
+  if (!await boot(page)) return false
+  const row = page.locator('#chat-list .chat-item').first()
+  if (!await row.count()) return false
+  await row.click().catch(() => {})
+  await page.waitForTimeout(1500)
+  const tabFiles = page.locator('#tab-files')
+  if (!await tabFiles.count()) return false
+  await tabFiles.click()
+  await page.waitForTimeout(2500)
+  return true
+}
+
+/* REGRESSION: the grid must never be taller than the rows it actually holds.
+ * A virtual renderer used to append a trailing spacer sized
+ * (items.length - end) * rowHeight, so a 22k index produced a multi-million
+ * pixel scroll surface behind ~20 real rows and scrolling ran into blankness. */
+test('Files grid has no synthetic scroll geometry beyond its rows', async ({ page }) => {
+  if (!await openFirstChatFiles(page)) return
+  const geometry = await page.evaluate(() => {
+    const grid = document.querySelector('#media-grid')
+    if (!grid) return null
+    const cards = [...grid.querySelectorAll(':scope > .gcard')]
+    let rowHeight = 0
+    for (const card of cards) rowHeight += card.getBoundingClientRect().height
+    return {
+      children: grid.childElementCount,
+      cards: cards.length,
+      spacers: grid.querySelectorAll('[class*="spacer"]').length,
+      scrollHeight: grid.scrollHeight,
+      clientHeight: grid.clientHeight,
+      rowsHeight: Math.round(rowHeight)
+    }
+  })
+  if (!geometry || !geometry.cards) {
+    test.info().annotations.push({ type: 'note', description: 'no indexed files available; geometry assertion skipped' })
+    return
+  }
+  expect(geometry.spacers, 'no spacer elements may pad the scroll surface').toBe(0)
+  expect(geometry.cards, 'a page must never mount more than 100 file rows').toBeLessThanOrEqual(100)
+  expect(geometry.children, 'the grid must contain only the page rows').toBe(geometry.cards)
+  // Allow generous padding slack, but nothing like a whole-index surface.
+  expect(geometry.scrollHeight, `scrollHeight ${geometry.scrollHeight} must track the ${geometry.rowsHeight}px of rows`)
+    .toBeLessThan(geometry.rowsHeight + 400)
+})
+
+test('Files pager reports one page per 100 rows and resets scroll on change', async ({ page }) => {
+  if (!await openFirstChatFiles(page)) return
+  const state = await page.evaluate(() => {
+    const pager = document.querySelector('#filegram-file-pager')
+    const grid = document.querySelector('#media-grid')
+    if (!pager || !grid) return null
+    const pages = window.fileGramFilesPages
+    return {
+      pageSize: pages ? pages.pageSize : -1,
+      pageCount: pages ? pages.pageCount() : -1,
+      page: pages ? pages.page() : -1,
+      cards: grid.querySelectorAll(':scope > .gcard').length,
+      scrollTop: grid.scrollTop
+    }
+  })
+  if (!state) return
+  expect(state.pageSize, 'the page size must be 100').toBe(100)
+  expect(state.page).toBe(1)
+  expect(state.cards).toBeLessThanOrEqual(state.pageSize)
+  // With N files the pager must claim ceil(N / 100) pages, never a scroll window.
+  expect(state.pageCount).toBeGreaterThanOrEqual(1)
+
+  if (state.pageCount > 1) {
+    await page.evaluate(() => window.fileGramFilesPages.goToPage(2))
+    await page.waitForTimeout(600)
+    const second = await page.evaluate(() => {
+      const grid = document.querySelector('#media-grid')
+      return {
+        page: window.fileGramFilesPages.page(),
+        scrollTop: grid.scrollTop,
+        cards: grid.querySelectorAll(':scope > .gcard').length,
+        firstIndex: Number((grid.querySelector(':scope > .gcard') || {}).dataset?.globalIndex ?? -1)
+      }
+    })
+    expect(second.page).toBe(2)
+    expect(second.scrollTop, 'a page change must reset scroll to the top').toBe(0)
+    expect(second.firstIndex, 'page 2 must start at global index 100').toBe(100)
+    expect(second.cards).toBeLessThanOrEqual(100)
+  }
+})
+
+/* REGRESSION: drag-to-select is removed. Pressing and moving over a row must not
+ * create a marquee, must not select a range, and must leave text selection alone. */
+test('drag selection is gone and cannot select a range', async ({ page }) => {
+  if (!await openFirstChatFiles(page)) return
+  const cards = page.locator('#media-grid .gcard')
+  if (await cards.count() < 3) {
+    test.info().annotations.push({ type: 'note', description: 'not enough rows to attempt a drag' })
+    return
+  }
+  await page.evaluate(() => { state.selection.clear() })
+  const first = await cards.nth(0).boundingBox()
+  const third = await cards.nth(2).boundingBox()
+  if (!first || !third) return
+
+  await page.mouse.move(first.x + 40, first.y + first.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(third.x + 40, third.y + third.height / 2, { steps: 8 })
+  const during = await page.evaluate(() => ({
+    marquee: document.querySelectorAll('.marquee').length,
+    userSelect: document.body.style.userSelect,
+    selected: state.selection.size
+  }))
+  await page.mouse.up()
+  await page.waitForTimeout(150)
+
+  expect(during.marquee, 'no marquee overlay may be created').toBe(0)
+  expect(during.userSelect, 'drag must not suppress text selection any more').toBe('')
+  expect(during.selected, 'dragging must not paint a selection range').toBeLessThanOrEqual(1)
+  expect(await page.locator('.drag-hint').count(), 'the "Drag to select" hint must be gone').toBe(0)
+})
+
+test('checkbox and Select all still drive selection after drag removal', async ({ page }) => {
+  if (!await openFirstChatFiles(page)) return
+  const boxes = page.locator('#media-grid .gcard input[type=checkbox]')
+  if (!await boxes.count()) return
+  await page.evaluate(() => { state.selection.clear(); updateSelectionBar() })
+  await boxes.first().check()
+  expect(await page.evaluate(() => state.selection.size), 'a checkbox must select one row').toBe(1)
+
+  const selectAll = page.locator('#select-all-media')
+  if (await selectAll.count() && await selectAll.isEnabled()) {
+    await selectAll.click()
+    await page.waitForTimeout(200)
+    expect(await page.evaluate(() => state.selection.size), 'Select all must select the whole filtered set').toBeGreaterThan(1)
+  }
+})
+
+/* ==========================================================================
+ * Authoritative count
+ * ========================================================================== */
+
+/* REGRESSION: 22,479 -> 17,484 -> 22,479. A short snapshot stamped done:true
+ * used to reach the header through the shared cache. The committed index plus a
+ * durable floor must make that impossible. */
+test('a smaller snapshot cannot lower the authoritative file count', async ({ page }) => {
+  if (!await openFirstChatFiles(page)) return
+  const before = await page.evaluate(() => (document.querySelector('#chat-media-count') || {}).textContent || '')
+  const parsed = Number(String(before).replace(/[^\d]/g, ''))
+  if (!parsed) {
+    test.info().annotations.push({ type: 'note', description: 'chat has no indexed files; count-floor assertion skipped' })
+    return
+  }
+
+  const after = await page.evaluate(() => {
+    const chatId = String(state.activeChatId)
+    const snapshot = rescueFileCache.get(chatId)
+    if (!snapshot || !Array.isArray(snapshot.items) || snapshot.items.length < 2) return null
+    // A partial batch that claims to be complete, exactly as the legacy scan
+    // layers used to publish.
+    const partial = {
+      chatId: state.activeChatId,
+      items: snapshot.items.slice(0, Math.max(1, Math.floor(snapshot.items.length / 2))),
+      found: Math.max(1, Math.floor(snapshot.items.length / 2)),
+      scanned: 100,
+      typeCounts: {},
+      done: true,
+      savedAt: Date.now()
+    }
+    rescueFileCache.set(chatId, partial)
+    updateMediaCountLabel()
+    return (document.querySelector('#chat-media-count') || {}).textContent || ''
+  })
+  if (after === null) {
+    test.info().annotations.push({ type: 'note', description: 'too few files to halve; assertion skipped' })
+    return
+  }
+  const parsedAfter = Number(String(after).replace(/[^\d]/g, ''))
+  expect(parsedAfter, `header showed ${after} after a half-size snapshot was published; it must not drop below ${before}`)
+    .toBeGreaterThanOrEqual(parsed)
+})
+
+/* ==========================================================================
+ * Remaining UI details
+ * ========================================================================== */
+
+test('app icon is declared and self contained', async ({ page }) => {
+  await boot(page)
+  const icon = await page.evaluate(() => {
+    const link = document.querySelector('link[rel~="icon"]')
+    if (!link) return null
+    return { href: link.getAttribute('href') || '', rel: link.getAttribute('rel') }
+  })
+  expect(icon, 'an app icon must be declared').not.toBeNull()
+  // Inline data URI: no network fetch, no file to ship. The xmlns literal inside
+  // the SVG is an XML namespace identifier, not a request, so only the href
+  // scheme is checked here.
+  expect(icon.href.startsWith('data:image/svg+xml'), 'the icon must be inline SVG, not a network asset').toBeTruthy()
+  expect(/^https?:/.test(icon.href), 'the icon must not be fetched over the network').toBeFalsy()
+  expect(decodeURIComponent(icon.href), 'the data URI must carry real SVG markup').toContain('<svg')
+})
+
+test('brand mark renders as a sized inline SVG', async ({ page }) => {
+  if (!await boot(page)) return
+  const brand = await page.evaluate(() => {
+    const mark = document.querySelector('#fg-brand-mark')
+    if (!mark) return null
+    const svg = mark.querySelector('svg')
+    const box = mark.getBoundingClientRect()
+    const cs = getComputedStyle(mark)
+    return {
+      hasSvg: !!svg,
+      width: Math.round(box.width),
+      height: Math.round(box.height),
+      display: cs.display,
+      visibility: cs.visibility,
+      opacity: cs.opacity
+    }
+  })
+  expect(brand).not.toBeNull()
+  expect(brand.hasSvg, 'the brand mark must contain an inline SVG').toBeTruthy()
+  expect(brand.width).toBeGreaterThanOrEqual(24)
+  expect(brand.width).toBeLessThanOrEqual(28)
+  expect(brand.height).toBeGreaterThanOrEqual(24)
+  expect(brand.visibility).toBe('visible')
+  expect(Number(brand.opacity)).toBeGreaterThan(0.9)
+})
+
+test('active chat header avatar is never an empty circle', async ({ page }) => {
+  if (!await boot(page)) return
+  const row = page.locator('#chat-list .chat-item').first()
+  if (!await row.count()) return
+  await row.click().catch(() => {})
+  await page.waitForTimeout(3000)
+
+  const avatar = await page.evaluate(() => {
+    const host = document.querySelector('#fg-chat-avatar')
+    if (!host) return null
+    const node = host.firstElementChild
+    const img = host.querySelector('img')
+    const fallback = host.querySelector('.tele-final-avatar-fallback')
+    const box = node ? node.getBoundingClientRect() : null
+    return {
+      mounted: host.childElementCount,
+      width: box ? Math.round(box.width) : 0,
+      height: box ? Math.round(box.height) : 0,
+      hasPhoto: !!(img && img.complete && img.naturalWidth > 0),
+      initials: fallback ? (fallback.textContent || '').trim() : '',
+      initialsHidden: fallback ? fallback.classList.contains('hidden') : null
+    }
+  })
+  expect(avatar, 'the header avatar host must exist').not.toBeNull()
+  expect(avatar.mounted, 'the header avatar must be populated').toBeGreaterThan(0)
+  expect(avatar.width, 'the mounted avatar must not collapse to zero').toBeGreaterThanOrEqual(28)
+  expect(avatar.height).toBeGreaterThanOrEqual(28)
+  // Either a real photo, or visible initials. Never an empty circle.
+  const showsSomething = avatar.hasPhoto || (avatar.initials.length > 0 && !avatar.initialsHidden)
+  expect(showsSomething, `photo=${avatar.hasPhoto} initials="${avatar.initials}" hidden=${avatar.initialsHidden}`).toBeTruthy()
+})
+
+test('download stats card has one hairline between the metrics and Total', async ({ page }) => {
+  if (!await boot(page)) return
+  const card = await page.evaluate(() => {
+    const total = document.querySelector('#fg-stats-total')
+    const summary = document.querySelector('#tele-ui-download-summary')
+    if (!total || !summary) return null
+    const cs = getComputedStyle(total)
+    return {
+      insideSameCard: summary.contains(total),
+      borderTopWidth: cs.borderTopWidth,
+      borderTopStyle: cs.borderTopStyle,
+      label: (total.querySelector('span') || {}).textContent,
+      value: (total.querySelector('strong') || {}).textContent
+    }
+  })
+  expect(card, 'the Total row must exist').not.toBeNull()
+  expect(card.insideSameCard, 'Total must stay inside the same stats card').toBeTruthy()
+  expect(card.borderTopWidth, 'a 1px hairline must separate the metrics from Total').toBe('1px')
+  expect(card.borderTopStyle).toBe('solid')
+  expect(card.label).toMatch(/total/i)
+})
+
+test('Save to and Parallel files labels share a left edge', async ({ page }) => {
+  if (!await boot(page)) return
+  const labels = await page.evaluate(() => {
+    const out = []
+    for (const conc of document.querySelectorAll('.dl-controls .conc')) {
+      const span = conc.querySelector('span')
+      if (!span) continue
+      const cs = getComputedStyle(span)
+      out.push({
+        text: (span.textContent || '').trim(),
+        left: Math.round(span.getBoundingClientRect().left),
+        alignSelf: cs.alignSelf,
+        textAlign: cs.textAlign
+      })
+    }
+    return out
+  })
+  expect(labels.length, 'both control sections must be present').toBeGreaterThanOrEqual(2)
+  // Neither label may be centred over the panel.
+  for (const label of labels) {
+    expect(label.alignSelf, `"${label.text}" must be left aligned, not centred`).toBe('flex-start')
+  }
+  const lefts = [...new Set(labels.map(l => l.left))]
+  expect(lefts.length, `labels must share one left edge, got ${JSON.stringify(labels.map(l => [l.text, l.left]))}`).toBe(1)
+})
+
+test('Save to path is one line with a full-path tooltip and a matching Browse button', async ({ page }) => {
+  if (!await boot(page)) return
+  const row = await page.evaluate(() => {
+    const input = document.querySelector('#dl-dir')
+    const button = document.querySelector('#set-dir')
+    const duplicate = document.querySelector('#dl-dir-current')
+    if (!input || !button) return null
+    const ib = input.getBoundingClientRect()
+    const bb = button.getBoundingClientRect()
+    return {
+      value: input.value,
+      title: input.title,
+      inputHeight: Math.round(ib.height),
+      buttonHeight: Math.round(bb.height),
+      sameRow: Math.abs(ib.top - bb.top) <= 1,
+      noOverlap: bb.left >= ib.right - 1,
+      duplicateVisible: duplicate ? getComputedStyle(duplicate).display !== 'none' : false,
+      buttonText: (button.textContent || '').trim()
+    }
+  })
+  expect(row, 'the Save to row must exist').not.toBeNull()
+  expect(row.inputHeight, 'Browse must match the path field height').toBe(row.buttonHeight)
+  expect(row.sameRow, 'the path field and Browse must sit on one line').toBeTruthy()
+  expect(row.noOverlap, 'Browse must not overlap the path field').toBeTruthy()
+  expect(row.duplicateVisible, 'the duplicated path line must stay hidden').toBeFalsy()
+  if (row.value) expect(row.title, 'the full path must be available as a tooltip').toBe(row.value)
+})
+
+test('Parallel files slider fills its row and drives concurrency', async ({ page }) => {
+  if (!await boot(page)) return
+  const layout = await page.evaluate(() => {
+    const slider = document.querySelector('#concurrency')
+    const value = document.querySelector('#concurrency-val')
+    const label = [...document.querySelectorAll('.dl-controls .conc')]
+      .map(c => c.querySelector('span'))
+      .find(s => s && /parallel/i.test(s.textContent || ''))
+    if (!slider || !value || !label) return null
+    const sb = slider.getBoundingClientRect()
+    const vb = value.getBoundingClientRect()
+    return {
+      sliderWidth: Math.round(sb.width),
+      collides: vb.left < sb.right - 1,
+      labelAboveSlider: Math.round(label.getBoundingClientRect().bottom) <= Math.round(sb.top) + 2,
+      valueText: (value.textContent || '').trim(),
+      sliderValue: slider.value
+    }
+  })
+  expect(layout, 'the Parallel files row must exist').not.toBeNull()
+  expect(layout.sliderWidth, 'the slider must fill the remaining width').toBeGreaterThan(150)
+  expect(layout.collides, 'the value must not overlap the slider').toBeFalsy()
+  expect(layout.labelAboveSlider, 'the label sits on its own line above the slider').toBeTruthy()
+  expect(layout.valueText).toBe(layout.sliderValue)
+
+  // Keyboard must work and must push the new value through.
+  await page.locator('#concurrency').focus()
+  const start = Number(layout.sliderValue)
+  await page.keyboard.press('ArrowRight')
+  await page.waitForTimeout(150)
+  const bumped = await page.evaluate(() => ({
+    slider: Number(document.querySelector('#concurrency').value),
+    readout: (document.querySelector('#concurrency-val').textContent || '').trim()
+  }))
+  expect(bumped.slider, 'the arrow key must move the slider').toBe(start + 1)
+  expect(bumped.readout, 'the readout must follow the slider').toBe(String(start + 1))
+  // Put it back so the run leaves no state behind.
+  await page.keyboard.press('ArrowLeft')
+  await page.waitForTimeout(400)
+})

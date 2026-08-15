@@ -1056,6 +1056,43 @@ li.chat-item.active {
   border-radius: var(--fg-radius-full);
 }
 
+/* The node mounted inside the header comes from guardAvatar, the same builder the
+   sidebar rows use. Its width/height rules are scoped to .chat-item, so without
+   sizing here the nested div collapses to zero and the circle looks empty. */
+#fg-chat-avatar > .chat-avatar {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: var(--fg-radius-full) !important;
+  position: relative !important;
+  overflow: hidden !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: var(--fg-text-sm) !important;
+  font-weight: var(--fg-weight-semibold) !important;
+  color: #fff !important;
+  flex-shrink: 0 !important;
+}
+
+#fg-chat-avatar .tele-final-avatar-image {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  border-radius: var(--fg-radius-full) !important;
+}
+
+/* guardAvatar hides the initials with .hidden once the photo decodes.
+   :not(.hidden) is load-bearing: an unqualified #fg-chat-avatar rule carries ID
+   specificity (1,1,0) and would outrank .hidden (0,1,0), pinning the initials
+   visible behind the photo - the same trap that once made #media-grid
+   unhideable. */
+#fg-chat-avatar .tele-final-avatar-fallback:not(.hidden) {
+  display: block !important;
+  line-height: 1 !important;
+}
+
 .fg-chat-identity {
   display: flex;
   flex-direction: column;
@@ -2115,12 +2152,21 @@ li.chat-item.active {
   color: var(--fg-text-secondary) !important;
 }
 
+/* Section labels ("Save to", "Parallel files") are left aligned.
+   align-self is load-bearing, not text-align: .conc is a flex COLUMN and
+   style.css:300 gives it align-items:center, which centres the label on the
+   cross axis. That rule survives because the later #mg-downloads-pane overrides
+   only restate display/flex-direction. This used to be patched for the
+   concurrency block alone, which is why "Save to" sat centred over the panel
+   while "Parallel files" sat left. */
 .dl-controls .conc > span:first-child {
   font-size: 10px !important;
   color: var(--fg-text-muted) !important;
   text-transform: uppercase !important;
   letter-spacing: 0.5px !important;
   font-weight: var(--fg-weight-medium) !important;
+  align-self: flex-start !important;
+  text-align: left !important;
 }
 
 /* Save-to and Parallel-files rows both use .conc > .row */
@@ -3696,8 +3742,18 @@ button.secondary {
   justify-content: space-between;
   gap: 10px;
   padding: 9px 12px 10px;
-  border-top: 1px solid var(--fg-border);
   background: var(--fg-surface-0);
+}
+
+/* The hairline between the top statistics row and Total.
+   It needs this specificity to land at all: .fg-stats-total is a direct div
+   child of the card, so `#tele-ui-download-summary.fg-stats > div` (1,2,0,
+   !important) outranks a plain .fg-stats-total border declaration, which is why
+   the divider was computing to 0px and no line was drawn. One 1px low-contrast
+   rule only - the card keeps its single border and stays cohesive. */
+#tele-ui-download-summary.fg-stats > .fg-stats-total {
+  border-top: 1px solid var(--fg-border) !important;
+  border-right: none !important;
 }
 
 .fg-stats-total > span {
@@ -3722,14 +3778,13 @@ button.secondary {
   border-top: 1px solid var(--fg-border) !important;
 }
 
-.dl-controls .conc:has(#concurrency) > span:first-child {
-  text-align: left !important;
-  align-self: flex-start !important;
-}
-
+/* Composition: label on its own line, slider filling the remaining width, value
+   pinned right. The label alignment now comes from the shared .conc rule above.
+   The value column is sized in ch so 8 and 64 occupy the same space and the
+   slider never shifts as you drag. */
 .dl-controls .conc:has(#concurrency) > .row {
   display: grid !important;
-  grid-template-columns: minmax(0, 1fr) 28px !important;
+  grid-template-columns: minmax(0, 1fr) 2.5ch !important;
   align-items: center !important;
   gap: 12px !important;
 }
@@ -3737,6 +3792,7 @@ button.secondary {
 #concurrency-val {
   justify-self: end !important;
   text-align: right !important;
+  font-variant-numeric: tabular-nums !important;
 }
 
 /* ---------- Chat filter summary + empty state ---------- */
