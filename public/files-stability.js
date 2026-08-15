@@ -9,6 +9,8 @@
  * - after restore, reconcile only messages newer than the last seen message;
  * - progressive scans only add to the committed index and are flushed in
  *   coarse batches so 20k+ indexes do not re-sort on every 100-item event;
+ * - one owner handles media-index-progress so legacy layers cannot temporarily
+ *   replace a complete count with a partial scan count;
  * - Files data never gets copied into state.messages. Messages and Files are
  *   separate data sets, which keeps chat switching and the Messages tab fast.
  */
@@ -20,6 +22,8 @@
   const persistTimers = new Map()
   const paintTimers = new Map()
   const flushTimers = new Map()
+  const fullScanJobs = new Set()
+  const persistentReadJobs = new Map()
 
   const PROGRESS_FLUSH_MS = 350
   const PROGRESS_FLUSH_ITEMS = 800
@@ -39,6 +43,10 @@
     if (!snapshot || !Array.isArray(snapshot.items)) return false
     const id = idOf(chatId)
     return snapshot.items.every(item => item && idOf(item.chatId) === id)
+  }
+
+  function isCompleteSnapshot (chatId, snapshot) {
+    return belongsToChat(chatId, snapshot) && snapshot.done !== false && Array.isArray(snapshot.items)
   }
 
   function newestItemId (items) {
@@ -173,10 +181,37 @@
     return next
   }
 
+  function installPersistentReadDedupe () {
+    if (typeof teleP0v2ReadIndex !== 'function' || teleP0v2ReadIndex.__fileGramDeduped) return
+    const baseRead = teleP0v2ReadIndex
+    const deduped = function fileGramDedupedPersistentRead (chatId) {
+      const id = idOf(chatId)
+      if (persistentReadJobs.has(id)) return persistentReadJobs.get(id)
+      const job = Promise.resolve(baseRead(chatId)).finally(() => persistentReadJobs.delete(id))
+      persistentReadJobs.set(id, job)
+      return job
+    }
+    deduped.__fileGramDeduped = true
+    teleP0v2ReadIndex = deduped
+  }
+
   async function restore (chatId) {
     const id = idOf(chatId)
-    let best = committed.get(id) || null
+    const memory = committed.get(id)
+    if (isCompleteSnapshot(chatId, memory)) {
+      setSharedSnapshot(chatId, memory)
+      updateCountUi(chatId)
+      return memory
+    }
+
     const shared = sharedSnapshot(chatId)
+    if (isCompleteSnapshot(chatId, shared)) {
+      committed.set(id, shared)
+      updateCountUi(chatId)
+      return shared
+    }
+
+    let best = memory && belongsToChat(chatId, memory) ? memory : null
     if (shared) best = best ? union(chatId, best, shared) : normalize(chatId, shared)
     if (typeof teleP0v2ReadIndex === 'function') {
       const disk = await Promise.resolve(teleP0v2ReadIndex(chatId)).catch(() => null)
@@ -256,6 +291,10 @@
     return job
   }
 
+  function cancelLegacyFullScan (chatId) {
+    Promise.resolve(request('cancel-media-scan-v3', { chatId })).catch(() => {})
+  }
+
   async function ensure (chatId, options = {}) {
     if (chatId == null) return null
     const id = idOf(chatId)
@@ -264,16 +303,19 @@
     const task = (async () => {
       let stable = await restore(chatId)
       if (stable && stable.items.length && !options.hardRefresh) {
+        // A complete persistent index is authoritative. Kill any older full scan
+        // that may have been started by a legacy startup layer before this owner
+        // installed, then reconcile only the newest delta.
+        cancelLegacyFullScan(chatId)
         if (state.activeChatId != null && idOf(state.activeChatId) === id && state.view === 'files') {
           try { setLoadState(`Loaded ${stable.items.length.toLocaleString()} indexed files`) } catch {}
           schedulePaint(chatId)
         }
-        // Reconcile only the delta in the background. Do not make chat switching
-        // wait for network or another full scan.
         reconcileRecent(chatId, stable).catch(() => {})
         return stable
       }
 
+      fullScanJobs.add(id)
       try {
         const result = await request('scan-media-v3', { chatId, force: !!options.hardRefresh })
         if (belongsToChat(chatId, result)) {
@@ -284,6 +326,8 @@
         if (!stable && state.activeChatId != null && idOf(state.activeChatId) === id) {
           try { setLoadState('File index sync failed. Reopen Files to retry.') } catch {}
         }
+      } finally {
+        fullScanJobs.delete(id)
       }
       return stable
     })().finally(() => loading.delete(id))
@@ -317,6 +361,19 @@
     if (!payload || payload.chatId == null) return
     const chatId = payload.chatId
     const id = idOf(chatId)
+    const stable = committed.get(id) || sharedSnapshot(chatId)
+
+    // Ignore progress from obsolete full-history scans whenever a complete
+    // persistent index already exists. Those events caused the visible count to
+    // jump 22k -> 6k -> 22k while also re-sorting large arrays in the browser.
+    if (!fullScanJobs.has(id) && isCompleteSnapshot(chatId, stable) && stable.items.length) {
+      if (flushTimers.has(id)) clearTimeout(flushTimers.get(id))
+      flushTimers.delete(id)
+      candidates.delete(id)
+      updateCountUi(chatId)
+      return
+    }
+
     let candidate = candidates.get(id)
     if (!candidate) candidate = { chatId, items: [], scanned: 0, latestSeenMessageId: 0, done: false }
 
@@ -358,6 +415,7 @@
     state.hasMore = state.hasMore !== false
   }
 
+  installPersistentReadDedupe()
   rescueEnsureAllFiles = ensure
 
   // The committed index is already newest-first. Avoid cloning+sorting 40k rows
@@ -387,9 +445,17 @@
 
   const baseHandleEvent = handleEvent
   handleEvent = function fileGramStableHandleEvent (event) {
+    if (!event) return baseHandleEvent(event)
+
+    // This layer is the sole owner of media-index-progress. Do not call the
+    // legacy chain first: older P1/P0 handlers repaint partial scan snapshots
+    // and are the direct cause of the count fluctuation visible in the UI.
+    if (event.name === 'media-index-progress') {
+      mergeProgress(event.payload || {})
+      return
+    }
+
     const result = baseHandleEvent(event)
-    if (!event) return result
-    if (event.name === 'media-index-progress') mergeProgress(event.payload || {})
     if (event.name === 'message-upsert' || event.name === 'message-delete') {
       const payload = event.payload || event
       if (payload.chatId != null) syncFromSharedAfterRealtime(payload.chatId)
