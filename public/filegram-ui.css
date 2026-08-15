@@ -1934,6 +1934,19 @@ button.secondary {
   font-weight: var(--fg-weight-bold);
   color: var(--fg-text);
   margin: 0 0 var(--fg-space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--fg-space-3);
+}
+
+.screen .card h1::before {
+  content: '';
+  display: inline-block;
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, var(--fg-accent), #7c5cfc);
+  border-radius: var(--fg-radius-md);
+  flex-shrink: 0;
 }
 
 .screen .card p {
@@ -1956,19 +1969,20 @@ button.secondary {
 .screen .card input[type="tel"],
 .screen .card input[type="password"] {
   width: 100%;
-  height: 40px;
-  padding: 0 var(--fg-space-3);
+  height: 42px;
+  padding: 0 var(--fg-space-4);
   background: var(--fg-surface-2);
   border: 1px solid var(--fg-border);
   border-radius: var(--fg-radius-md);
   color: var(--fg-text);
   font-size: var(--fg-text-md);
   outline: none;
-  transition: border-color var(--fg-duration-fast) var(--fg-ease);
+  transition: border-color var(--fg-duration-fast) var(--fg-ease), box-shadow var(--fg-duration-fast) var(--fg-ease);
 }
 
 .screen .card input:focus {
   border-color: var(--fg-accent);
+  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.1);
 }
 
 .screen .card input::placeholder {
@@ -1977,7 +1991,7 @@ button.secondary {
 
 .screen .card button {
   width: 100%;
-  height: 42px;
+  height: 44px;
   margin-top: var(--fg-space-3);
   background: var(--fg-accent);
   color: var(--fg-text-inverse);
@@ -1985,10 +1999,17 @@ button.secondary {
   font-weight: var(--fg-weight-semibold);
   border: none;
   border-radius: var(--fg-radius-md);
+  cursor: pointer;
+  transition: background var(--fg-duration-fast) var(--fg-ease);
 }
 
 .screen .card button:hover:not(:disabled) {
   background: var(--fg-accent-hover);
+}
+
+.screen .card button:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .screen .card .error {
@@ -2008,20 +2029,31 @@ button.secondary {
 }
 
 .screen .card details {
-  margin-top: var(--fg-space-4);
+  margin-top: var(--fg-space-5);
   font-size: var(--fg-text-sm);
   color: var(--fg-text-muted);
+  border-top: 1px solid var(--fg-border);
+  padding-top: var(--fg-space-4);
 }
 
 .screen .card details summary {
   cursor: pointer;
   color: var(--fg-text-secondary);
+  font-weight: var(--fg-weight-medium);
 }
 
 .screen .card details ol {
   margin: var(--fg-space-2) 0 0;
   padding-left: var(--fg-space-5);
-  line-height: 1.6;
+  line-height: 1.7;
+}
+
+.screen .card details code {
+  background: var(--fg-surface-3);
+  padding: 1px 5px;
+  border-radius: var(--fg-radius-xs);
+  font-family: var(--fg-font-mono);
+  font-size: var(--fg-text-sm);
 }
 
 /* Phone row for India-first login */
@@ -2036,15 +2068,42 @@ button.secondary {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 64px;
+  min-width: 68px;
   padding: 0 var(--fg-space-3);
-  border: 1px solid var(--fg-border);
+  border: 1px solid var(--fg-border-accent);
   border-radius: var(--fg-radius-md);
   background: var(--fg-surface-2);
-  color: var(--fg-text);
+  color: var(--fg-accent);
   font-size: var(--fg-text-md);
-  font-weight: var(--fg-weight-semibold);
+  font-weight: var(--fg-weight-bold);
   user-select: none;
+  letter-spacing: 0.5px;
+}
+
+.filegram-phone-row #login-input {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+/* Other device confirmation link */
+.other-device-link {
+  display: block;
+  margin-top: var(--fg-space-3);
+  padding: var(--fg-space-3) var(--fg-space-4);
+  background: var(--fg-surface-2);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-md);
+  color: var(--fg-accent);
+  font-size: var(--fg-text-sm);
+  font-family: var(--fg-font-mono);
+  word-break: break-all;
+  text-decoration: none;
+}
+
+.other-device-link:hover {
+  border-color: var(--fg-accent);
+  background: var(--fg-accent-subtle);
 }
 
 /* ---------- Range tools (injected by rescue-runtime) ---------- */
