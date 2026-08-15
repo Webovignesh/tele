@@ -1,9 +1,8 @@
 'use strict'
 
 /* Keep the login screen synchronized with TDLib even when the authorization
- * transition happened before the browser websocket connected. get-status
- * already exposes authState; convert that state into the same explicit prompt
- * used by realtime login-prompt events.
+ * transition happened before the browser websocket connected. Also owns the
+ * small session UX: India-first phone input and explicit logout.
  */
 ;(function teleAuthStateFix () {
   const promptForAuthState = (authState) => {
@@ -17,24 +16,85 @@
     }
   }
 
+  function defaultIndiaPhone (input) {
+    if (!input) return
+    if (!String(input.value || '').trim()) input.value = '+91'
+    try {
+      const end = input.value.length
+      input.setSelectionRange(end, end)
+    } catch {}
+  }
+
+  function installLogout () {
+    if (document.querySelector('#tele-logout')) return
+    const head = document.querySelector('.sidebar-head')
+    if (!head) return
+    const account = document.createElement('div')
+    account.className = 'tele-account-actions'
+    const button = document.createElement('button')
+    button.id = 'tele-logout'
+    button.type = 'button'
+    button.className = 'ghost small tele-logout'
+    button.textContent = 'Log out'
+    button.title = 'Log out of Telegram on this Tele installation'
+    button.addEventListener('click', async () => {
+      if (button.disabled) return
+      if (!confirm('Log out of Telegram on this Tele installation?')) return
+      button.disabled = true
+      button.textContent = 'Logging out…'
+      try {
+        await request('logout', {})
+        state.status = 'waiting-input'
+        state.chats = []
+        state.activeChatId = null
+        state.messages = []
+        state.selection.clear()
+        state.selectedMessages.clear()
+        showLoginPrompt('phone', null)
+      } catch (error) {
+        button.disabled = false
+        button.textContent = 'Log out'
+        toast(error && error.message ? error.message : 'Logout failed', 'error')
+      }
+    })
+    account.appendChild(button)
+    head.appendChild(account)
+  }
+
   const originalShowLoginPrompt = showLoginPrompt
   showLoginPrompt = function teleShowLoginPrompt (kind, info) {
     originalShowLoginPrompt(kind, info)
     const button = document.querySelector('#login-submit')
     if (button) button.disabled = false
+    if (kind === 'phone') {
+      const input = document.querySelector('#login-input')
+      defaultIndiaPhone(input)
+      const hint = document.querySelector('#login-hint')
+      if (hint) hint.textContent = 'Enter your Telegram phone number. India (+91) is prefilled; replace it if needed:'
+    }
   }
 
   const originalApplyStatus = applyStatus
   applyStatus = function teleApplyStatus (data) {
     originalApplyStatus(data)
+    if (data && data.status === 'ready') installLogout()
     if (!data || data.status !== 'waiting-input') return
     const kind = promptForAuthState(data.authState)
     if (kind) showLoginPrompt(kind, null)
   }
 
-  // If app.js opened the websocket before this last-mile patch loaded, replay
-  // current status once so the generic "Logging in…" placeholder cannot stick.
+  const originalHandleEvent = handleEvent
+  handleEvent = function teleAuthHandleEvent (event) {
+    const result = originalHandleEvent(event)
+    if (event && event.name === 'auth') queueMicrotask(installLogout)
+    if (event && event.name === 'login-prompt' && event.kind === 'phone') {
+      queueMicrotask(() => defaultIndiaPhone(document.querySelector('#login-input')))
+    }
+    return result
+  }
+
   queueMicrotask(() => {
+    installLogout()
     if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
       request('get-status').then(applyStatus).catch(() => {})
     }
