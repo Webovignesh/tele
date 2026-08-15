@@ -25,5 +25,8 @@
     "prebuilt-tdlib": "^0.1008066.0",
     "tdl": "^8.1.0",
     "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
   }
 }
