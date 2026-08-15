@@ -3,7 +3,7 @@
 /* Keep the login screen synchronized with TDLib even when the authorization
  * transition happened before the browser websocket connected. Also owns the
  * small session UX: India-first phone input, explicit logout, FileGram branding,
- * and the final stability layer loader.
+ * and early loading of the final Files stability owner.
  */
 ;(function fileGramAuthStateFix () {
   function applyBrand () {
@@ -130,16 +130,32 @@
     if (!document.querySelector('link[data-tele-stability]')) {
       const link = document.createElement('link')
       link.rel = 'stylesheet'
-      link.href = 'stability.css?v=1'
+      link.href = 'stability.css?v=2'
       link.dataset.teleStability = '1'
       document.head.appendChild(link)
     }
     if (!document.querySelector('script[data-tele-files-stability]')) {
       const script = document.createElement('script')
-      script.src = 'files-stability.js?v=1'
+      script.src = 'files-stability.js?v=2'
       script.dataset.teleFilesStability = '1'
       document.body.appendChild(script)
     }
+  }
+
+  function scheduleFinalStabilityLayer () {
+    let tries = 0
+    const attempt = () => {
+      tries++
+      const ready = typeof window.rescueFileCache !== 'undefined' || (typeof rescueFileCache !== 'undefined' && rescueFileCache)
+      const indexReady = typeof teleP0v2ReadIndex === 'function' && typeof teleP0v2WriteIndex === 'function'
+      if (ready && indexReady && typeof rescueEnsureAllFiles === 'function') {
+        loadFinalStabilityLayer()
+        return
+      }
+      if (tries < 500) setTimeout(attempt, 0)
+      else loadFinalStabilityLayer()
+    }
+    setTimeout(attempt, 0)
   }
 
   const originalShowLoginPrompt = showLoginPrompt
@@ -225,14 +241,10 @@
 
   applyBrand()
   rebindLoginSubmit()
+  scheduleFinalStabilityLayer()
   queueMicrotask(() => {
     installLogout()
     rebindLoginSubmit()
-    if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
-      request('get-status').then(applyStatus).catch(() => {})
-    }
+    if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) request('get-status').then(applyStatus).catch(() => {})
   })
-
-  if (document.readyState === 'complete') loadFinalStabilityLayer()
-  else window.addEventListener('load', loadFinalStabilityLayer, { once: true })
 })()
