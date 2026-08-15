@@ -148,9 +148,12 @@ html, body {
 }
 
 /* ---------- LEFT SIDEBAR ---------- */
+/* Sidebar as an explicit grid: head / search / filters / list / footer.
+   Only the list row flexes, so the account footer keeps its full height no
+   matter how many chats load. */
 .sidebar {
-  display: flex !important;
-  flex-direction: column !important;
+  display: grid !important;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto auto !important;
   height: 100vh !important;
   min-height: 0 !important;
   background: var(--fg-surface-0) !important;
@@ -161,14 +164,35 @@ html, body {
   min-width: 0 !important;
 }
 
+/* Brand left, Create hard-right. */
 .sidebar-head {
   display: flex !important;
   align-items: center !important;
-  justify-content: flex-start !important;
+  justify-content: space-between !important;
   padding: 10px 12px !important;
-  min-height: 44px !important;
+  min-height: 52px !important;
   gap: 10px !important;
   border-bottom: 1px solid var(--fg-border) !important;
+}
+
+.fg-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.fg-brand-mark {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+.fg-brand-mark svg {
+  width: 26px;
+  height: 26px;
+  display: block;
 }
 
 .sidebar-head h2 {
@@ -176,19 +200,38 @@ html, body {
   font-weight: var(--fg-weight-bold);
   color: var(--fg-text);
   margin: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--fg-space-2);
+  white-space: nowrap;
+  letter-spacing: -0.1px;
 }
 
-.sidebar-head h2::before {
-  content: '';
-  display: inline-block;
-  width: 24px;
-  height: 24px;
-  background: linear-gradient(135deg, var(--fg-accent), #7c5cfc);
+.sidebar-head .fg-create-btn {
+  height: 32px;
+  min-width: 80px;
+  padding: 0 12px;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  background: var(--fg-accent);
+  color: #fff;
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-semibold);
+  border: none;
   border-radius: var(--fg-radius-sm);
+  cursor: pointer;
   flex-shrink: 0;
+  transition: background var(--fg-duration-fast) var(--fg-ease);
+}
+
+.sidebar-head .fg-create-btn:hover {
+  background: var(--fg-accent-hover);
+}
+
+.sidebar-head .fg-create-btn .fg-icon svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.2;
 }
 
 #chat-search {
@@ -520,45 +563,97 @@ li.chat-item.active {
   color: var(--fg-text) !important;
 }
 
-/* ---------- Sidebar search with shortcut hint ---------- */
-.fg-search-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 8px 12px 6px;
-  padding: 0 10px;
-  height: 32px;
-  background: var(--fg-surface-2);
-  border: 1px solid var(--fg-border);
-  border-radius: var(--fg-radius-sm);
-  transition: border-color var(--fg-duration-fast) var(--fg-ease);
-}
-
-.fg-search-wrap:focus-within {
-  border-color: var(--fg-accent);
-}
-
-.fg-search-icon {
-  color: var(--fg-text-muted);
-}
-
-.fg-search-wrap #chat-search {
-  flex: 1;
-  min-width: 0;
-  width: auto !important;
-  margin: 0 !important;
+/* ---------- Field with leading icon ----------
+   One structural pattern for both search fields: relative wrapper, absolutely
+   centred icon, input padded past it. No magic top offsets, and the wrapper
+   owns the single focus ring so the input never draws a second one. */
+.fg-search-wrap,
+.files-toolbar .search-box.fg-field {
+  position: relative !important;
+  display: flex !important;
+  align-items: center !important;
+  height: 32px !important;
+  background: var(--fg-surface-2) !important;
+  border: 1px solid var(--fg-border) !important;
+  border-radius: var(--fg-radius-sm) !important;
+  transition: border-color var(--fg-duration-fast) var(--fg-ease), box-shadow var(--fg-duration-fast) var(--fg-ease) !important;
   padding: 0 !important;
+  gap: 0 !important;
+}
+
+.fg-search-wrap {
+  margin: 8px 12px 6px;
+}
+
+.fg-search-wrap:focus-within,
+.files-toolbar .search-box.fg-field:focus-within {
+  border-color: var(--fg-accent) !important;
+  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.1) !important;
+}
+
+.fg-field-icon {
+  position: absolute !important;
+  left: 9px !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  color: var(--fg-text-muted) !important;
+  pointer-events: none !important;
+  font-size: 0 !important;
+}
+
+.fg-field-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Inputs are transparent and never draw their own focus decoration; the
+   wrapper's ring is the only one. This is what removed the duplicate box that
+   appeared over the chat search on Ctrl+K. */
+.fg-search-wrap #chat-search,
+.files-toolbar .search-box.fg-field #file-search {
+  flex: 1 !important;
+  min-width: 0 !important;
+  width: 100% !important;
   height: 100% !important;
+  margin: 0 !important;
+  padding: 0 30px 0 28px !important;
   background: none !important;
   border: none !important;
   border-radius: 0 !important;
   color: var(--fg-text) !important;
   font-size: var(--fg-text-sm) !important;
   outline: none !important;
+  box-shadow: none !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+}
+
+.fg-search-wrap #chat-search:focus,
+.fg-search-wrap #chat-search:focus-visible,
+.files-toolbar .search-box.fg-field #file-search:focus,
+.files-toolbar .search-box.fg-field #file-search:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+  border: none !important;
+  background: none !important;
+}
+
+/* Strip the native search affordances that were rendering as an extra box. */
+.fg-search-wrap #chat-search::-webkit-search-decoration,
+.fg-search-wrap #chat-search::-webkit-search-cancel-button,
+.fg-search-wrap #chat-search::-webkit-search-results-button,
+.files-toolbar .search-box.fg-field #file-search::-webkit-search-decoration,
+.files-toolbar .search-box.fg-field #file-search::-webkit-search-cancel-button,
+.files-toolbar .search-box.fg-field #file-search::-webkit-search-results-button {
+  -webkit-appearance: none;
+  display: none;
 }
 
 .fg-kbd {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
   flex-shrink: 0;
   padding: 2px 5px;
   border: 1px solid var(--fg-border);
@@ -568,6 +663,13 @@ li.chat-item.active {
   font: var(--fg-weight-medium) 10px/1 var(--fg-font);
   letter-spacing: 0.3px;
   user-select: none;
+  pointer-events: none;
+  transition: opacity var(--fg-duration-fast) var(--fg-ease);
+}
+
+/* Hide the hint while typing so it cannot overlap the text. */
+.fg-search-wrap:focus-within .fg-kbd {
+  opacity: 0;
 }
 
 /* ---------- Sidebar filter segments ---------- */
@@ -645,23 +747,91 @@ li.chat-item.active {
   display: none;
 }
 
-/* ---------- Sidebar bottom account row ---------- */
+/* ---------- Sidebar bottom account row ----------
+   A genuine fixed footer: the sidebar is a grid whose chat-list row absorbs
+   all free space, so this region can never be squeezed as the list grows. */
 .fg-sidebar-account {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 10px;
+  min-height: 62px;
+  padding: 10px 12px;
   border-top: 1px solid var(--fg-border);
   background: var(--fg-surface-0);
   flex-shrink: 0;
 }
 
+.fg-account-avatar {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--fg-radius-full);
+  background: var(--fg-surface-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-bold);
+  color: #fff;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.fg-account-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--fg-radius-full);
+}
+
+.fg-account-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fg-account-name {
+  font-size: var(--fg-text-base);
+  font-weight: var(--fg-weight-semibold);
+  color: var(--fg-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+.fg-account-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fg-text-xs);
+  color: var(--fg-text-muted);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fg-account-status.is-online::before {
+  content: '';
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-success);
+}
+
 .fg-settings-btn {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: var(--fg-radius-sm);
-  background: var(--fg-surface-2);
-  border: 1px solid var(--fg-border);
+  background: transparent;
+  border: 1px solid transparent;
   color: var(--fg-text-muted);
   display: flex;
   align-items: center;
@@ -672,78 +842,164 @@ li.chat-item.active {
   padding: 0;
 }
 
-.fg-settings-btn:hover {
+.fg-settings-btn:hover,
+.fg-settings-btn[aria-expanded="true"] {
   background: var(--fg-surface-hover);
+  border-color: var(--fg-border);
   color: var(--fg-text);
 }
 
-.fg-account-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: var(--fg-radius-full);
-  background: var(--fg-surface-3);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  font-weight: var(--fg-weight-bold);
-  color: #fff;
-  flex-shrink: 0;
+.fg-settings-btn .fg-icon svg {
+  width: 17px;
+  height: 17px;
 }
 
-.fg-account-info {
-  flex: 1;
-  min-width: 0;
+/* ---------- Popover menu (account + chat overflow) ---------- */
+.fg-account-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 10px;
+  min-width: 168px;
+  padding: 5px;
+  background: var(--fg-surface-3);
+  border: 1px solid var(--fg-border-strong);
+  border-radius: var(--fg-radius-md);
+  box-shadow: var(--fg-shadow-lg);
+  z-index: var(--fg-z-dropdown);
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 2px;
 }
 
-.fg-account-name {
-  font-size: var(--fg-text-xs);
-  font-weight: var(--fg-weight-semibold);
-  color: var(--fg-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.35;
+.fg-account-popover.hidden {
+  display: none;
 }
 
-.fg-account-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 10px;
-  color: var(--fg-success);
-  line-height: 1.35;
-}
-
-.fg-account-status::before {
-  content: '';
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.fg-account-menu {
-  width: 26px;
-  height: 26px;
-  border-radius: var(--fg-radius-sm);
-  background: transparent;
-  border: none;
-  color: var(--fg-text-muted);
+.fg-popover-item {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--fg-radius-sm);
+  color: var(--fg-text-secondary);
+  font-size: var(--fg-text-sm);
+  text-align: left;
   cursor: pointer;
-  flex-shrink: 0;
-  padding: 0;
+  transition: background var(--fg-duration-fast) var(--fg-ease), color var(--fg-duration-fast) var(--fg-ease);
 }
 
-.fg-account-menu:hover {
+.fg-popover-item:hover,
+.fg-popover-item:focus-visible {
   background: var(--fg-surface-hover);
   color: var(--fg-text);
+  outline: none;
+}
+
+.fg-popover-item.is-danger {
+  color: #f0646e;
+}
+
+.fg-popover-item.is-danger:hover,
+.fg-popover-item.is-danger:focus-visible {
+  background: var(--fg-danger-subtle);
+  color: #f0646e;
+}
+
+/* Chat header overflow anchors downward instead of upward. */
+.fg-overflow-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.fg-overflow-menu {
+  top: calc(100% + 6px);
+  bottom: auto;
+  right: 0;
+}
+
+/* ---------- In-app confirmation modal ---------- */
+.fg-modal {
+  position: fixed;
+  inset: 0;
+  z-index: var(--fg-z-modal);
+  display: grid;
+  place-items: center;
+  padding: var(--fg-space-5);
+  background: rgba(4, 7, 12, 0.62);
+}
+
+.fg-modal.hidden {
+  display: none;
+}
+
+.fg-modal-dialog {
+  width: min(380px, 100%);
+  padding: var(--fg-space-5);
+  background: var(--fg-surface-1);
+  border: 1px solid var(--fg-border-strong);
+  border-radius: var(--fg-radius-lg);
+  box-shadow: var(--fg-shadow-xl);
+}
+
+.fg-modal-title {
+  margin: 0 0 var(--fg-space-2);
+  font-size: var(--fg-text-lg);
+  font-weight: var(--fg-weight-semibold);
+  color: var(--fg-text);
+}
+
+.fg-modal-copy {
+  margin: 0 0 var(--fg-space-5);
+  font-size: var(--fg-text-sm);
+  color: var(--fg-text-secondary);
+  line-height: 1.5;
+}
+
+.fg-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--fg-space-2);
+}
+
+.fg-modal-cancel,
+.fg-modal-confirm {
+  height: 34px;
+  padding: 0 16px;
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-medium);
+  cursor: pointer;
+}
+
+.fg-modal-cancel {
+  background: var(--fg-surface-2);
+  border: 1px solid var(--fg-border);
+  color: var(--fg-text-secondary);
+}
+
+.fg-modal-cancel:hover {
+  background: var(--fg-surface-hover);
+  color: var(--fg-text);
+}
+
+.fg-modal-confirm {
+  background: #e8404f;
+  border: none;
+  color: #fff;
+  font-weight: var(--fg-weight-semibold);
+}
+
+.fg-modal-confirm:hover:not(:disabled) {
+  background: #f24d5c;
+}
+
+.fg-modal-confirm:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* ---------- CENTER WORKSPACE ---------- */
@@ -1119,9 +1375,15 @@ li.chat-item.active {
   font-size: var(--fg-text-xs);
 }
 
-/* ---------- Media Grid (file rows) ---------- */
-#media-grid,
-.media-grid {
+/* ---------- Media Grid (file rows) ----------
+   The :not(.hidden) guard is load-bearing. An unqualified `#media-grid`
+   selector carries ID specificity (1,0,0), which outranks `.hidden` (0,1,0)
+   even when both use !important — that is what previously made the Files grid
+   impossible to hide and leaked file rows into the Messages tab. Scoping the
+   layout to the visible state lets setView's .hidden toggle win cleanly
+   without another !important escalation. */
+#media-grid:not(.hidden),
+.media-grid:not(.hidden) {
   flex: 1 !important;
   overflow-y: auto !important;
   overflow-x: hidden !important;
@@ -1133,20 +1395,32 @@ li.chat-item.active {
   overflow-anchor: none !important;
 }
 
-#media-grid[data-filegram-pages="1"] {
+#media-grid.hidden,
+.media-grid.hidden {
+  display: none !important;
+}
+
+#media-grid[data-filegram-pages="1"]:not(.hidden) {
   gap: 1px !important;
   padding: var(--fg-space-2) var(--fg-space-4) !important;
   contain: strict !important;
 }
 
-.gcard {
+/* File row grid. The track width MUST match the rendered thumbnail width or
+   the thumbnail overflows its column and covers the first characters of the
+   filename. daily-driver-final-ui-fix.css:63 pins the thumb to 58px using
+   `#media-grid .gthumb` (specificity 1,1,0), which outranks a two-class
+   selector, so the thumbnail is normalised back to 48px below with matching
+   ID-level specificity and the track is declared 48px here. */
+.gcard,
+#media-grid .gcard {
   display: grid !important;
-  grid-template-columns: 36px minmax(0, 1fr) auto auto !important;
+  grid-template-columns: 48px minmax(0, 1fr) auto 28px !important;
   align-items: center !important;
-  gap: 10px !important;
-  padding: 5px 12px !important;
+  gap: 12px !important;
+  padding: 6px 12px !important;
   border-radius: var(--fg-radius-sm) !important;
-  min-height: 40px !important;
+  min-height: 48px !important;
   cursor: pointer !important;
   transition: background var(--fg-duration-fast) var(--fg-ease) !important;
   position: relative !important;
@@ -1156,6 +1430,7 @@ li.chat-item.active {
   background: transparent !important;
   margin: 0 !important;
   transform: none !important;
+  overflow: hidden !important;
 }
 
 .gcard:hover {
@@ -1173,9 +1448,18 @@ li.chat-item.active {
   opacity: 0.6 !important;
 }
 
-.gcard .gthumb {
-  width: 36px !important;
-  height: 36px !important;
+/* Thumbnail normalisation. Written with ID-level specificity to override
+   daily-driver-final-ui-fix.css:63-72, which hard-pins width/min/max to 58px
+   and would otherwise burst out of the 48px grid track. */
+.gcard .gthumb,
+#media-grid .gcard .gthumb,
+#media-grid .gthumb {
+  width: 48px !important;
+  height: 48px !important;
+  min-width: 48px !important;
+  min-height: 48px !important;
+  max-width: 48px !important;
+  max-height: 48px !important;
   border-radius: var(--fg-radius-sm) !important;
   background: var(--fg-surface-3) !important;
   display: flex !important;
@@ -1183,60 +1467,102 @@ li.chat-item.active {
   justify-content: center !important;
   overflow: hidden !important;
   flex-shrink: 0 !important;
+  position: relative !important;
+  grid-column: 1 !important;
 }
 
-.gcard .gthumb .icon {
-  font-size: 16px !important;
+.gcard .gthumb .icon,
+#media-grid .gcard .gthumb .icon {
+  font-size: 18px !important;
   line-height: 1 !important;
   color: var(--fg-text-muted) !important;
+  opacity: 1 !important;
 }
 
-.gcard .gthumb img {
-  width: 100% !important;
-  height: 100% !important;
+.gcard .gthumb img,
+#media-grid .gcard .gthumb img,
+#media-grid .gthumb img {
+  width: 48px !important;
+  height: 48px !important;
+  min-width: 48px !important;
+  max-width: 48px !important;
+  min-height: 48px !important;
+  max-height: 48px !important;
   object-fit: cover !important;
   border-radius: var(--fg-radius-sm) !important;
+  position: absolute !important;
+  inset: 0 !important;
 }
 
 .gcard .gthumb img.hidden {
   display: none !important;
 }
 
-.gcard .gbody {
+/* Details column. min-width:0 on both the grid item and the text nodes is what
+   allows ellipsis inside a minmax(0,1fr) track instead of forcing overflow. */
+.gcard .gbody,
+#media-grid .gcard .gbody {
+  grid-column: 2 !important;
   min-width: 0 !important;
+  max-width: 100% !important;
   display: flex !important;
   flex-direction: column !important;
   gap: 1px !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
-.gcard .gname {
+.gcard .gname,
+#media-grid .gcard .gname {
+  display: block !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
   font-size: var(--fg-text-sm) !important;
   color: var(--fg-text) !important;
   white-space: nowrap !important;
   overflow: hidden !important;
   text-overflow: ellipsis !important;
-  font-weight: var(--fg-weight-normal) !important;
-  line-height: 1.3 !important;
+  font-weight: var(--fg-weight-medium) !important;
+  line-height: 1.35 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-indent: 0 !important;
+  direction: ltr !important;
 }
 
-.gcard .gsize {
+.gcard .gsize,
+#media-grid .gcard .gsize {
+  display: block !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
   font-size: var(--fg-text-xs) !important;
   color: var(--fg-text-muted) !important;
   font-variant-numeric: tabular-nums !important;
-  line-height: 1.3 !important;
+  line-height: 1.35 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
-.gcard .gtype {
+.gcard .gtype,
+#media-grid .gcard .gtype {
+  grid-column: 3 !important;
+  position: static !important;
   font-size: 10px !important;
   font-weight: var(--fg-weight-semibold) !important;
   color: var(--fg-accent) !important;
   background: var(--fg-accent-subtle) !important;
-  padding: 2px 6px !important;
+  border: 1px solid rgba(77, 163, 255, 0.2) !important;
+  padding: 2px 7px !important;
   border-radius: var(--fg-radius-xs) !important;
   text-transform: uppercase !important;
   white-space: nowrap !important;
   letter-spacing: 0.4px !important;
   line-height: 1.4 !important;
+  flex-shrink: 0 !important;
 }
 
 .gcard .done-badge {
@@ -1256,9 +1582,14 @@ li.chat-item.active {
   z-index: 2 !important;
 }
 
-.gcard input[type="checkbox"] {
-  width: 15px !important;
-  height: 15px !important;
+.gcard input[type="checkbox"],
+#media-grid .gcard input[type="checkbox"] {
+  grid-column: 4 !important;
+  position: static !important;
+  justify-self: center !important;
+  width: 16px !important;
+  height: 16px !important;
+  margin: 0 !important;
   accent-color: var(--fg-accent) !important;
   cursor: pointer !important;
   flex-shrink: 0 !important;
@@ -3167,4 +3498,373 @@ button.secondary {
     transition-duration: 0ms !important;
     animation-duration: 0ms !important;
   }
+}
+
+/* ============================================================
+   Targeted correction pass
+   Declared after the responsive block so these win within this file.
+   ============================================================ */
+
+/* Accessible hiding for controls kept for behaviour but not shown. */
+.fg-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+/* ---------- Custom file-type dropdown ----------
+   The native <select> stays in the DOM as the source of truth and is only
+   visually hidden, so every existing Files filter listener keeps working. */
+.fg-select {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 128px;
+}
+
+.fg-select-trigger {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  background: var(--fg-surface-2);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  color: var(--fg-text);
+  font-size: var(--fg-text-sm);
+  cursor: pointer;
+  transition: border-color var(--fg-duration-fast) var(--fg-ease), background var(--fg-duration-fast) var(--fg-ease);
+}
+
+.fg-select-trigger:hover {
+  border-color: var(--fg-border-strong);
+}
+
+.fg-select-trigger:focus-visible,
+.fg-select-trigger[aria-expanded="true"] {
+  outline: none;
+  border-color: var(--fg-accent);
+  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.1);
+}
+
+.fg-select-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fg-select-chevron {
+  color: var(--fg-text-muted);
+  transition: transform var(--fg-duration-fast) var(--fg-ease);
+}
+
+.fg-select-chevron svg {
+  width: 13px;
+  height: 13px;
+}
+
+.fg-select-trigger[aria-expanded="true"] .fg-select-chevron {
+  transform: rotate(180deg);
+}
+
+.fg-select-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 5px;
+  background: var(--fg-surface-3);
+  border: 1px solid var(--fg-border-strong);
+  border-radius: var(--fg-radius-md);
+  box-shadow: var(--fg-shadow-lg);
+  z-index: var(--fg-z-dropdown);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.fg-select-menu.hidden {
+  display: none;
+}
+
+.fg-select-item {
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--fg-radius-sm);
+  color: var(--fg-text-secondary);
+  font-size: var(--fg-text-sm);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--fg-duration-fast) var(--fg-ease), color var(--fg-duration-fast) var(--fg-ease);
+}
+
+.fg-select-item:hover,
+.fg-select-item:focus-visible {
+  background: var(--fg-surface-hover);
+  color: var(--fg-text);
+  outline: none;
+}
+
+.fg-select-item.is-selected {
+  background: var(--fg-accent-subtle);
+  color: var(--fg-accent);
+  font-weight: var(--fg-weight-medium);
+}
+
+/* ---------- Files toolbar fit ----------
+   Search takes the slack; every other control keeps an intrinsic width so the
+   row never compresses the controls. */
+/* Wrap rather than clip. A nowrap + overflow-x row silently cut the last
+   control off at 1366px; wrapping keeps every control reachable at any width. */
+#files-toolbar {
+  flex-wrap: wrap !important;
+  overflow: visible !important;
+  gap: 8px !important;
+  row-gap: 8px !important;
+}
+
+#files-toolbar .search-box.fg-field {
+  flex: 1 1 220px !important;
+  min-width: 180px !important;
+  max-width: 320px !important;
+}
+
+#files-toolbar #file-sort,
+#files-toolbar #search-whole {
+  flex: 0 0 auto !important;
+}
+
+#file-range-tools {
+  flex: 0 0 auto !important;
+  gap: 6px !important;
+}
+
+/* No auto margin: inside a nowrap, horizontally scrollable row an auto margin
+   pushes the control past the visible edge. */
+.fg-toolbar-select-all {
+  flex: 0 0 auto !important;
+  margin: 0 !important;
+  height: 32px !important;
+  padding: 0 12px !important;
+  background: var(--fg-surface-2) !important;
+  border: 1px solid var(--fg-border) !important;
+  border-radius: var(--fg-radius-sm) !important;
+  color: var(--fg-text-secondary) !important;
+  font-size: var(--fg-text-sm) !important;
+  white-space: nowrap !important;
+}
+
+.fg-toolbar-select-all:hover:not(:disabled) {
+  background: var(--fg-surface-hover) !important;
+  color: var(--fg-text) !important;
+  border-color: var(--fg-border-strong) !important;
+}
+
+/* ---------- Statistics card ----------
+   One cohesive panel: three metric columns with restrained dividers, then the
+   Total in the lower section of the SAME card. */
+#tele-ui-download-summary.fg-stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 0 !important;
+  padding: 0 !important;
+  margin: 12px 14px 0 !important;
+  background: var(--fg-surface-1) !important;
+  border: 1px solid var(--fg-border) !important;
+  border-radius: var(--fg-radius-md) !important;
+  overflow: hidden !important;
+}
+
+#tele-ui-download-summary.fg-stats > div {
+  padding: 11px 10px 9px !important;
+  border-right: 1px solid var(--fg-border) !important;
+  align-items: flex-start !important;
+  gap: 3px !important;
+}
+
+#tele-ui-download-summary.fg-stats > div:has([data-stat="remaining"]) {
+  border-right: none !important;
+}
+
+#tele-ui-download-summary.fg-stats .fg-spark {
+  grid-column: 1 / -1;
+  height: 16px;
+  margin: 0;
+  padding: 0 10px 8px;
+  border-top: none;
+}
+
+.fg-stats-total {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px 10px;
+  border-top: 1px solid var(--fg-border);
+  background: var(--fg-surface-0);
+}
+
+.fg-stats-total > span {
+  font-size: 9px;
+  color: var(--fg-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: var(--fg-weight-medium);
+}
+
+.fg-stats-total > strong {
+  font-size: var(--fg-text-base);
+  font-weight: var(--fg-weight-bold);
+  color: var(--fg-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Parallel files row ---------- */
+.dl-controls .conc:has(#concurrency) {
+  gap: 6px !important;
+  padding-top: 4px !important;
+  border-top: 1px solid var(--fg-border) !important;
+}
+
+.dl-controls .conc:has(#concurrency) > span:first-child {
+  text-align: left !important;
+  align-self: flex-start !important;
+}
+
+.dl-controls .conc:has(#concurrency) > .row {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) 28px !important;
+  align-items: center !important;
+  gap: 12px !important;
+}
+
+#concurrency-val {
+  justify-self: end !important;
+  text-align: right !important;
+}
+
+/* ---------- Chat filter summary + empty state ---------- */
+#fg-filter-summary {
+  margin-left: auto;
+  font-size: var(--fg-text-xs);
+  color: var(--fg-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fg-chat-empty {
+  padding: var(--fg-space-5) var(--fg-space-4);
+  text-align: center;
+  font-size: var(--fg-text-sm);
+  color: var(--fg-text-muted);
+}
+
+.fg-chat-empty[hidden] {
+  display: none;
+}
+
+/* ---------- Drawer tabs: equal height, clear selected state ---------- */
+.mg-drawer-tabs {
+  gap: 0 !important;
+  padding: 0 12px !important;
+  border-bottom: 1px solid var(--fg-border) !important;
+}
+
+.mg-drawer-tab {
+  height: 42px !important;
+  border-radius: 0 !important;
+}
+
+.mg-drawer-tab.active::after {
+  left: 0 !important;
+  right: 0 !important;
+}
+
+/* ---------- Messages / Files mutual exclusion ----------
+   Belt-and-braces on top of setView: whichever panel carries .hidden is out,
+   and neither is positioned, so they can never overlap. */
+#messages.hidden {
+  display: none !important;
+}
+
+#messages:not(.hidden) {
+  display: flex !important;
+}
+
+#messages,
+#media-grid {
+  position: relative !important;
+  inset: auto !important;
+}
+
+/* ---------- Pagination footer ----------
+   One row at the foot of the workspace: status left, navigation centred,
+   page-size right. All pager children stay inside the pager element because
+   files-view.js re-queries them from it on every update. */
+/* :not(.hidden) is load-bearing for the same reason as #media-grid: an
+   unqualified id+class selector (1,1,0) outranks .hidden (0,1,0) even with
+   !important, which would pin the pager visible in the Messages view. */
+#filegram-file-pager.fg-pager-foot:not(.hidden) {
+  display: grid !important;
+  grid-template-columns: 1fr auto 1fr !important;
+  align-items: center !important;
+  gap: 14px !important;
+  padding: 9px 16px !important;
+  border-top: 1px solid var(--fg-border) !important;
+  border-bottom: none !important;
+  margin-top: 0 !important;
+}
+
+#filegram-file-pager.hidden {
+  display: none !important;
+}
+
+#filegram-file-pager.fg-pager-foot .filegram-page-summary {
+  grid-column: 1 !important;
+  justify-self: start !important;
+  text-align: left !important;
+}
+
+#filegram-file-pager.fg-pager-foot .filegram-page-nav {
+  grid-column: 2 !important;
+  justify-self: center !important;
+}
+
+#filegram-file-pager.fg-pager-foot .filegram-page-size {
+  grid-column: 3 !important;
+  justify-self: end !important;
+}
+
+/* Direct page entry stays available but is visually secondary; first/last are
+   redundant next to it, so they are dropped from the footer. */
+#filegram-file-pager.fg-pager-foot [data-page-action="first"],
+#filegram-file-pager.fg-pager-foot [data-page-action="last"] {
+  display: none !important;
+}
+
+#filegram-file-pager.fg-pager-foot .filegram-page-nav {
+  gap: 12px !important;
+}
+
+#filegram-file-pager.fg-pager-foot .fg-page-prev,
+#filegram-file-pager.fg-pager-foot .fg-page-next {
+  min-width: 96px !important;
+  justify-content: center !important;
 }
