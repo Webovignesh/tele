@@ -3,9 +3,12 @@
 /* Keep the login screen synchronized with TDLib even when the authorization
  * transition happened before the browser websocket connected. Also owns the
  * small session UX: India-first phone input, explicit logout, FileGram branding,
- * and early loading of the final Files stability owner.
+ * persisted download destination display, and early loading of the final Files
+ * stability/page owners.
  */
 ;(function fileGramAuthStateFix () {
+  const DOWNLOAD_DIR_STORAGE_KEY = 'filegram-download-dir-v1'
+
   function applyBrand () {
     document.title = 'FileGram'
     document.querySelectorAll('#login-screen h1, #config-screen h1').forEach(el => { el.textContent = 'FileGram' })
@@ -86,6 +89,31 @@
     return ''
   }
 
+  function rememberDownloadDir (dir) {
+    const value = String(dir || '').trim()
+    if (!value) return
+    try { localStorage.setItem(DOWNLOAD_DIR_STORAGE_KEY, value) } catch {}
+  }
+
+  function restoreDownloadDirHint () {
+    let value = ''
+    try { value = localStorage.getItem(DOWNLOAD_DIR_STORAGE_KEY) || '' } catch {}
+    if (!value) return
+    const input = document.querySelector('#dl-dir')
+    const current = document.querySelector('#dl-dir-current')
+    if (input && !input.value) input.value = value
+    if (current && !current.textContent) {
+      current.textContent = `Saving to: ${value}`
+      current.title = value
+    }
+  }
+
+  const originalSetDirLabel = setDirLabel
+  setDirLabel = function fileGramSetDirLabel (dir) {
+    originalSetDirLabel(dir)
+    rememberDownloadDir(dir)
+  }
+
   function installLogout () {
     if (document.querySelector('#tele-logout')) return
     const head = document.querySelector('.sidebar-head')
@@ -142,7 +170,7 @@
     }
     if (!document.querySelector('script[data-filegram-files-view]')) {
       const view = document.createElement('script')
-      view.src = 'files-view.js?v=1'
+      view.src = 'files-view.js?v=2'
       view.dataset.filegramFilesView = '1'
       document.body.appendChild(view)
     }
@@ -232,6 +260,7 @@
   applyStatus = function fileGramApplyStatus (data) {
     applyBrand()
     originalApplyStatus(data)
+    if (data && data.downloadsDir) rememberDownloadDir(data.downloadsDir)
     if (data && data.status === 'ready') installLogout()
     if (!data || data.status !== 'waiting-input') return
     const kind = promptForAuthState(data.authState)
@@ -246,10 +275,12 @@
   }
 
   applyBrand()
+  restoreDownloadDirHint()
   rebindLoginSubmit()
   scheduleFinalStabilityLayer()
   queueMicrotask(() => {
     installLogout()
+    restoreDownloadDirHint()
     rebindLoginSubmit()
     if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) request('get-status').then(applyStatus).catch(() => {})
   })
