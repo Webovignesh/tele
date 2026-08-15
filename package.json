@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node -r ./tdl-upload-compat.js -r ./download-dedupe-preload.js -r ./thumb-cache-preload.js server.js",
-    "check": "node --check tdl-upload-compat.js && node --check download-dedupe-preload.js && node --check thumb-cache-preload.js && node --check server.js && node --check public/app.js && node --check public/rescue-runtime.js && node --check public/management.js && node --check public/telegram-daily-driver.js && node --check public/daily-driver-hotfix.js && node --check public/daily-driver-p0-v2.js && node --check public/daily-driver-p1.js && node --check public/daily-driver-p2.js && node --check public/daily-driver-final.js && node --check public/daily-driver-final-guard.js && node --check public/daily-driver-final-ui-fix.js && node --check public/telegram-daily-driver-v3.js",
+    "check": "node --check tdl-upload-compat.js && node --check download-dedupe-preload.js && node --check thumb-cache-preload.js && node --check server.js && node --check public/app.js && node --check public/rescue-runtime.js && node --check public/management.js && node --check public/telegram-daily-driver.js && node --check public/daily-driver-hotfix.js && node --check public/daily-driver-p0-v2.js && node --check public/daily-driver-p1.js && node --check public/daily-driver-p2.js && node --check public/daily-driver-final.js && node --check public/daily-driver-final-guard.js && node --check public/daily-driver-final-ui-fix.js",
     "test": "node scripts/rescue-smoke.test.cjs && node scripts/p0-smoke.test.cjs && node scripts/p1-smoke.test.cjs && node scripts/p2-smoke.test.cjs && node scripts/final-smoke.test.cjs",
     "verify": "npm run check && npm test"
   },
