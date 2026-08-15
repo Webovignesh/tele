@@ -455,6 +455,38 @@ li.chat-item {
   align-items: center;
   gap: var(--fg-space-3);
   min-width: 0;
+  flex: 1;
+}
+
+/* Chat header avatar */
+.fg-chat-avatar,
+#fg-chat-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--fg-radius-full);
+  background: var(--fg-surface-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-semibold);
+  color: #fff;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.fg-chat-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--fg-radius-full);
+}
+
+.fg-chat-identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
 }
 
 .chat-title-box h3,
@@ -466,6 +498,7 @@ li.chat-item {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.3;
 }
 
 #chat-media-count {
@@ -1158,12 +1191,32 @@ button:disabled {
   background: var(--fg-accent);
   color: var(--fg-text-inverse);
   font-weight: var(--fg-weight-semibold);
+  font-size: var(--fg-text-sm);
   border-radius: var(--fg-radius-sm);
+  border: none;
 }
 
 #download-all-media:hover:not(:disabled),
 #download-selected:hover:not(:disabled) {
   background: var(--fg-accent-hover);
+}
+
+/* Chat info button in header */
+#mg-open-info {
+  height: 32px;
+  padding: 0 var(--fg-space-3);
+  background: var(--fg-surface-2);
+  color: var(--fg-text-secondary);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-medium);
+}
+
+#mg-open-info:hover {
+  background: var(--fg-surface-hover);
+  color: var(--fg-text);
+  border-color: var(--fg-border-strong);
 }
 
 /* Ghost buttons */
