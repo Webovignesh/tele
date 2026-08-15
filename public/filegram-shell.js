@@ -19,7 +19,6 @@
     if (!chat) return
     container.style.background = avatarColor(chat.title || '')
     const photoFileId = Number(chat.photoFileId || 0)
-    // Reuse existing image if same photo
     const existing = container.querySelector('img')
     if (existing && existing.dataset.photoId === String(photoFileId)) return
     container.innerHTML = ''
@@ -37,11 +36,33 @@
     container.appendChild(img)
   }
 
-  // Hook into openChat via a PostToolUse-like pattern: watch #chat-title for changes
   const titleEl = document.querySelector('#chat-title')
   if (titleEl) {
     new MutationObserver(updateHeaderAvatar).observe(titleEl, { childList: true, characterData: true, subtree: true })
   }
-  // Also fire on initial load
   setTimeout(updateHeaderAvatar, 100)
+
+  /* ---- Account name sync ---- */
+  function syncAccountName () {
+    const userEl = document.querySelector('#user-name')
+    const accountEl = document.querySelector('#fg-account-name')
+    if (userEl && accountEl) {
+      const name = userEl.textContent || ''
+      if (name && name !== 'you') accountEl.textContent = name
+    }
+  }
+  const userEl = document.querySelector('#user-name')
+  if (userEl) {
+    new MutationObserver(syncAccountName).observe(userEl, { childList: true, characterData: true, subtree: true })
+  }
+  setTimeout(syncAccountName, 500)
+
+  /* ---- Account menu (⋮) triggers logout ---- */
+  const menuBtn = document.querySelector('.fg-account-menu')
+  if (menuBtn) {
+    menuBtn.addEventListener('click', () => {
+      const logout = document.querySelector('#tele-logout')
+      if (logout) logout.click()
+    })
+  }
 })()
