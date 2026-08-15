@@ -1,5 +1,5 @@
 {
-  "name": "tele-scraper",
+  "name": "filegram",
   "version": "1.0.0",
   "description": "Local Telegram media browser and download manager powered by TDLib.",
   "main": "server.js",
