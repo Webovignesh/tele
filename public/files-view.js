@@ -1,46 +1,60 @@
 'use strict'
 
-/* FileGram Files viewport owner.
+/* FileGram Files page owner.
  *
- * The index is owned by files-stability.js. This file owns only presentation:
- * - one fixed-height virtual canvas represents the full filtered result set;
- * - only visible rows are mounted, so 40k+ files remain cheap to scroll;
- * - chat revisits reuse the already-warm in-memory index instead of re-running
- *   the expensive restore path on every switch;
- * - range/shift/drag selection uses global result indexes, not DOM children.
- *
- * It deliberately replaces #media-grid once after the stability index is ready.
- * That removes the older competing scroll/drag listeners while leaving Messages
- * and the rest of the application DOM untouched.
+ * The persistent index is owned by files-stability.js. This file owns only the
+ * visible Files workspace:
+ * - exactly 100 derived entries per page;
+ * - filters/search/sort are applied to the complete committed index before the
+ *   page slice is taken;
+ * - only the current page is mounted, so a 40k-file chat never creates a 40k
+ *   DOM or a giant synthetic scroll surface;
+ * - thumbnails are requested lazily only when their rows approach the viewport;
+ * - warm indexes are reused immediately when switching chats;
+ * - hidden Messages content is not repainted while the Files tab is active;
+ * - selection remains global across pages and shift/range selection still uses
+ *   indexes in the complete filtered result set.
  */
-;(function fileGramFilesView () {
-  const ROW_HEIGHT = 84
-  const CARD_HEIGHT = 72
-  const OVERSCAN = 12
-  const EDGE_SCROLL = 68
+;(function fileGramFilesPages () {
+  const PAGE_SIZE = 100
   const BACKGROUND_RECONCILE_MS = 5 * 60 * 1000
 
   let grid = null
-  let canvas = null
+  let pager = null
+  let pagerSummary = null
+  let pageInput = null
+  let pageTotal = null
+  let prevButton = null
+  let nextButton = null
+  let firstButton = null
+  let lastButton = null
   let renderFrame = 0
   let cacheKey = ''
+  let cacheStamp = ''
   let cacheItems = []
-  let cacheCount = -1
+  let cacheSourceTotal = 0
   let cacheRevision = 0
   let renderedRevision = -1
-  let renderedStart = -1
-  let renderedEnd = -1
-  let renderedKey = ''
+  let renderedPage = -1
   let drag = null
   let suppressClickUntil = 0
 
-  const warmChats = new Set()
+  const pageByView = new Map()
   const lastBackgroundReconcile = new Map()
+  const observedThumbs = new Set()
+  const thumbTargets = new WeakMap()
+
+  const baseLoadThumb = typeof loadThumb === 'function' ? loadThumb : null
+  const baseRenderMessagesList = typeof renderMessagesList === 'function' ? renderMessagesList : null
 
   function idOf (value) { return String(value) }
+  function itemKey (item) { return item ? `${item.chatId}:${item.messageId}` : '' }
 
-  function itemKey (item) {
-    return item ? `${item.chatId}:${item.messageId}` : ''
+  function compareIds (a, b) {
+    let aa = 0n; let bb = 0n
+    try { aa = BigInt(String(a || 0)) } catch {}
+    try { bb = BigInt(String(b || 0)) } catch {}
+    return aa === bb ? 0 : (aa < bb ? -1 : 1)
   }
 
   function currentViewKey () {
@@ -53,103 +67,223 @@
     ].join('|')
   }
 
-  function sourceCount () {
-    if (!state.files) return 0
-    if (state.files.mode === 'search') return Array.isArray(state.files.results) ? state.files.results.length : 0
-    if (state.activeChatId == null || !window.teleFilesIndex) return 0
-    return Number(window.teleFilesIndex.count(state.activeChatId) || 0)
+  function activeSnapshot () {
+    if (state.activeChatId == null) return null
+    try {
+      if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.get) {
+        const snapshot = rescueFileCache.get(idOf(state.activeChatId))
+        if (snapshot && Array.isArray(snapshot.items)) return snapshot
+      }
+    } catch {}
+    return null
+  }
+
+  function sourceStamp () {
+    if (!state.files) return 'none'
+    if (state.files.mode === 'search') {
+      const results = Array.isArray(state.files.results) ? state.files.results : []
+      return `search:${results.length}:${state.files.totalCount || 0}:${state.files.fromMessageId || 0}`
+    }
+    const snapshot = activeSnapshot()
+    if (!snapshot) return 'browse:0:0'
+    return `browse:${snapshot.items.length}:${Number(snapshot.savedAt || 0)}`
+  }
+
+  function trimPageMemory () {
+    while (pageByView.size > 48) pageByView.delete(pageByView.keys().next().value)
+  }
+
+  function getPage (viewKey = currentViewKey ()) {
+    return Math.max(1, Number(pageByView.get(viewKey) || 1))
+  }
+
+  function setPage (page, viewKey = currentViewKey ()) {
+    pageByView.set(viewKey, Math.max(1, Math.floor(Number(page) || 1)))
+    trimPageMemory()
   }
 
   function installStyles () {
-    if (document.querySelector('#filegram-files-view-style')) return
+    if (document.querySelector('#filegram-files-pages-style')) return
     const style = document.createElement('style')
-    style.id = 'filegram-files-view-style'
+    style.id = 'filegram-files-pages-style'
     style.textContent = `
-      #media-grid[data-filegram-view="1"]{display:block;position:relative;overflow-y:auto;overflow-x:hidden;padding:0!important;contain:strict;overflow-anchor:none}
-      #media-grid[data-filegram-view="1"] .filegram-files-canvas{position:relative;width:100%;min-height:100%}
-      #media-grid[data-filegram-view="1"] .filegram-files-slot{position:absolute;left:18px;right:18px;height:${CARD_HEIGHT}px}
-      #media-grid[data-filegram-view="1"] .filegram-files-slot>.gcard{height:${CARD_HEIGHT}px;min-height:${CARD_HEIGHT}px;max-height:${CARD_HEIGHT}px;transform:none!important}
-      #media-grid[data-filegram-view="1"] .filegram-files-slot>.gcard:hover{transform:none!important}
-      #media-grid[data-filegram-view="1"] .filegram-drag-band{position:absolute;left:12px;right:12px;border:1px dashed var(--accent);background:rgba(56,132,255,.13);border-radius:7px;pointer-events:none;z-index:50}
+      #media-grid[data-filegram-pages="1"]{display:flex;flex-direction:column;gap:8px;overflow-y:auto;overflow-x:hidden;overflow-anchor:none;contain:layout paint style;padding:12px 18px 18px!important}
+      #media-grid[data-filegram-pages="1"]>.gcard{flex:0 0 auto;transform:none!important}
+      #media-grid[data-filegram-pages="1"]>.gcard:hover{transform:none!important}
+      .filegram-file-pager{display:flex;align-items:center;gap:8px;min-height:44px;padding:6px 16px;border-bottom:1px solid var(--border,#26384a);background:var(--panel,#101923);color:var(--muted,#8294a8);font-size:12px}
+      .filegram-file-pager.hidden{display:none!important}
+      .filegram-file-pager .filegram-page-summary{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+      .filegram-file-pager .filegram-page-nav{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+      .filegram-file-pager button{min-width:34px;height:30px;padding:0 9px}
+      .filegram-file-pager input{width:58px;height:30px;padding:0 7px;text-align:center;font-variant-numeric:tabular-nums}
+      .filegram-file-pager .filegram-page-of{min-width:42px;text-align:left;white-space:nowrap;font-variant-numeric:tabular-nums}
+      .filegram-file-pager .filegram-page-size{white-space:nowrap;color:var(--muted,#8294a8)}
+      @media(max-width:900px){.filegram-file-pager .filegram-page-size{display:none}.filegram-file-pager{padding-inline:10px}}
     `
     document.head.appendChild(style)
+  }
+
+  function installPager () {
+    const toolbar = document.querySelector('#files-toolbar')
+    if (!toolbar) return false
+    pager = document.querySelector('#filegram-file-pager')
+    if (!pager) {
+      pager = document.createElement('div')
+      pager.id = 'filegram-file-pager'
+      pager.className = 'filegram-file-pager'
+      pager.innerHTML = `
+        <span class="filegram-page-summary">0 files</span>
+        <span class="filegram-page-size">100 / page</span>
+        <span class="filegram-page-nav">
+          <button type="button" class="ghost small" data-page-action="first" title="First page">«</button>
+          <button type="button" class="ghost small" data-page-action="prev" title="Previous page">‹</button>
+          <input type="number" min="1" step="1" value="1" aria-label="Files page">
+          <span class="filegram-page-of">/ 1</span>
+          <button type="button" class="ghost small" data-page-action="next" title="Next page">›</button>
+          <button type="button" class="ghost small" data-page-action="last" title="Last page">»</button>
+        </span>`
+      toolbar.insertAdjacentElement('afterend', pager)
+    }
+    pagerSummary = pager.querySelector('.filegram-page-summary')
+    pageInput = pager.querySelector('input')
+    pageTotal = pager.querySelector('.filegram-page-of')
+    firstButton = pager.querySelector('[data-page-action="first"]')
+    prevButton = pager.querySelector('[data-page-action="prev"]')
+    nextButton = pager.querySelector('[data-page-action="next"]')
+    lastButton = pager.querySelector('[data-page-action="last"]')
+
+    if (pager.dataset.filegramBound !== '1') {
+      pager.dataset.filegramBound = '1'
+      firstButton.onclick = () => goToPage(1)
+      prevButton.onclick = () => goToPage(getPage() - 1)
+      nextButton.onclick = () => goToPage(getPage() + 1)
+      lastButton.onclick = () => goToPage(pageCount(cacheItems.length))
+      pageInput.addEventListener('change', () => goToPage(pageInput.value))
+      pageInput.addEventListener('keydown', event => {
+        if (event.key !== 'Enter') return
+        event.preventDefault()
+        goToPage(pageInput.value)
+      })
+    }
+    pager.classList.toggle('hidden', state.view !== 'files')
+    return true
+  }
+
+  function cleanupObservedThumbs () {
+    if (!window.__fileGramThumbObserver) return
+    for (const target of observedThumbs) window.__fileGramThumbObserver.unobserve(target)
+    observedThumbs.clear()
+  }
+
+  function installLazyThumbOwner () {
+    if (!baseLoadThumb || window.__fileGramLazyThumbInstalled) return
+    window.__fileGramLazyThumbInstalled = true
+    if (!('IntersectionObserver' in window)) return
+
+    window.__fileGramThumbObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const payload = thumbTargets.get(entry.target)
+        window.__fileGramThumbObserver.unobserve(entry.target)
+        observedThumbs.delete(entry.target)
+        if (!payload) continue
+        baseLoadThumb(payload.img, payload.item)
+      }
+    }, { root: null, rootMargin: '320px 0px', threshold: 0.01 })
+
+    loadThumb = function fileGramLazyLoadThumb (img, item) {
+      if (!img || !item || item.thumbUrl || !item.thumbFileId) return baseLoadThumb(img, item)
+      const target = img.parentElement || img
+      target.dataset.filegramThumbTarget = '1'
+      thumbTargets.set(target, { img, item })
+      observedThumbs.add(target)
+      window.__fileGramThumbObserver.observe(target)
+    }
   }
 
   function installGridOwner () {
     const existing = document.querySelector('#media-grid')
     if (!existing) return false
-    if (existing.dataset.filegramView === '1') {
+    if (existing.dataset.filegramPages === '1') {
       grid = existing
-      canvas = existing.querySelector('.filegram-files-canvas')
-      return !!canvas
+      return true
     }
 
     const next = existing.cloneNode(false)
-    next.dataset.filegramView = '1'
+    next.dataset.filegramPages = '1'
     existing.replaceWith(next)
     grid = next
-
-    canvas = document.createElement('div')
-    canvas.className = 'filegram-files-canvas'
-    grid.appendChild(canvas)
-
-    grid.addEventListener('scroll', () => {
-      scheduleRender(false)
-      if (state.files && state.files.mode === 'search' && state.files.hasMore && !state.files.searching) {
-        const nearEnd = grid.scrollTop + grid.clientHeight >= grid.scrollHeight - ROW_HEIGHT * 4
-        if (nearEnd && typeof loadSearchMore === 'function') loadSearchMore()
-      }
-    }, { passive: true })
-
     grid.addEventListener('mousedown', startDrag, { capture: true })
     return true
   }
 
-  function viewItems (force) {
+  function deriveItems (force = false) {
     const nextKey = currentViewKey()
-    const nextCount = sourceCount()
-    if (!force && cacheKey === nextKey && cacheCount === nextCount) return cacheItems
+    const nextStamp = sourceStamp()
+    if (!force && cacheKey === nextKey && cacheStamp === nextStamp) return cacheItems
 
-    const sameView = cacheKey === nextKey
-    let anchorKey = ''
-    let anchorOffset = 0
-    if (sameView && grid && cacheItems.length) {
-      const oldIndex = Math.max(0, Math.min(cacheItems.length - 1, Math.floor(grid.scrollTop / ROW_HEIGHT)))
-      anchorKey = itemKey(cacheItems[oldIndex])
-      anchorOffset = grid.scrollTop - oldIndex * ROW_HEIGHT
+    let source
+    if (state.files && state.files.mode === 'search') {
+      source = Array.isArray(state.files.results) ? state.files.results : []
+    } else {
+      const snapshot = activeSnapshot()
+      source = snapshot && Array.isArray(snapshot.items) ? snapshot.items : []
+    }
+    cacheSourceTotal = source.length
+
+    const query = String(state.files && state.files.query || '').trim().toLowerCase()
+    const filter = String(state.files && state.files.filter || 'all')
+    const sort = String(state.files && state.files.sort || 'newest')
+    let next = source
+
+    if (query) {
+      next = next.filter(item => String(item && item.name || '').toLowerCase().includes(query) || String(item && item.caption || '').toLowerCase().includes(query))
+    }
+    if (filter !== 'all') {
+      next = next.filter(item => String(item && item.type || '') === filter)
     }
 
-    const next = typeof filesItems === 'function' ? filesItems() : []
+    if (sort === 'oldest') next = next.slice().reverse()
+    else if (sort === 'name') next = next.slice().sort((a, b) => String(a && a.name || '').localeCompare(String(b && b.name || '')))
+    else if (sort === 'size') next = next.slice().sort((a, b) => Number(b && b.fileSize || 0) - Number(a && a.fileSize || 0))
+    else if (state.files && state.files.mode === 'search') next = next.slice().sort((a, b) => compareIds(b && b.messageId, a && a.messageId))
+
+    const changedView = cacheKey !== nextKey
     cacheKey = nextKey
-    cacheCount = nextCount
-    cacheItems = Array.isArray(next) ? next : []
+    cacheStamp = nextStamp
+    cacheItems = next
     cacheRevision++
 
-    if (sameView && anchorKey && grid) {
-      const newIndex = cacheItems.findIndex(item => itemKey(item) === anchorKey)
-      if (newIndex >= 0) grid.scrollTop = Math.max(0, newIndex * ROW_HEIGHT + anchorOffset)
-    } else if (!sameView && grid) {
-      grid.scrollTop = 0
-    }
-
-    const selectAll = document.querySelector('#select-all-media')
-    if (selectAll) {
-      selectAll.textContent = cacheItems.length ? `Select all (${cacheItems.length.toLocaleString()})` : 'Select all'
-      selectAll.disabled = cacheItems.length === 0
-    }
-    try {
-      if (typeof rescueUpdateRangeControls === 'function') rescueUpdateRangeControls(cacheItems.length)
-    } catch {}
+    if (changedView && !pageByView.has(nextKey)) setPage(1, nextKey)
+    const pages = pageCount(cacheItems.length)
+    if (getPage(nextKey) > pages) setPage(pages, nextKey)
 
     return cacheItems
   }
 
-  function activeIndexByKey (key) {
-    if (!key) return -1
-    for (let index = 0; index < cacheItems.length; index++) {
-      if (itemKey(cacheItems[index]) === key) return index
-    }
-    return -1
+  function pageCount (total) {
+    return Math.max(1, Math.ceil(Math.max(0, Number(total) || 0) / PAGE_SIZE))
+  }
+
+  function updatePager (items) {
+    if (!installPager()) return
+    const total = items.length
+    const pages = pageCount(total)
+    const page = Math.min(pages, getPage())
+    if (page !== getPage()) setPage(page)
+    const start = total ? (page - 1) * PAGE_SIZE + 1 : 0
+    const end = Math.min(total, page * PAGE_SIZE)
+    const filtered = total !== cacheSourceTotal
+    pagerSummary.textContent = filtered
+      ? `${start.toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()} matching · ${cacheSourceTotal.toLocaleString()} total`
+      : `${start.toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()} files`
+    pageInput.value = String(page)
+    pageInput.max = String(pages)
+    pageTotal.textContent = `/ ${pages.toLocaleString()}`
+    firstButton.disabled = page <= 1
+    prevButton.disabled = page <= 1
+    nextButton.disabled = page >= pages
+    lastButton.disabled = page >= pages
   }
 
   function updateVisibleSelection () {
@@ -160,6 +294,14 @@
       const checkbox = card.querySelector('input[type="checkbox"]')
       if (checkbox) checkbox.checked = selected
     }
+  }
+
+  function activeIndexByKey (key) {
+    if (!key) return -1
+    for (let index = 0; index < cacheItems.length; index++) {
+      if (itemKey(cacheItems[index]) === key) return index
+    }
+    return -1
   }
 
   function selectGlobalRange (from, to) {
@@ -173,13 +315,8 @@
     updateSelectionBar()
   }
 
-  function buildSlot (item, index) {
-    const slot = document.createElement('div')
-    slot.className = 'filegram-files-slot'
-    slot.dataset.index = String(index)
-    slot.style.top = `${index * ROW_HEIGHT + 6}px`
-
-    const card = buildGridCard(item)
+  function decorateCard (card, item, globalIndex) {
+    card.dataset.globalIndex = String(globalIndex)
     card.onclick = event => {
       if (Date.now() < suppressClickUntil) return
       if (event.target.closest('input,button,a,select')) return
@@ -187,7 +324,7 @@
       if (event.shiftKey && typeof lastClickedKey !== 'undefined' && lastClickedKey) {
         const previous = activeIndexByKey(lastClickedKey)
         if (previous >= 0) {
-          selectGlobalRange(previous, index)
+          selectGlobalRange(previous, globalIndex)
           return
         }
       }
@@ -197,44 +334,50 @@
       updateVisibleSelection()
       updateSelectionBar()
     }
-    slot.appendChild(card)
-    return slot
+    return card
   }
 
-  function renderNow (force) {
-    if (!installGridOwner()) return
-    const items = viewItems(force)
-    const viewKey = currentViewKey()
-    const viewport = Math.max(300, grid.clientHeight || 600)
-    const firstVisible = Math.max(0, Math.floor(grid.scrollTop / ROW_HEIGHT))
-    const start = Math.max(0, firstVisible - OVERSCAN)
-    const end = Math.min(items.length, firstVisible + Math.ceil(viewport / ROW_HEIGHT) + OVERSCAN)
+  function renderNow (force = false) {
+    if (!installGridOwner() || !installPager()) return
+    const items = deriveItems(force)
+    const pages = pageCount(items.length)
+    const page = Math.min(pages, getPage())
+    if (page !== getPage()) setPage(page)
 
-    canvas.style.height = `${Math.max(viewport, items.length * ROW_HEIGHT + 18)}px`
-
-    if (!force && renderedKey === viewKey && renderedRevision === cacheRevision && renderedStart === start && renderedEnd === end) {
+    if (!force && renderedRevision === cacheRevision && renderedPage === page) {
+      updatePager(items)
       updateVisibleSelection()
       return
     }
-
-    renderedKey = viewKey
     renderedRevision = cacheRevision
-    renderedStart = start
-    renderedEnd = end
+    renderedPage = page
 
+    cleanupObservedThumbs()
+    const start = (page - 1) * PAGE_SIZE
+    const end = Math.min(items.length, start + PAGE_SIZE)
     const fragment = document.createDocumentFragment()
-    for (let index = start; index < end; index++) fragment.appendChild(buildSlot(items[index], index))
-    if (drag && drag.band) fragment.appendChild(drag.band)
-    canvas.replaceChildren(fragment)
+    for (let index = start; index < end; index++) {
+      const item = items[index]
+      fragment.appendChild(decorateCard(buildGridCard(item), item, index))
+    }
+    grid.replaceChildren(fragment)
+    grid.scrollTop = 0
+
+    const selectAll = document.querySelector('#select-all-media')
+    if (selectAll) {
+      selectAll.textContent = items.length ? `Select all (${items.length.toLocaleString()})` : 'Select all'
+      selectAll.disabled = items.length === 0
+    }
+    try {
+      if (typeof rescueUpdateRangeControls === 'function') rescueUpdateRangeControls(items.length)
+    } catch {}
+    updatePager(items)
     updateVisibleSelection()
   }
 
-  function scheduleRender (force) {
+  function scheduleRender (force = false) {
     if (!installGridOwner()) return
-    if (force) {
-      cacheCount = -1
-      renderedRevision = -1
-    }
+    if (force) renderedRevision = -1
     if (renderFrame) return
     renderFrame = requestAnimationFrame(() => {
       renderFrame = 0
@@ -242,83 +385,57 @@
     })
   }
 
-  function indexAtClientY (clientY) {
-    if (!grid || !cacheItems.length) return -1
-    const rect = grid.getBoundingClientRect()
-    const y = grid.scrollTop + Math.max(0, Math.min(rect.height - 1, clientY - rect.top))
-    return Math.max(0, Math.min(cacheItems.length - 1, Math.floor(y / ROW_HEIGHT)))
-  }
-
-  function addIndexToSelection (index) {
-    const item = cacheItems[index]
-    if (item) state.selection.set(itemKey(item), item)
-  }
-
-  function removeIndexFromSelection (index, baseSelected) {
-    const item = cacheItems[index]
-    if (!item) return
-    const key = itemKey(item)
-    if (!baseSelected.has(key)) state.selection.delete(key)
-  }
-
-  function applyDragRange (lo, hi) {
-    if (!drag || lo < 0 || hi < 0) return
-    if (drag.lastLo < 0) {
-      for (let index = lo; index <= hi; index++) addIndexToSelection(index)
-    } else {
-      if (lo < drag.lastLo) for (let index = lo; index < drag.lastLo; index++) addIndexToSelection(index)
-      if (hi > drag.lastHi) for (let index = drag.lastHi + 1; index <= hi; index++) addIndexToSelection(index)
-      if (lo > drag.lastLo) for (let index = drag.lastLo; index < lo; index++) removeIndexFromSelection(index, drag.baseSelected)
-      if (hi < drag.lastHi) for (let index = hi + 1; index <= drag.lastHi; index++) removeIndexFromSelection(index, drag.baseSelected)
+  function goToPage (requested) {
+    const items = deriveItems(false)
+    const pages = pageCount(items.length)
+    const page = Math.max(1, Math.min(pages, Math.floor(Number(requested) || 1)))
+    if (page === getPage() && renderedRevision === cacheRevision) {
+      updatePager(items)
+      return
     }
-    drag.lastLo = lo
-    drag.lastHi = hi
+    setPage(page)
+    renderedPage = -1
+    scheduleRender(false)
+  }
+
+  function cardIndexFromPoint (x, y) {
+    const node = document.elementFromPoint(x, y)
+    const card = node && node.closest ? node.closest('#media-grid .gcard[data-global-index]') : null
+    if (!card) return -1
+    return Number(card.dataset.globalIndex)
+  }
+
+  function applyDragRange (currentIndex) {
+    if (!drag || currentIndex < 0) return
+    const lo = Math.min(drag.startIndex, currentIndex)
+    const hi = Math.max(drag.startIndex, currentIndex)
+    for (const key of drag.applied) {
+      const index = activeIndexByKey(key)
+      if (index < lo || index > hi) {
+        if (!drag.baseSelected.has(key)) state.selection.delete(key)
+        drag.applied.delete(key)
+      }
+    }
+    for (let index = lo; index <= hi; index++) {
+      const item = cacheItems[index]
+      if (!item) continue
+      const key = itemKey(item)
+      state.selection.set(key, item)
+      drag.applied.add(key)
+    }
     updateVisibleSelection()
     updateSelectionBar()
   }
 
-  function dragTick () {
-    const current = drag
-    if (!current || !current.active || !grid) return
-    const rect = grid.getBoundingClientRect()
-    let scrollDelta = 0
-    if (current.clientY < rect.top + EDGE_SCROLL) {
-      const ratio = Math.min(1, (rect.top + EDGE_SCROLL - current.clientY) / EDGE_SCROLL)
-      scrollDelta = -Math.max(4, Math.round(40 * ratio * ratio))
-    } else if (current.clientY > rect.bottom - EDGE_SCROLL) {
-      const ratio = Math.min(1, (current.clientY - (rect.bottom - EDGE_SCROLL)) / EDGE_SCROLL)
-      scrollDelta = Math.max(4, Math.round(40 * ratio * ratio))
-    }
-
-    if (scrollDelta) {
-      grid.scrollTop = Math.max(0, Math.min(grid.scrollHeight - grid.clientHeight, grid.scrollTop + scrollDelta))
-      scheduleRender(false)
-    }
-
-    current.currentIndex = indexAtClientY(current.clientY)
-    const lo = Math.min(current.startIndex, current.currentIndex)
-    const hi = Math.max(current.startIndex, current.currentIndex)
-    applyDragRange(lo, hi)
-
-    if (current.band) {
-      current.band.style.top = `${lo * ROW_HEIGHT + 4}px`
-      current.band.style.height = `${Math.max(2, (hi - lo + 1) * ROW_HEIGHT - 8)}px`
-    }
-    current.raf = requestAnimationFrame(dragTick)
-  }
-
   function moveDrag (event) {
     if (!drag) return
-    drag.clientX = event.clientX
-    drag.clientY = event.clientY
-    if (!drag.active) {
-      if (Math.abs(event.clientX - drag.startX) < 5 && Math.abs(event.clientY - drag.startY) < 5) return
-      drag.active = true
-      drag.band = document.createElement('div')
-      drag.band.className = 'filegram-drag-band'
-      canvas.appendChild(drag.band)
-      drag.raf = requestAnimationFrame(dragTick)
-    }
+    if (!drag.active && Math.abs(event.clientX - drag.startX) < 5 && Math.abs(event.clientY - drag.startY) < 5) return
+    drag.active = true
+    const rect = grid.getBoundingClientRect()
+    if (event.clientY < rect.top + 48) grid.scrollTop = Math.max(0, grid.scrollTop - 28)
+    else if (event.clientY > rect.bottom - 48) grid.scrollTop += 28
+    const index = cardIndexFromPoint(event.clientX, Math.max(rect.top + 2, Math.min(rect.bottom - 2, event.clientY)))
+    if (index >= 0) applyDragRange(index)
     event.preventDefault()
   }
 
@@ -326,11 +443,9 @@
     const current = drag
     if (!current) return
     drag = null
-    cancelAnimationFrame(current.raf)
     document.removeEventListener('mousemove', moveDrag, true)
     document.removeEventListener('mouseup', endDrag, true)
     document.body.style.userSelect = ''
-    if (current.band) current.band.remove()
     if (current.active) {
       suppressClickUntil = Date.now() + 120
       try {
@@ -343,23 +458,18 @@
 
   function startDrag (event) {
     if (event.button !== 0 || event.target.closest('input,button,a,select')) return
-    viewItems(false)
-    const startIndex = indexAtClientY(event.clientY)
-    if (startIndex < 0) return
+    const card = event.target.closest('.gcard[data-global-index]')
+    if (!card) return
+    const startIndex = Number(card.dataset.globalIndex)
+    if (!Number.isFinite(startIndex)) return
     event.stopImmediatePropagation()
     drag = {
       startX: event.clientX,
       startY: event.clientY,
-      clientX: event.clientX,
-      clientY: event.clientY,
       startIndex,
-      currentIndex: startIndex,
-      lastLo: -1,
-      lastHi: -1,
       baseSelected: new Set(state.selection.keys()),
-      active: false,
-      band: null,
-      raf: 0
+      applied: new Set(),
+      active: false
     }
     document.body.style.userSelect = 'none'
     document.addEventListener('mousemove', moveDrag, true)
@@ -375,37 +485,66 @@
       const now = Date.now()
 
       if (!options.hardRefresh && count > 0) {
-        warmChats.add(id)
-        scheduleRender(true)
+        scheduleRender(false)
         const last = lastBackgroundReconcile.get(id) || now
         if (now - last >= BACKGROUND_RECONCILE_MS) {
           lastBackgroundReconcile.set(id, now)
           const run = () => Promise.resolve(baseEnsure(chatId, options)).catch(() => {})
-          if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 2500 })
-          else setTimeout(run, 900)
+          if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 3000 })
+          else setTimeout(run, 1200)
         }
         return Promise.resolve(null)
       }
 
       const pending = Promise.resolve(baseEnsure(chatId, options))
       pending.finally(() => {
-        if (window.teleFilesIndex && Number(window.teleFilesIndex.count(chatId) || 0) > 0) warmChats.add(id)
         lastBackgroundReconcile.set(id, Date.now())
-        scheduleRender(true)
+        scheduleRender(false)
       })
       return pending
     }
   }
 
+  function installMessagePaintGuard () {
+    if (!baseRenderMessagesList || window.__fileGramMessagePaintGuard) return
+    window.__fileGramMessagePaintGuard = true
+    renderMessagesList = function fileGramVisibleMessageRender () {
+      if (state.view === 'files') return
+      return baseRenderMessagesList()
+    }
+  }
+
+  function installViewGuard () {
+    if (window.__fileGramPageSetViewGuard) return
+    window.__fileGramPageSetViewGuard = true
+    const baseSetView = setView
+    setView = function fileGramPagedSetView (view) {
+      const result = baseSetView(view)
+      if (installPager()) pager.classList.toggle('hidden', view !== 'files')
+      if (view === 'files') scheduleRender(false)
+      return result
+    }
+  }
+
   function install () {
-    if (window.__fileGramFilesViewInstalled) return
-    if (!window.teleFilesIndex || typeof filesItems !== 'function' || typeof buildGridCard !== 'function' || typeof rescueEnsureAllFiles !== 'function') return false
-    window.__fileGramFilesViewInstalled = true
+    if (window.__fileGramFilesPagesInstalled) return true
+    if (!window.teleFilesIndex || typeof buildGridCard !== 'function' || typeof rescueEnsureAllFiles !== 'function') return false
+    window.__fileGramFilesPagesInstalled = true
     installStyles()
+    installLazyThumbOwner()
     installGridOwner()
+    installPager()
     installWarmIndexGuard()
-    renderFiles = function fileGramRenderFiles () { scheduleRender(true) }
-    window.addEventListener('resize', () => scheduleRender(true), { passive: true })
+    installMessagePaintGuard()
+    installViewGuard()
+    renderFiles = function fileGramRenderFilesPage () { scheduleRender(false) }
+    window.fileGramFilesPages = {
+      pageSize: PAGE_SIZE,
+      page: () => getPage(),
+      pageCount: () => pageCount(deriveItems(false).length),
+      goToPage,
+      refresh: () => scheduleRender(true)
+    }
     scheduleRender(true)
     return true
   }
