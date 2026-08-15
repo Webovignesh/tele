@@ -777,11 +777,13 @@ li.chat-item {
   flex-direction: column;
   gap: 1px;
   contain: layout style;
+  overflow-anchor: none;
 }
 
 #media-grid[data-filegram-pages="1"] {
   gap: 1px;
   padding: var(--fg-space-2) var(--fg-space-4);
+  contain: strict;
 }
 
 .gcard {
@@ -795,6 +797,7 @@ li.chat-item {
   cursor: pointer;
   transition: background var(--fg-duration-fast) var(--fg-ease);
   position: relative;
+  contain: layout paint style;
 }
 
 .gcard:hover {
@@ -1551,6 +1554,7 @@ li.chat-item {
   flex: 1;
   overflow-y: auto;
   padding: var(--fg-space-2) var(--fg-space-3);
+  contain: layout style;
 }
 
 .tele-ui-download-list-note {
@@ -1565,6 +1569,8 @@ li.chat-item {
   border-radius: var(--fg-radius-sm);
   margin-bottom: 1px;
   transition: background var(--fg-duration-fast) var(--fg-ease);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 56px;
 }
 
 .djob:hover {
