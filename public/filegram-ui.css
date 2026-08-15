@@ -563,11 +563,15 @@ li.chat-item {
   display: flex;
   align-items: center;
   gap: var(--fg-space-2);
-  padding: var(--fg-space-2) var(--fg-space-5);
+  padding: var(--fg-space-2) var(--fg-space-4);
   min-height: var(--fg-toolbar-h);
   border-bottom: 1px solid var(--fg-border);
   background: var(--fg-surface-0);
   flex-wrap: wrap;
+}
+
+.files-toolbar.hidden {
+  display: none;
 }
 
 .files-toolbar .search-box {
@@ -575,13 +579,18 @@ li.chat-item {
   align-items: center;
   gap: var(--fg-space-2);
   flex: 1;
-  min-width: 140px;
-  max-width: 280px;
+  min-width: 160px;
+  max-width: 300px;
   background: var(--fg-surface-2);
   border: 1px solid var(--fg-border);
   border-radius: var(--fg-radius-sm);
   padding: 0 var(--fg-space-2);
   height: 30px;
+  transition: border-color var(--fg-duration-fast) var(--fg-ease);
+}
+
+.files-toolbar .search-box:focus-within {
+  border-color: var(--fg-accent);
 }
 
 .files-toolbar .search-box .search-icon {
@@ -619,7 +628,7 @@ li.chat-item {
 #file-filter,
 #file-sort {
   height: 30px;
-  padding: 0 var(--fg-space-2);
+  padding: 0 var(--fg-space-3) 0 var(--fg-space-2);
   background: var(--fg-surface-2);
   border: 1px solid var(--fg-border);
   border-radius: var(--fg-radius-sm);
@@ -627,11 +636,27 @@ li.chat-item {
   font-size: var(--fg-text-sm);
   cursor: pointer;
   outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236b7f94' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 24px;
+  transition: border-color var(--fg-duration-fast) var(--fg-ease);
 }
 
 #file-filter:focus,
 #file-sort:focus {
   border-color: var(--fg-accent);
+}
+
+#file-filter:hover,
+#file-sort:hover {
+  border-color: var(--fg-border-strong);
+}
+
+#search-whole {
+  white-space: nowrap;
 }
 
 .drag-hint {
@@ -646,14 +671,16 @@ li.chat-item {
 #filegram-file-pager {
   display: flex;
   align-items: center;
-  gap: var(--fg-space-2);
+  justify-content: center;
+  gap: var(--fg-space-3);
   min-height: var(--fg-pager-h);
-  padding: var(--fg-space-1) var(--fg-space-5);
-  border-bottom: 1px solid var(--fg-border);
+  padding: var(--fg-space-2) var(--fg-space-4);
+  border-top: 1px solid var(--fg-border);
   background: var(--fg-surface-0);
   font-size: var(--fg-text-sm);
   color: var(--fg-text-muted);
   font-variant-numeric: tabular-nums;
+  margin-top: auto;
 }
 
 .filegram-file-pager.hidden {
@@ -666,23 +693,26 @@ li.chat-item {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: var(--fg-text-xs);
+  color: var(--fg-text-muted);
 }
 
 .filegram-file-pager .filegram-page-nav {
   display: flex;
   align-items: center;
-  gap: var(--fg-space-1);
+  gap: var(--fg-space-2);
 }
 
 .filegram-file-pager button {
-  min-width: 28px;
-  height: 26px;
-  padding: 0 var(--fg-space-2);
-  border-radius: var(--fg-radius-xs);
+  min-width: 32px;
+  height: 28px;
+  padding: 0 var(--fg-space-3);
+  border-radius: var(--fg-radius-sm);
   border: 1px solid var(--fg-border);
   background: var(--fg-surface-2);
   color: var(--fg-text-secondary);
   font-size: var(--fg-text-sm);
+  font-weight: var(--fg-weight-medium);
   cursor: pointer;
   transition: all var(--fg-duration-fast) var(--fg-ease);
 }
@@ -694,22 +724,29 @@ li.chat-item {
 }
 
 .filegram-file-pager button:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: default;
 }
 
 .filegram-file-pager input[type="number"] {
-  width: 52px;
-  height: 26px;
+  width: 48px;
+  height: 28px;
   padding: 0 var(--fg-space-1);
   text-align: center;
   background: var(--fg-surface-2);
   border: 1px solid var(--fg-border);
-  border-radius: var(--fg-radius-xs);
+  border-radius: var(--fg-radius-sm);
   color: var(--fg-text);
   font-size: var(--fg-text-sm);
   font-variant-numeric: tabular-nums;
   outline: none;
+  -moz-appearance: textfield;
+}
+
+.filegram-file-pager input[type="number"]::-webkit-inner-spin-button,
+.filegram-file-pager input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .filegram-file-pager input[type="number"]:focus {
@@ -720,6 +757,7 @@ li.chat-item {
   white-space: nowrap;
   color: var(--fg-text-muted);
   min-width: 36px;
+  font-size: var(--fg-text-sm);
 }
 
 .filegram-file-pager .filegram-page-size {
@@ -734,21 +772,26 @@ li.chat-item {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: var(--fg-space-3) var(--fg-space-5);
+  padding: var(--fg-space-2) var(--fg-space-4);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   contain: layout style;
+}
+
+#media-grid[data-filegram-pages="1"] {
+  gap: 1px;
+  padding: var(--fg-space-2) var(--fg-space-4);
 }
 
 .gcard {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto auto;
+  grid-template-columns: 36px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--fg-space-3);
   padding: var(--fg-space-2) var(--fg-space-3);
   border-radius: var(--fg-radius-sm);
-  min-height: 48px;
+  min-height: 44px;
   cursor: pointer;
   transition: background var(--fg-duration-fast) var(--fg-ease);
   position: relative;
@@ -763,12 +806,12 @@ li.chat-item {
 }
 
 .gcard.completed {
-  opacity: 0.7;
+  opacity: 0.6;
 }
 
 .gcard .gthumb {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   border-radius: var(--fg-radius-sm);
   background: var(--fg-surface-3);
   display: flex;
@@ -779,8 +822,9 @@ li.chat-item {
 }
 
 .gcard .gthumb .icon {
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1;
+  color: var(--fg-text-muted);
 }
 
 .gcard .gthumb img {
@@ -790,59 +834,67 @@ li.chat-item {
   border-radius: var(--fg-radius-sm);
 }
 
+.gcard .gthumb img.hidden {
+  display: none;
+}
+
 .gcard .gbody {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .gcard .gname {
-  font-size: var(--fg-text-base);
+  font-size: var(--fg-text-sm);
   color: var(--fg-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: var(--fg-weight-normal);
+  line-height: 1.3;
 }
 
 .gcard .gsize {
   font-size: var(--fg-text-xs);
   color: var(--fg-text-muted);
   font-variant-numeric: tabular-nums;
+  line-height: 1.3;
 }
 
 .gcard .gtype {
-  font-size: var(--fg-text-xs);
-  font-weight: var(--fg-weight-medium);
+  font-size: 10px;
+  font-weight: var(--fg-weight-semibold);
   color: var(--fg-accent);
   background: var(--fg-accent-subtle);
   padding: 2px 6px;
   border-radius: var(--fg-radius-xs);
   text-transform: uppercase;
   white-space: nowrap;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.4px;
+  line-height: 1.4;
 }
 
 .gcard .done-badge {
   position: absolute;
-  top: var(--fg-space-2);
-  left: var(--fg-space-2);
-  width: 18px;
-  height: 18px;
+  top: 6px;
+  left: 6px;
+  width: 16px;
+  height: 16px;
   background: var(--fg-success);
   color: #fff;
   border-radius: var(--fg-radius-full);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: var(--fg-weight-bold);
+  z-index: 2;
 }
 
 .gcard input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   accent-color: var(--fg-accent);
   cursor: pointer;
   flex-shrink: 0;
@@ -1534,13 +1586,25 @@ button.secondary {
 #file-range-tools {
   display: flex;
   align-items: center;
-  gap: var(--fg-space-2);
+  gap: var(--fg-space-1);
   font-size: var(--fg-text-sm);
   color: var(--fg-text-muted);
 }
 
+.file-range-tools .file-range-label {
+  font-size: var(--fg-text-xs);
+  color: var(--fg-text-muted);
+  font-weight: var(--fg-weight-medium);
+  margin-right: var(--fg-space-1);
+}
+
+.file-range-tools .file-range-separator {
+  color: var(--fg-text-muted);
+  padding: 0 2px;
+}
+
 .file-range-tools input[type="number"] {
-  width: 56px;
+  width: 52px;
   height: 26px;
   padding: 0 var(--fg-space-1);
   text-align: center;
@@ -1549,11 +1613,43 @@ button.secondary {
   border-radius: var(--fg-radius-xs);
   color: var(--fg-text);
   font-size: var(--fg-text-sm);
+  font-variant-numeric: tabular-nums;
   outline: none;
+  -moz-appearance: textfield;
+}
+
+.file-range-tools input[type="number"]::-webkit-inner-spin-button,
+.file-range-tools input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .file-range-tools input[type="number"]:focus {
   border-color: var(--fg-accent);
+}
+
+.file-range-tools button {
+  height: 26px;
+  padding: 0 var(--fg-space-2);
+  background: var(--fg-accent-subtle);
+  color: var(--fg-accent);
+  border: 1px solid var(--fg-border-accent);
+  border-radius: var(--fg-radius-xs);
+  font-size: var(--fg-text-xs);
+  font-weight: var(--fg-weight-medium);
+  cursor: pointer;
+  transition: all var(--fg-duration-fast) var(--fg-ease);
+}
+
+.file-range-tools button:hover {
+  background: var(--fg-accent);
+  color: var(--fg-text-inverse);
+}
+
+#file-range-summary {
+  font-size: var(--fg-text-xs);
+  color: var(--fg-text-muted);
+  margin-left: var(--fg-space-1);
 }
 
 /* ---------- Management Drawer tabs ---------- */
@@ -1614,6 +1710,16 @@ button.secondary {
 /* Virtual scroll spacers (files-view.js) */
 .tele-ui-virtual-spacer {
   flex-shrink: 0;
+}
+
+/* Override files-view.js inline style for media-grid */
+#media-grid[data-filegram-pages="1"] > .gcard {
+  flex: none;
+  transform: none;
+}
+
+#media-grid[data-filegram-pages="1"] > .gcard:hover {
+  transform: none;
 }
 
 /* Marquee/drag selection overlay */
