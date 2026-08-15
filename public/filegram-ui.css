@@ -231,6 +231,17 @@ html, body {
   list-style: none;
   padding: var(--fg-space-1) var(--fg-space-2);
   margin: 0;
+  scroll-behavior: smooth;
+}
+
+/* Pinned section label (injected by runtime) */
+.tele-pinned-label {
+  font-size: var(--fg-text-xs);
+  color: var(--fg-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: var(--fg-space-2) var(--fg-space-3) var(--fg-space-1);
+  font-weight: var(--fg-weight-semibold);
 }
 
 #chat-loading {
@@ -319,11 +330,102 @@ li.chat-item {
   white-space: nowrap;
 }
 
+/* Hide the management.js auto-injected create button since we have our own styled one */
+#mg-create-chat {
+  display: none;
+}
+.sidebar-head h2::before {
+  background: linear-gradient(135deg, var(--fg-accent), #7c5cfc);
+  border-radius: var(--fg-radius-sm);
+}
+
+/* Create button in sidebar head */
+.sidebar-head .fg-create-btn {
+  height: 28px;
+  padding: 0 var(--fg-space-3);
+  background: var(--fg-accent);
+  color: var(--fg-text-inverse);
+  font-size: var(--fg-text-xs);
+  font-weight: var(--fg-weight-semibold);
+  border: none;
+  border-radius: var(--fg-radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--fg-space-1);
+  transition: background var(--fg-duration-fast) var(--fg-ease);
+}
+
+.sidebar-head .fg-create-btn:hover {
+  background: var(--fg-accent-hover);
+}
+
+/* Unread badge */
+.tele-ui-unread {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--fg-accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: var(--fg-weight-bold);
+  border-radius: var(--fg-radius-full);
+  line-height: 1;
+}
+
+/* Kind icons */
+.tele-ui-kind-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--fg-text-muted);
+}
+
+.tele-ui-kind-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.tele-ui-chat-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
 /* Account area at bottom of sidebar */
 .tele-account-actions {
   padding: var(--fg-space-3) var(--fg-space-4);
   border-top: 1px solid var(--fg-border);
   margin-top: auto;
+}
+
+.tele-account-actions .tele-logout {
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--fg-space-2);
+  background: transparent;
+  color: var(--fg-text-secondary);
+  border: 1px solid var(--fg-border);
+  border-radius: var(--fg-radius-sm);
+  font-size: var(--fg-text-sm);
+  cursor: pointer;
+  transition: all var(--fg-duration-fast) var(--fg-ease);
+}
+
+.tele-account-actions .tele-logout:hover {
+  background: var(--fg-danger-subtle);
+  border-color: var(--fg-danger);
+  color: var(--fg-danger);
 }
 
 /* ---------- CENTER WORKSPACE ---------- */
