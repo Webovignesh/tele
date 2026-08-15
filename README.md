@@ -1,6 +1,6 @@
-# Tele Scraper
+# FileGram
 
-Tele Scraper is a local desktop-style web app for browsing Telegram chats, indexing chat media, forwarding messages, and managing high-volume downloads through TDLib.
+FileGram is a local desktop-style web app for browsing Telegram chats, indexing chat media, forwarding messages, and managing high-volume downloads through TDLib.
 
 ## Stack
 
@@ -23,7 +23,7 @@ The server binds to `127.0.0.1` and serves the UI at `http://localhost:3000` by 
 ## Telegram setup
 
 1. Get an `api_id` and `api_hash` from `https://my.telegram.org` under **API development tools**.
-2. Start Tele with `npm start`.
+2. Start FileGram with `npm start`.
 3. Open `http://localhost:3000`.
 4. Enter the Telegram API credentials in the UI and complete Telegram login.
 
@@ -35,7 +35,7 @@ Local credentials and machine state are intentionally not committed. `config.jso
 
 ## Runtime data
 
-Tele keeps runtime-only data outside source control:
+FileGram keeps runtime-only data outside source control:
 
 - `.td_database/` — TDLib session/database state
 - `.td_files/` — TDLib file cache
@@ -54,6 +54,7 @@ Do not commit these paths.
 - `download-dedupe-preload.js` — download dedupe preload
 - `tdl-upload-compat.js` — TDLib upload compatibility preload
 - `thumb-cache-preload.js` — thumbnail cache/runtime preload
+- `session-preload.js` — stable TDLib session/logout bridge
 - `packMedia.js` / `packSelected.js` — ZIP packaging helpers used by the server
 
 ## Git workflow
