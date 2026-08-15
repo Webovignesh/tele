@@ -154,6 +154,21 @@
     head.appendChild(account)
   }
 
+  function installMessageTabRefreshGuard () {
+    if (window.__fileGramMessageTabRefreshGuard || typeof setView !== 'function') return
+    window.__fileGramMessageTabRefreshGuard = true
+    const baseSetView = setView
+    setView = function fileGramMessageFreshSetView (view) {
+      const result = baseSetView(view)
+      if (view === 'messages') {
+        requestAnimationFrame(() => {
+          if (state.view === 'messages' && typeof renderMessagesList === 'function') renderMessagesList()
+        })
+      }
+      return result
+    }
+  }
+
   function loadFinalStabilityLayer () {
     if (!document.querySelector('link[data-tele-stability]')) {
       const link = document.createElement('link')
@@ -172,6 +187,7 @@
       const view = document.createElement('script')
       view.src = 'files-view.js?v=2'
       view.dataset.filegramFilesView = '1'
+      view.addEventListener('load', () => setTimeout(installMessageTabRefreshGuard, 0), { once: true })
       document.body.appendChild(view)
     }
   }
