@@ -1,8 +1,11 @@
 'use strict'
 
 /* Final UI/runtime ownership pass.
- * Loaded last. Owns chat rows, the canonical per-chat file index + virtualized
- * Files view, dedupe confirmation normalization, and download rendering/actions.
+ * Loaded last. Owns chat rows, the canonical per-chat file index, dedupe
+ * confirmation normalization, and download rendering/actions.
+ *
+ * It does NOT render the Files list: files-view.js owns renderFiles and paints
+ * exactly one 100-row page. The virtual renderer that used to live here is gone.
  */
 ;(function teleFinalUiFix () {
   const iconSvg = {
@@ -345,69 +348,18 @@
     return list
   }
 
-  const fileWindow = { key: '', rowHeight: 90, overscan: 10, lastStart: -1, lastEnd: -1, raf: 0 }
-  function fileViewKey () { return [state.activeChatId, state.files.mode, state.files.query, state.files.filter, state.files.sort].join('|') }
-  function spacer (height) {
-    const el = document.createElement('div')
-    el.className = 'tele-ui-virtual-spacer'
-    el.style.height = `${Math.max(0, height)}px`
-    return el
-  }
-  function renderFilesVirtual (force = false) {
-    const grid = document.querySelector('#media-grid')
-    if (!grid) return
-    const items = filesItems()
-    const nextKey = fileViewKey()
-    const changedView = fileWindow.key !== nextKey
-    if (changedView) {
-      fileWindow.key = nextKey
-      fileWindow.lastStart = -1
-      fileWindow.lastEnd = -1
-      grid.scrollTop = 0
-    }
-    const rowHeight = Math.max(70, Number(fileWindow.rowHeight || 90))
-    const viewport = Math.max(grid.clientHeight || 600, 300)
-    const firstVisible = Math.max(0, Math.floor(grid.scrollTop / rowHeight))
-    const start = Math.max(0, firstVisible - fileWindow.overscan)
-    const count = Math.ceil(viewport / rowHeight) + fileWindow.overscan * 2
-    const end = Math.min(items.length, start + count)
-    if (!force && !changedView && start === fileWindow.lastStart && end === fileWindow.lastEnd) {
-      updateCanonicalCount()
-      return
-    }
-    fileWindow.lastStart = start
-    fileWindow.lastEnd = end
-    const fragment = document.createDocumentFragment()
-    fragment.appendChild(spacer(start * rowHeight))
-    for (let i = start; i < end; i++) fragment.appendChild(buildGridCard(items[i]))
-    fragment.appendChild(spacer((items.length - end) * rowHeight))
-    grid.replaceChildren(fragment)
-    const firstCard = grid.querySelector('.gcard[data-key]')
-    if (firstCard) {
-      const measured = Math.ceil(firstCard.getBoundingClientRect().height + 8)
-      if (measured >= 70 && measured <= 180 && Math.abs(measured - rowHeight) > 3) fileWindow.rowHeight = measured
-    }
-    const selectAll = document.querySelector('#select-all-media')
-    if (selectAll) {
-      selectAll.textContent = items.length ? `Select all (${items.length.toLocaleString()})` : 'Select all'
-      selectAll.disabled = items.length === 0
-    }
-    updateCanonicalCount()
-  }
-  renderFiles = () => renderFilesVirtual(true)
-
-  const grid = document.querySelector('#media-grid')
-  if (grid) {
-    grid.addEventListener('scroll', event => {
-      if (event.target !== grid) return
-      event.stopImmediatePropagation()
-      if (fileWindow.raf) return
-      fileWindow.raf = requestAnimationFrame(() => {
-        fileWindow.raf = 0
-        renderFilesVirtual(false)
-      })
-    }, { capture: true, passive: true })
-  }
+  /* The virtual files renderer that used to live here is gone.
+   *
+   * It windowed the rows and padded the scroll surface with two spacer divs, the
+   * trailing one sized (items.length - end) * rowHeight. On a 22k index that is a
+   * ~2 million pixel spacer behind ~20 real rows. Its companion scroll listener,
+   * which was supposed to re-window as you scrolled, was bound to the #media-grid
+   * node that files-view.js later replaced, so it never ran: scrolling produced
+   * blank space that nothing refilled.
+   *
+   * Files are paged now (files-view.js, 100 per page). Pagination is the
+   * scalability mechanism and must not be combined with virtualisation, so this
+   * layer no longer renders files at all and no longer touches grid geometry. */
 
   const baseHandleEvent = handleEvent
   handleEvent = function teleUiHandleEvent (event) {
@@ -438,8 +390,8 @@
         if (validIndex(chatId, rescue)) paintCanonical(chatId, rescue, { persist: true, render: false })
       }
       // Repaint through the current renderFiles owner (files-view.js, which is
-      // paged). Calling renderFilesVirtual directly bypassed pagination and put
-      // a window of ~20 rows under a spacer sized for the whole index, which is
+      // paged). Painting here directly used to bypass pagination and mount a
+      // window of ~20 rows under a spacer sized for the whole index, which is
       // what let the Files list scroll far past its 100 rows into blank space.
       if (state.view === 'files') queueMicrotask(() => { try { renderFiles() } catch {} })
     }

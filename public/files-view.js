@@ -36,8 +36,6 @@
   let cacheRevision = 0
   let renderedRevision = -1
   let renderedPage = -1
-  let drag = null
-  let suppressClickUntil = 0
 
   const pageByView = new Map()
   const lastBackgroundReconcile = new Map()
@@ -209,11 +207,14 @@
       return true
     }
 
+    // cloneNode(false) intentionally drops every listener bound to the previous
+    // node by earlier layers, which is how this layer becomes the sole owner of
+    // the grid. Selection is driven by the per-card handlers in decorateCard and
+    // by the checkbox/Select all/range controls; the grid itself needs none.
     const next = existing.cloneNode(false)
     next.dataset.filegramPages = '1'
     existing.replaceWith(next)
     grid = next
-    grid.addEventListener('mousedown', startDrag, { capture: true })
     return true
   }
 
@@ -318,7 +319,6 @@
   function decorateCard (card, item, globalIndex) {
     card.dataset.globalIndex = String(globalIndex)
     card.onclick = event => {
-      if (Date.now() < suppressClickUntil) return
       if (event.target.closest('input,button,a,select')) return
       const key = itemKey(item)
       if (event.shiftKey && typeof lastClickedKey !== 'undefined' && lastClickedKey) {
@@ -411,84 +411,6 @@
     setPage(page)
     renderedPage = -1
     scheduleRender(false)
-  }
-
-  function cardIndexFromPoint (x, y) {
-    const node = document.elementFromPoint(x, y)
-    const card = node && node.closest ? node.closest('#media-grid .gcard[data-global-index]') : null
-    if (!card) return -1
-    return Number(card.dataset.globalIndex)
-  }
-
-  function applyDragRange (currentIndex) {
-    if (!drag || currentIndex < 0) return
-    const lo = Math.min(drag.startIndex, currentIndex)
-    const hi = Math.max(drag.startIndex, currentIndex)
-    for (const key of drag.applied) {
-      const index = activeIndexByKey(key)
-      if (index < lo || index > hi) {
-        if (!drag.baseSelected.has(key)) state.selection.delete(key)
-        drag.applied.delete(key)
-      }
-    }
-    for (let index = lo; index <= hi; index++) {
-      const item = cacheItems[index]
-      if (!item) continue
-      const key = itemKey(item)
-      state.selection.set(key, item)
-      drag.applied.add(key)
-    }
-    updateVisibleSelection()
-    updateSelectionBar()
-  }
-
-  function moveDrag (event) {
-    if (!drag) return
-    if (!drag.active && Math.abs(event.clientX - drag.startX) < 5 && Math.abs(event.clientY - drag.startY) < 5) return
-    drag.active = true
-    const rect = grid.getBoundingClientRect()
-    if (event.clientY < rect.top + 48) grid.scrollTop = Math.max(0, grid.scrollTop - 28)
-    else if (event.clientY > rect.bottom - 48) grid.scrollTop += 28
-    const index = cardIndexFromPoint(event.clientX, Math.max(rect.top + 2, Math.min(rect.bottom - 2, event.clientY)))
-    if (index >= 0) applyDragRange(index)
-    event.preventDefault()
-  }
-
-  function endDrag (event) {
-    const current = drag
-    if (!current) return
-    drag = null
-    document.removeEventListener('mousemove', moveDrag, true)
-    document.removeEventListener('mouseup', endDrag, true)
-    document.body.style.userSelect = ''
-    if (current.active) {
-      suppressClickUntil = Date.now() + 120
-      try {
-        dragJustEnded = true
-        setTimeout(() => { dragJustEnded = false }, 120)
-      } catch {}
-    }
-    event.preventDefault()
-  }
-
-  function startDrag (event) {
-    if (event.button !== 0 || event.target.closest('input,button,a,select')) return
-    const card = event.target.closest('.gcard[data-global-index]')
-    if (!card) return
-    const startIndex = Number(card.dataset.globalIndex)
-    if (!Number.isFinite(startIndex)) return
-    event.stopImmediatePropagation()
-    drag = {
-      startX: event.clientX,
-      startY: event.clientY,
-      startIndex,
-      baseSelected: new Set(state.selection.keys()),
-      applied: new Set(),
-      active: false
-    }
-    document.body.style.userSelect = 'none'
-    document.addEventListener('mousemove', moveDrag, true)
-    document.addEventListener('mouseup', endDrag, true)
   }
 
   function installWarmIndexGuard () {

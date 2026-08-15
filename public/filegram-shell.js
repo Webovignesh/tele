@@ -633,8 +633,6 @@
     // range block only steals width from the controls.
     const summary = $('#file-range-summary')
     if (summary) summary.classList.add('fg-visually-hidden')
-    const dragHint = $('#files-toolbar .drag-hint')
-    if (dragHint) dragHint.classList.add('fg-visually-hidden')
   }
 
   /* Pager relabel without re-templating: files-view.js caches

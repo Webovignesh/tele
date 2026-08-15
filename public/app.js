@@ -594,7 +594,6 @@ function buildGridCard (item) {
   card.appendChild(makeCheckbox(item))
   loadThumb(img, item)
   card.onclick = (e) => {
-    if (dragJustEnded) { dragJustEnded = false; return }
     if (e.target.type === 'checkbox') return
     const key = card.dataset.key
     const item = itemByKey.get(key) || card._item
@@ -818,10 +817,12 @@ function selectAllMedia () {
   updateSelectionBar()
 }
 
-/* ------------------------------ Drag to select ------------------------------ */
+/* ------------------------------ Selection helpers ------------------------------
+ * Drag-to-select was removed. Selection is checkbox, click, shift-click range,
+ * Select all and the numeric range tools. itemByKey keeps selection independent
+ * of DOM state, which matters because only the current page is mounted.
+ */
 
-let dragSel = null
-let dragJustEnded = false
 let lastClickedKey = null
 const itemByKey = new Map() // key -> item, kept in sync so selection never depends on DOM state
 
@@ -831,129 +832,6 @@ function cardIndexForKey (grid, key) {
     if (cards[i].dataset && cards[i].dataset.key === key) return i
   }
   return -1
-}
-
-// Finds the row index at a given viewport Y, ignoring the gaps between rows.
-// A row "contains" the Y if it falls inside its vertical span; otherwise the
-// nearest row is chosen. This can never miss because of row gaps.
-function rowIndexAtY (grid, y) {
-  const cards = grid.children
-  let best = -1
-  let bestDist = Infinity
-  for (let i = 0; i < cards.length; i++) {
-    const card = cards[i]
-    if (!card.dataset || !card.dataset.key) continue
-    const r = card.getBoundingClientRect()
-    if (r.top <= y && y <= r.bottom) return i
-    const d = Math.abs((r.top + r.bottom) / 2 - y)
-    if (d < bestDist) { bestDist = d; best = i }
-  }
-  return best
-}
-
-function startDragSelect (e) {
-  if (e.button !== 0) return
-  if (e.target.closest('input, button, a, select')) return
-  const grid = $('#media-grid')
-  dragSel = {
-    startX: e.clientX,
-    startY: e.clientY,
-    mouse: { x: e.clientX, y: e.clientY },
-    pressedOnCard: !!e.target.closest('.gcard'),
-    startIndex: rowIndexAtY(grid, e.clientY),
-    hoverIndex: rowIndexAtY(grid, e.clientY),
-    active: false,
-    box: null,
-    grid,
-    dragSelectedKeys: new Set(),
-    wasSelectedBefore: new Set(),
-    mouseMoved: false,
-    raf: 0
-  }
-  document.body.style.userSelect = 'none'
-  document.body.style.webkitUserSelect = 'none'
-  document.addEventListener('mousemove', onDragSelectMove)
-  document.addEventListener('mouseup', onDragSelectEnd)
-  e.preventDefault()
-}
-
-function onDragSelectMove (e) {
-  const ds = dragSel
-  if (!ds) return
-  ds.mouse.x = e.clientX
-  ds.mouse.y = e.clientY
-  ds.mouseMoved = true
-  if (!ds.active) {
-    if (Math.abs(e.clientX - ds.startX) < 5 && Math.abs(e.clientY - ds.startY) < 5) return
-    ds.active = true
-    ds.box = h('div', 'marquee')
-    ds.grid.appendChild(ds.box)
-    ds.wasSelectedBefore = new Set(state.selection.keys())
-    ds.dragSelectedKeys = new Set()
-    ds.raf = requestAnimationFrame(dragTick)
-  }
-}
-
-function dragTick () {
-  const ds = dragSel
-  if (!ds) { dragSel = null; return }
-  if (!ds.box.isConnected) ds.grid.appendChild(ds.box)
-  const gridRect = ds.grid.getBoundingClientRect()
-  const margin = 30
-  if (ds.mouse.y < gridRect.top + margin) ds.grid.scrollTop -= 12
-  else if (ds.mouse.y > gridRect.bottom - margin) ds.grid.scrollTop += 12
-  if (ds.mouse.x < gridRect.left + margin) ds.grid.scrollLeft -= 12
-  else if (ds.mouse.x > gridRect.right - margin) ds.grid.scrollLeft += 12
-  ds.hoverIndex = rowIndexAtY(ds.grid, ds.mouse.y)
-  applyRange(ds)
-  updateBand(ds)
-  ds.raf = requestAnimationFrame(dragTick)
-}
-
-function applyRange (ds) {
-  const lo = Math.min(ds.startIndex, ds.hoverIndex)
-  const hi = Math.max(ds.startIndex, ds.hoverIndex)
-  const cards = ds.grid.children
-  const gridRect = ds.grid.getBoundingClientRect()
-  for (let i = 0; i < cards.length; i++) {
-    const card = cards[i]
-    if (!card.dataset || !card.dataset.key) continue
-    const key = card.dataset.key
-    if (i >= lo && i <= hi) {
-      if (!ds.dragSelectedKeys.has(key)) {
-        ds.dragSelectedKeys.add(key)
-        const item = itemByKey.get(key) || card._item
-        if (key && item) state.selection.set(key, item)
-        applyCardUI(key, true)
-      }
-    } else if (ds.mouseMoved && ds.dragSelectedKeys.has(key) && !ds.wasSelectedBefore.has(key)) {
-      const cr = card.getBoundingClientRect()
-      if (cr.bottom > gridRect.top && cr.top < gridRect.bottom) {
-        ds.dragSelectedKeys.delete(key)
-        state.selection.delete(key)
-        applyCardUI(key, false)
-      }
-    }
-  }
-  if (ds.mouseMoved) ds.mouseMoved = false
-  updateSelectionBar()
-}
-
-function updateBand (ds) {
-  const cards = ds.grid.children
-  if (ds.startIndex < 0 || ds.startIndex >= cards.length) return
-  const gridRect = ds.grid.getBoundingClientRect()
-  const lo = Math.max(0, Math.min(ds.startIndex, ds.hoverIndex))
-  const hiIdx = Math.min(Math.max(ds.startIndex, ds.hoverIndex), cards.length - 1)
-  const tc = cards[lo].getBoundingClientRect()
-  const bc = cards[hiIdx].getBoundingClientRect()
-  let top = tc.top - gridRect.top + ds.grid.scrollTop
-  let bottom = bc.bottom - gridRect.top + ds.grid.scrollTop
-  if (bottom < top) { const t = top; top = bottom; bottom = t }
-  ds.box.style.left = '0px'
-  ds.box.style.top = top + 'px'
-  ds.box.style.width = Math.max(ds.grid.clientWidth, ds.grid.scrollWidth) + 'px'
-  ds.box.style.height = Math.max(1, bottom - top) + 'px'
 }
 
 function applyCardUI (key, on) {
@@ -973,56 +851,6 @@ function selectRange (lo, hi, grid) {
     const item = itemByKey.get(card.dataset.key) || card._item
     if (item) state.selection.set(card.dataset.key, item)
     applyCardUI(card.dataset.key, true)
-  }
-  updateSelectionBar()
-}
-
-function onDragSelectEnd (e) {
-  const ds = dragSel
-  if (!ds) return
-  dragSel = null
-  cancelAnimationFrame(ds.raf)
-  document.removeEventListener('mousemove', onDragSelectMove)
-  document.removeEventListener('mouseup', onDragSelectEnd)
-  document.body.style.userSelect = ''
-  document.body.style.webkitUserSelect = ''
-  if (ds.box) ds.box.remove()
-  if (!ds.active) {
-    if (!ds.pressedOnCard) {
-      state.selection.clear()
-      const cards = ds.grid.querySelectorAll('.gcard')
-      for (const card of cards) {
-        if (card.dataset && card.dataset.key) applyCardUI(card.dataset.key, false)
-      }
-      updateSelectionBar()
-    }
-    return
-  }
-  dragJustEnded = true
-  setTimeout(() => { dragJustEnded = false }, 50)
-  const grid = ds.grid
-  const releaseIndex = rowIndexAtY(grid, e.clientY)
-  const lo = Math.min(ds.startIndex, releaseIndex)
-  const hi = Math.max(ds.startIndex, releaseIndex)
-  // Final selection = everything that was selected before the drag
-  // PLUS the exact range between the press row and the release row.
-  const next = new Map()
-  for (const k of ds.wasSelectedBefore) {
-    const item = itemByKey.get(k) || state.selection.get(k)
-    if (item) next.set(k, item)
-  }
-  const cards = grid.children
-  for (let i = lo; i <= hi && i < cards.length; i++) {
-    const card = cards[i]
-    if (!card.dataset || !card.dataset.key) continue
-    const item = itemByKey.get(card.dataset.key) || card._item
-    if (item) next.set(card.dataset.key, item)
-  }
-  state.selection = next
-  for (let i = 0; i < cards.length; i++) {
-    const card = cards[i]
-    if (!card.dataset || !card.dataset.key) continue
-    applyCardUI(card.dataset.key, state.selection.has(card.dataset.key))
   }
   updateSelectionBar()
 }
@@ -1532,14 +1360,11 @@ $('#chat-list').addEventListener('scroll', e => {
 $('#tab-files').onclick = () => setView('files')
 $('#tab-messages').onclick = () => setView('messages')
 
-$('#media-grid').addEventListener('mousedown', startDragSelect)
-$('#media-grid').addEventListener('scroll', e => {
-  if (e.target.scrollTop + e.target.clientHeight >= e.target.scrollHeight - 250) {
-    if (!state.activeChatId || state.loadingMore) return
-    if (state.files.mode === 'search') { if (state.files.hasMore) loadSearchMore() }
-    else if (state.hasMore) loadMessages(state.activeChatId)
-  }
-})
+/* No scroll listener on #media-grid. Files are paged (100 per page, files-view.js
+ * owns the pager), so reaching the last row is the end of the page and the next
+ * files come from Next, not from appending on scroll. An infinite-scroll loader
+ * here is what made the grid behave like a much longer list. Messages keep their
+ * own scroll-back loader below. */
 $('#messages').addEventListener('scroll', e => {
   if (e.target.scrollTop <= 250) {
     if (state.activeChatId && state.hasMore && !state.loadingMore) loadMessages(state.activeChatId)

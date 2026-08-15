@@ -1234,13 +1234,6 @@ li.chat-item.active {
   white-space: nowrap;
 }
 
-.drag-hint {
-  font-size: var(--fg-text-xs);
-  color: var(--fg-text-muted);
-  user-select: none;
-  margin-left: auto;
-}
-
 /* ---------- Pager ---------- */
 .filegram-file-pager,
 #filegram-file-pager {
@@ -3308,11 +3301,6 @@ button.secondary {
   color: var(--fg-text-secondary);
 }
 
-/* Virtual scroll spacers (files-view.js) */
-.tele-ui-virtual-spacer {
-  flex-shrink: 0;
-}
-
 /* Override files-view.js inline style for media-grid */
 #media-grid[data-filegram-pages="1"] > .gcard {
   flex: none;
@@ -3321,16 +3309,6 @@ button.secondary {
 
 #media-grid[data-filegram-pages="1"] > .gcard:hover {
   transform: none;
-}
-
-/* Marquee/drag selection overlay */
-.marquee {
-  position: absolute;
-  z-index: var(--fg-z-sticky);
-  border: 1px dashed var(--fg-accent);
-  background: rgba(77, 163, 255, 0.12);
-  border-radius: var(--fg-radius-xs);
-  pointer-events: none;
 }
 
 /* ---------- Boot Status ---------- */

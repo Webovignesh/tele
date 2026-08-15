@@ -13,7 +13,6 @@ const rescueInflight = new Map()
 const rescueDownloadedMarks = rescueLoadMarkSet('tele-downloaded-files-v1')
 const rescueForwardedMarks = rescueLoadMarkSet('tele-forwarded-files-v1')
 let rescueMessageRenderLimit = 120
-let rescueFileRenderLimit = 600
 const rescueCacheLimit = 24
 const rescueMessageLimit = 400
 let rescueOpenGeneration = 0
@@ -330,7 +329,6 @@ openChat = async function rescueOpenChat (chatId) {
   state.activeChatId = chatId
   rescueRememberChat(chatId)
   rescueMessageRenderLimit = 120
-  rescueFileRenderLimit = 600
   state.selection.clear()
   state.selectedMessages.clear()
   state.loadingMore = false
@@ -714,38 +712,9 @@ function rescueMountFileRange () {
 }
 rescueMountFileRange()
 
-const rescueLegacyRenderFiles = renderFiles
-renderFiles = function rescueFastFileRender () {
-  const grid = $('#media-grid')
-  if (!grid) return
-  const items = filesItems()
-  const visible = items.length > 1200 ? items.slice(0, rescueFileRenderLimit) : items
-  grid.innerHTML = ''
-  for (const item of visible) grid.appendChild(buildGridCard(item))
-  const selectAll = $('#select-all-media')
-  if (selectAll) {
-    selectAll.textContent = items.length ? `Select all (${items.length})` : 'Select all'
-    selectAll.disabled = items.length === 0
-  }
-  rescueUpdateRangeControls(items.length)
-  if (items.length > visible.length) {
-    const more = h('div', 'file-render-more', `Showing ${visible.length.toLocaleString()} of ${items.length.toLocaleString()} · scroll for more`)
-    grid.appendChild(more)
-  }
-}
-
-const rescueFileGridForWindow = $('#media-grid')
-if (rescueFileGridForWindow) {
-  rescueFileGridForWindow.addEventListener('scroll', () => {
-    if (rescueFileGridForWindow.scrollTop + rescueFileGridForWindow.clientHeight < rescueFileGridForWindow.scrollHeight - 240) return
-    const total = filesItems().length
-    if (total <= 1200 || rescueFileRenderLimit >= total || dragSel) return
-    rescueFileRenderLimit = Math.min(total, rescueFileRenderLimit + 600)
-    const top = rescueFileGridForWindow.scrollTop
-    renderFiles()
-    rescueFileGridForWindow.scrollTop = top
-  }, true)
-}
+/* The 600-row grow-on-scroll files renderer that used to live here is gone.
+ * files-view.js owns renderFiles with real 100-per-page pagination, so a second
+ * windowed renderer plus its own scroll-growth listener could only fight it. */
 
 // Keep old controls wired internally but remove them from the daily-driver UI.
 for (const selector of ['#file-sort', '#search-whole', '#pack-media', '#cancel-pack', '#pack-banner', '#zip-results']) {

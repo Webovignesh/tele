@@ -16,7 +16,11 @@ const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8')
 assert.match(js, /handleEvent = function teleFinalHandleEvent/)
 assert.match(js, /event\.name === 'media-index-progress'/)
 assert.match(js, /rescueEnsureAllFiles = teleFinalEnsureFiles/)
-assert.match(js, /renderFiles = teleFinalRenderFiles/)
+// The 240-row grow-on-scroll renderer was removed: files-view.js owns renderFiles
+// with real 100-per-page pagination and must not be shadowed by a second
+// windowed renderer. buildGridCard ownership stays here.
+assert.doesNotMatch(js, /renderFiles = teleFinalRenderFiles/)
+assert.doesNotMatch(js, /teleFinalRenderFiles/)
 assert.match(js, /buildGridCard = teleFinalBuildGridCard/)
 assert.match(js, /rescuePreviewFile = teleFinalOpenPreview/)
 assert.match(js, /teleP1RenderDedupeReport = function teleFinalRenderDedupeReport/)
@@ -39,13 +43,21 @@ assert.match(guard, /event\.name === 'chat-upsert'/)
 assert.match(guard, /guardMemorySnapshot\(state\.activeChatId\)/)
 
 assert.match(uiFix, /renderChats = teleUiRenderChats/)
-assert.match(uiFix, /renderFiles = \(\) => renderFilesVirtual\(true\)/)
-assert.match(uiFix, /function renderFilesVirtual/)
-assert.match(uiFix, /event\.stopImmediatePropagation\(\)/)
+// The virtual files renderer was removed. It padded the scroll surface with
+// spacers sized for the whole index while its re-windowing scroll listener was
+// dead, so the Files list scrolled far past its rows into blank space. This layer
+// must not render files or bind grid scroll handlers any more.
+assert.doesNotMatch(uiFix, /renderFilesVirtual/)
+assert.doesNotMatch(uiFix, /tele-ui-virtual-spacer/)
+assert.doesNotMatch(uiFix, /addEventListener\('scroll'/)
 assert.match(uiFix, /teleP1RenderDedupeReport = function teleUiRenderDedupeReport/)
 assert.match(uiFix, /upsertDownload = function teleUiUpsertDownload/)
 assert.match(uiFix, /renderDownloads = renderDownloadsNow/)
-assert.match(uiFix, /requestAnimationFrame/)
+// The rAF that used to be asserted here drove the virtual files scroll handler,
+// which is gone. Download painting is still throttled, which is the property
+// worth pinning.
+assert.match(uiFix, /DOWNLOAD_PAINT_MS/)
+assert.match(uiFix, /function scheduleDownloads/)
 assert.match(uiFix, /tele-ui-kind-icon/)
 assert.doesNotMatch(uiFix, /MutationObserver/)
 

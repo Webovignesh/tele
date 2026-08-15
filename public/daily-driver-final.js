@@ -13,8 +13,7 @@
   const teleFinalLastSync = new Map()
   const teleFinalAvatarRetries = new Map()
   const teleFinalThumbTargets = new WeakMap()
-  const teleFinalPage = { key: '', limit: 240 }
-  const TELE_FINAL_PAGE_SIZE = 240
+
   const TELE_FINAL_SYNC_TTL = 120000
 
   function teleFinalKey (value) { return String(value) }
@@ -323,15 +322,6 @@
     return list
   }
 
-  function teleFinalViewKey (items) {
-    return [state.activeChatId, state.files.mode, state.files.query, state.files.filter, state.files.sort, items.length].join('|')
-  }
-
-  function teleFinalResetFileWindow () {
-    teleFinalPage.key = ''
-    teleFinalPage.limit = TELE_FINAL_PAGE_SIZE
-  }
-
   function teleFinalMediaUrl (item, fileId) {
     const id = fileId == null ? item.fileId : fileId
     const params = new URLSearchParams()
@@ -473,47 +463,12 @@
 
   buildGridCard = teleFinalBuildGridCard
 
-  function teleFinalRenderFiles () {
-    const grid = document.querySelector('#media-grid')
-    if (!grid) return
-    const items = filesItems()
-    const key = teleFinalViewKey(items)
-    if (teleFinalPage.key !== key) {
-      teleFinalPage.key = key
-      teleFinalPage.limit = TELE_FINAL_PAGE_SIZE
-    }
-    const limit = Math.min(items.length, teleFinalPage.limit)
-    const scrollTop = grid.scrollTop
-    grid.innerHTML = ''
-    for (let i = 0; i < limit; i++) grid.appendChild(teleFinalBuildGridCard(items[i]))
-    if (items.length > limit) {
-      const status = document.createElement('div')
-      status.className = 'tele-final-list-status'
-      status.textContent = `Showing ${limit.toLocaleString()} of ${items.length.toLocaleString()} · scroll for more`
-      grid.appendChild(status)
-    }
-    grid.scrollTop = scrollTop
-
-    const selectAll = document.querySelector('#select-all-media')
-    if (selectAll) {
-      selectAll.textContent = items.length ? `Select all (${items.length.toLocaleString()})` : 'Select all'
-      selectAll.disabled = items.length === 0
-    }
-  }
-
-  renderFiles = teleFinalRenderFiles
-
-  const teleFinalGrid = document.querySelector('#media-grid')
-  if (teleFinalGrid && !teleFinalGrid.dataset.teleFinalScroll) {
-    teleFinalGrid.dataset.teleFinalScroll = '1'
-    teleFinalGrid.addEventListener('scroll', () => {
-      if (teleFinalGrid.scrollTop + teleFinalGrid.clientHeight < teleFinalGrid.scrollHeight - 900) return
-      const items = filesItems()
-      if (teleFinalPage.limit >= items.length) return
-      teleFinalPage.limit = Math.min(items.length, teleFinalPage.limit + TELE_FINAL_PAGE_SIZE)
-      teleFinalRenderFiles()
-    }, { passive: true })
-  }
+  /* The 240-row grow-on-scroll files renderer that used to live here is gone,
+   * along with its scroll listener. It mounted 240 rows and restored the previous
+   * scrollTop, which made the grid taller than the page and fought the pager.
+   * files-view.js owns renderFiles and mounts exactly one 100-row page.
+   * teleFinalBuildGridCard is kept: it is still the buildGridCard owner and
+   * files-view.js builds its cards through it. */
 
   /* ------------------------------ Unified popup preview ------------------------------ */
 
@@ -766,9 +721,10 @@
       const snapshot = teleFinalSnapshot(chatId)
       if (snapshot) teleFinalApplySnapshot(chatId, snapshot, { persist: false, render: state.view === 'files' })
       teleFinalUpdateMediaCountLabel()
-      // Paint through the current renderFiles owner. teleFinalRenderFiles mounts
-      // a growing 240-row window and restores the previous scrollTop, which
-      // fought pagination and left the grid scrollable well past its 100 rows.
+      // Paint through the current renderFiles owner. The renderer this layer used
+      // to call mounted a growing 240-row window and restored the previous
+      // scrollTop, which fought pagination and left the grid scrollable well past
+      // its 100 rows.
       if (state.view === 'files') { try { renderFiles() } catch {} }
       teleFinalEnsureFiles(chatId).catch(() => {})
     }

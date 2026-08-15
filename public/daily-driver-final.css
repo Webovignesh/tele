@@ -154,14 +154,6 @@
   box-shadow: 0 2px 10px rgba(0, 0, 0, .28);
 }
 
-.tele-final-list-status {
-  min-height: 44px;
-  display: grid;
-  place-items: center;
-  color: #7890a6;
-  font-size: 11px;
-}
-
 /* Never allow an inline video/audio player to be mounted in a Files thumbnail. */
 #media-grid .gthumb video,
 #media-grid .gthumb audio {

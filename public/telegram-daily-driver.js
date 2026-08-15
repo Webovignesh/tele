@@ -186,8 +186,7 @@ handleEvent = function teleDailyHandleEvent (ev) {
 }
 
 /* Clicking a selected card must not silently remove it. Normal click selects;
- * Ctrl/Cmd toggles; Shift extends from the last clicked item. Drag selection
- * remains handled by the existing marquee implementation.
+ * Ctrl/Cmd toggles; Shift extends from the last clicked item.
  */
 const teleDailyBaseBuildGridCard = buildGridCard
 buildGridCard = function teleDailyBuildGridCard (item) {
@@ -241,7 +240,6 @@ buildGridCard = function teleDailyBuildGridCard (item) {
   }
 
   card.onclick = e => {
-    if (dragJustEnded) { dragJustEnded = false; return }
     if (e.target.closest('input,button,a,video,audio')) return
     const liveItem = itemByKey.get(key) || card._item || item
     const grid = $('#media-grid')
