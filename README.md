@@ -1,53 +1,61 @@
 # Tele Scraper
 
-A web app that connects to your personal Telegram account via [TDlib](https://core.telegram.org/tdlib)
-and lets you browse chats and download media files **fast**, with **multiple parallel downloads**.
+Tele Scraper is a local desktop-style web app for browsing Telegram chats, indexing chat media, forwarding messages, and managing high-volume downloads through TDLib.
 
-Built on:
-- [tdl](https://github.com/eilvelia/tdl) + [prebuilt-tdlib](https://github.com/tdlib/td/tree/master/example/node) (official TDLib native library, no compilation needed)
-- Node.js (Express + WebSocket)
+## Stack
 
-## How it works
+- Node.js 22+
+- Express 5
+- WebSocket (`ws`)
+- `tdl` + `prebuilt-tdlib`
+- Vanilla browser JavaScript and CSS
 
-- TDLib downloads each file using many simultaneous connections to Telegram's servers (already very fast per file).
-- The app runs **multiple files at once** (default 5, configurable) so the aggregate speed scales further.
-- Progress, per-file speed, and total speed are streamed live to the browser.
-- Finished files are moved to `downloads/<chat title>/<file name>` and are also downloadable from the browser.
+## Development
 
-## Setup
+```bash
+npm ci
+npm run verify
+npm start
+```
 
-1. Install Node.js v16+ (already required).
-2. `npm install`
-3. Get Telegram API credentials (free, 2 minutes):
-   - Open https://my.telegram.org and log in with your Telegram account.
-   - Click **API development tools**.
-   - Fill in the app title and short name (anything works, e.g. "TeleScraper").
-   - Copy the `api_id` (number) and `api_hash` (hex string).
-4. Either:
-   - run `npm start`, open **http://localhost:3000** and paste your `api_id` / `api_hash` in the web UI (saved to `config.json`), **or**
-   - copy `.env.example` to `.env` and fill in `API_ID` and `API_HASH`.
-5. In the web UI, log in with your phone number and the code you receive.
-   If the account has 2-step verification, enter that password too.
-6. Browse a chat, tick the files you want (or **Download all media**), and watch them fly into `downloads/`.
+The server binds to `127.0.0.1` and serves the UI at `http://localhost:3000` by default.
 
-## Options (in `.env`)
+## Telegram setup
 
-| Variable      | Default | Description                                        |
-| ------------- | ------- | -------------------------------------------------- |
-| `API_ID`      | —       | Your Telegram api_id                               |
-| `API_HASH`    | —       | Your Telegram api_hash                             |
-| `PORT`        | `3000`  | Web UI port                                        |
-| `CONCURRENCY` | `5`     | Number of files downloading simultaneously         |
+1. Get an `api_id` and `api_hash` from `https://my.telegram.org` under **API development tools**.
+2. Start Tele with `npm start`.
+3. Open `http://localhost:3000`.
+4. Enter the Telegram API credentials in the UI and complete Telegram login.
 
-## Notes
+Local credentials and machine state are intentionally not committed. `config.json`, `settings.json`, `.env`, TDLib databases, downloads, management uploads, logs, caches, build output, and editor files are ignored by Git.
 
-- Your session is saved locally (`.td_database`), so you only log in once.
-- Cached/partial downloads are kept by TDLib in `.td_files`, so a cancelled download resumes instantly next time.
-- Secret chats are hidden (TDLib doesn't allow downloading media from them via this API path).
-- This uses **your own account** — you can only browse what your account can see.
+## Verification
 
-## Troubleshooting
+`npm run verify` runs syntax checks followed by the current smoke suites. Run it before committing changes to `main`.
 
-- **`Dynamic Loading Error: Win32 error 126`** — the prebuilt `tdjson.dll` failed to load; make sure `node_modules/prebuilt-tdlib` is intact and you ran `npm install` in this folder.
-- **Login code never arrives** — double-check your `api_id`/`api_hash` are correct, and that you entered the phone number in international format.
-- **Slow aggregate speed** — raise `CONCURRENCY` (e.g. 10–20). Each extra file adds more parallel connections.
+## Runtime data
+
+Tele keeps runtime-only data outside source control:
+
+- `.td_database/` — TDLib session/database state
+- `.td_files/` — TDLib file cache
+- `.management_uploads/` — temporary management uploads
+- `downloads/` — downloaded media
+- `config.json` — local Telegram API configuration
+- `settings.json` — machine-local app settings
+
+Do not commit these paths.
+
+## Project layout
+
+- `server.js` — TDLib, HTTP/WebSocket API, indexing, downloads, forwarding, and management backend
+- `public/` — browser application and UI runtime
+- `scripts/` — verification/smoke tests
+- `download-dedupe-preload.js` — download dedupe preload
+- `tdl-upload-compat.js` — TDLib upload compatibility preload
+- `thumb-cache-preload.js` — thumbnail cache/runtime preload
+- `packMedia.js` / `packSelected.js` — ZIP packaging helpers used by the server
+
+## Git workflow
+
+`main` is the canonical development branch. Keep the working tree clean, run `npm run verify`, and commit only source/configuration changes that belong in the repository.
