@@ -2529,3 +2529,157 @@ button.secondary {
   font: var(--fg-text-md) var(--fg-font);
   z-index: var(--fg-z-boot);
 }
+
+/* ============================================================
+   Responsive Breakpoints
+   Priority: desktop 1366×768 → 4K
+   ============================================================ */
+
+/* Ultra-wide: 1600px+ — expand sidebars slightly */
+@media (min-width: 1600px) {
+  :root {
+    --fg-sidebar-left: 340px;
+    --fg-sidebar-right: 390px;
+  }
+
+  .messages,
+  #messages {
+    padding-inline: clamp(32px, 5vw, 80px);
+  }
+
+  .msg {
+    max-width: 65%;
+  }
+}
+
+/* Large desktop: 1920px+ */
+@media (min-width: 1920px) {
+  :root {
+    --fg-sidebar-left: 360px;
+    --fg-sidebar-right: 400px;
+  }
+}
+
+/* Standard desktop: 1366-1599px — keep defaults */
+
+/* Compact desktop: 1180-1365px — narrow sidebars */
+@media (max-width: 1365px) {
+  :root {
+    --fg-sidebar-left: 290px;
+    --fg-sidebar-right: 340px;
+  }
+
+  .chat-head {
+    padding: var(--fg-space-3) var(--fg-space-4);
+  }
+
+  .files-toolbar,
+  #files-toolbar {
+    padding: var(--fg-space-2) var(--fg-space-3);
+  }
+
+  .tele-ui-download-summary > div > strong {
+    font-size: var(--fg-text-md);
+  }
+}
+
+/* Narrow desktop: 1024-1179px — compact sidebars significantly */
+@media (max-width: 1179px) {
+  :root {
+    --fg-sidebar-left: 260px;
+    --fg-sidebar-right: 310px;
+  }
+
+  .sidebar-head h2 {
+    font-size: var(--fg-text-lg);
+  }
+
+  .chat-item {
+    gap: var(--fg-space-2);
+    padding: var(--fg-space-2);
+  }
+
+  .chat-item .chat-avatar,
+  .chat-item .tele-final-avatar,
+  .chat-item .tele-guard-avatar {
+    width: 36px;
+    height: 36px;
+  }
+
+  .tele-ui-download-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .dl-controls .row {
+    grid-template-columns: 1fr;
+  }
+
+  .filegram-file-pager .filegram-page-size {
+    display: none;
+  }
+}
+
+/* Small viewport: below 1024px — hide right sidebar */
+@media (max-width: 1023px) {
+  .app {
+    grid-template-columns: var(--fg-sidebar-left) minmax(0, 1fr);
+  }
+
+  .downloads {
+    display: none;
+  }
+
+  :root {
+    --fg-sidebar-left: 250px;
+  }
+
+  .msg {
+    max-width: 85%;
+  }
+}
+
+/* Very small: below 860px — hide left sidebar too */
+@media (max-width: 859px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .chat-head {
+    padding: var(--fg-space-2) var(--fg-space-3);
+  }
+
+  .msg {
+    max-width: 92%;
+  }
+
+  #selection-bar,
+  .selection-dock {
+    bottom: var(--fg-space-2);
+    padding: var(--fg-space-2) var(--fg-space-3);
+    border-radius: var(--fg-radius-lg);
+  }
+}
+
+/* High DPI scaling: ensure no sub-pixel artifacts */
+@media (min-resolution: 2dppx) {
+  .gcard .gthumb,
+  .chat-item .chat-avatar,
+  .fg-chat-avatar,
+  .mg-info-avatar {
+    image-rendering: -webkit-optimize-contrast;
+  }
+}
+
+/* Reduced motion: respect user preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}
