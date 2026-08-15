@@ -30,6 +30,51 @@
   const RECONCILE_PAGE_LIMIT = 100
   const RECONCILE_MAX_PAGES = 2500
 
+  /* Durable per-chat floor for the AUTHORITATIVE TOTAL.
+   *
+   * Same storage the scan guard already maintains, deliberately: one record, no
+   * second source of truth. It exists because a short or partial scan can be
+   * stamped done and land in the shared cache, and the header would then print a
+   * number below one we have already proven (the 22,479 -> 17,484 -> 22,479
+   * shrink). The floor is a total-only concept: FILTERED, CURRENT PAGE, SELECTED
+   * and DOWNLOAD QUEUE counts are never compared against it.
+   *
+   * It expires like the guard's copy so a channel that genuinely loses files is
+   * not pinned high forever, and a hard refresh clears it outright. */
+  const HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
+  const HIGH_WATER_TTL = 14 * 24 * 60 * 60 * 1000
+
+  function readHighWater () {
+    try { return JSON.parse(localStorage.getItem(HIGH_WATER_KEY) || '{}') || {} } catch { return {} }
+  }
+
+  function writeHighWater (map) {
+    try { localStorage.setItem(HIGH_WATER_KEY, JSON.stringify(map)) } catch {}
+  }
+
+  function totalFloor (chatId) {
+    const entry = readHighWater()[idOf(chatId)]
+    if (!entry) return 0
+    if (Date.now() - Number(entry.at || 0) > HIGH_WATER_TTL) return 0
+    return Math.max(0, Number(entry.count || 0))
+  }
+
+  function rememberTotalFloor (chatId, count) {
+    const value = Math.max(0, Number(count || 0))
+    if (!value) return
+    const map = readHighWater()
+    const key = idOf(chatId)
+    if (map[key] && Number(map[key].count || 0) >= value) return
+    map[key] = { count: value, at: Date.now() }
+    writeHighWater(map)
+  }
+
+  function clearTotalFloor (chatId) {
+    const map = readHighWater()
+    delete map[idOf(chatId)]
+    writeHighWater(map)
+  }
+
   function idOf (value) { return String(value) }
 
   function compareIds (a, b) {
@@ -45,8 +90,15 @@
     return snapshot.items.every(item => item && idOf(item.chatId) === id)
   }
 
+  /* Completeness is a size question as well as a flag question. `done` is set by
+   * whichever layer produced the snapshot, and a partial batch stamped done:true
+   * used to satisfy this check - restore() then adopted it as the committed index
+   * and the header shrank. A snapshot below the proven floor is treated as
+   * incomplete, so restore() falls through to the persistent read and union, and
+   * mergeProgress is allowed to rebuild it upward. */
   function isCompleteSnapshot (chatId, snapshot) {
-    return belongsToChat(chatId, snapshot) && snapshot.done !== false && Array.isArray(snapshot.items)
+    if (!belongsToChat(chatId, snapshot) || snapshot.done === false || !Array.isArray(snapshot.items)) return false
+    return snapshot.items.length >= totalFloor(chatId)
   }
 
   function newestItemId (items) {
@@ -127,11 +179,19 @@
     } catch {}
   }
 
+  /* THE authoritative total writer. Only the committed persistent index feeds it,
+   * raised to the durable floor so a partial snapshot can never lower it.
+   *
+   * Never write a FILTERED, CURRENT PAGE, SEARCH RESULT or DOWNLOAD QUEUE count
+   * here. Those belong to the pager (files-view.js), the Select all button and
+   * the downloads panel respectively. */
   function updateCountUi (chatId) {
     if (state.activeChatId == null || idOf(state.activeChatId) !== idOf(chatId)) return
     const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
     if (!snapshot) return
-    const total = snapshot.items.length
+    const measured = snapshot.items.length
+    rememberTotalFloor(chatId, measured)
+    const total = Math.max(measured, totalFloor(chatId))
     state.mediaCount = total
     state.typeCounts = snapshot.typeCounts
     const count = document.querySelector('#chat-media-count')
@@ -141,6 +201,36 @@
       all.textContent = `Download all media (${total.toLocaleString()})`
       all.disabled = total === 0
     }
+  }
+
+  /* This layer takes ownership of the legacy label symbols.
+   *
+   * They were last assigned by daily-driver-final-guard.js (guardUpdateMediaLabel),
+   * which reads the shared, partial-writable rescueFileCache and applies no floor -
+   * it records a high-water mark and then never consults it when painting. Every
+   * legacy caller (openChat, the P0/P1 layers, the scan handlers) went through
+   * that symbol, so the authoritative index owner was bypassed entirely. */
+  function ownCountLabel () {
+    const paint = function fileGramStableUpdateMediaLabel () {
+      const chatId = state.activeChatId
+      const label = document.querySelector('#chat-media-count')
+      const all = document.querySelector('#download-all-media')
+      if (chatId == null) {
+        if (label) label.textContent = ''
+        if (all) { all.textContent = 'Download all media'; all.disabled = true }
+        return
+      }
+      const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
+      if (!snapshot) {
+        // No index yet. Say so rather than printing a number we cannot defend.
+        if (label) label.textContent = state.view === 'files' ? 'Indexing files\u2026' : ''
+        if (all) { all.textContent = 'Download all media'; all.disabled = true }
+        return
+      }
+      updateCountUi(chatId)
+    }
+    try { updateMediaCountLabel = paint } catch {}
+    try { rescueUpdateMediaLabel = paint } catch {}
   }
 
   function schedulePaint (chatId) {
@@ -416,6 +506,7 @@
   }
 
   installPersistentReadDedupe()
+  ownCountLabel()
   rescueEnsureAllFiles = ensure
 
   // The committed index is already newest-first. Avoid cloning+sorting 40k rows
@@ -473,6 +564,17 @@
       const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
       return snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0
     },
-    hardRefresh: chatId => ensure(chatId, { hardRefresh: true })
+    // The authoritative total, floor included. This is what the header shows.
+    total: chatId => {
+      const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
+      const measured = snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0
+      return Math.max(measured, totalFloor(chatId))
+    },
+    // An explicit hard refresh is the one operation allowed to lower the total,
+    // so it drops the floor first and rebuilds from the scan.
+    hardRefresh: chatId => {
+      clearTotalFloor(chatId)
+      return ensure(chatId, { hardRefresh: true })
+    }
   }
 })()

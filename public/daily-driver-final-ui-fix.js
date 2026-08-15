@@ -437,7 +437,11 @@
         const rescue = rescueFileCache.get(key(chatId))
         if (validIndex(chatId, rescue)) paintCanonical(chatId, rescue, { persist: true, render: false })
       }
-      if (state.view === 'files') queueMicrotask(() => renderFilesVirtual(true))
+      // Repaint through the current renderFiles owner (files-view.js, which is
+      // paged). Calling renderFilesVirtual directly bypassed pagination and put
+      // a window of ~20 rows under a spacer sized for the whole index, which is
+      // what let the Files list scroll far past its 100 rows into blank space.
+      if (state.view === 'files') queueMicrotask(() => { try { renderFiles() } catch {} })
     }
     return result
   }
@@ -779,7 +783,7 @@
   teleUiRenderChats()
   restoreCanonical(state.activeChatId).then(() => {
     updateCanonicalCount()
-    renderFilesVirtual(true)
+    try { renderFiles() } catch {}
   }).catch(() => {})
   renderDownloadsNow()
 })()

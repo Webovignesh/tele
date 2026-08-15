@@ -337,6 +337,21 @@
     return card
   }
 
+  /* Is the grid exactly the page this layer last painted?
+   *
+   * The early return below assumed that matching revision + page meant the DOM
+   * was still ours. Other layers paint into #media-grid directly, so the grid
+   * could hold a virtual window plus spacers, or 240 rows, while this layer
+   * happily skipped the repaint and only refreshed the pager text. Verifying the
+   * mounted rows makes the paged view self-healing. */
+  function gridMatchesPage (items, page) {
+    if (!grid) return false
+    const start = (page - 1) * PAGE_SIZE
+    const expected = Math.max(0, Math.min(items.length, start + PAGE_SIZE) - start)
+    if (grid.childElementCount !== expected) return false
+    return grid.querySelectorAll(':scope > .gcard[data-global-index]').length === expected
+  }
+
   function renderNow (force = false) {
     if (!installGridOwner() || !installPager()) return
     const items = deriveItems(force)
@@ -344,7 +359,7 @@
     const page = Math.min(pages, getPage())
     if (page !== getPage()) setPage(page)
 
-    if (!force && renderedRevision === cacheRevision && renderedPage === page) {
+    if (!force && renderedRevision === cacheRevision && renderedPage === page && gridMatchesPage(items, page)) {
       updatePager(items)
       updateVisibleSelection()
       return

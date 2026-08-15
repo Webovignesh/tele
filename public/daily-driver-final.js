@@ -74,8 +74,7 @@
     if (state.activeChatId != null && teleFinalKey(state.activeChatId) === key) {
       teleFinalUpdateMediaCountLabel()
       if (state.view === 'files' && options.render !== false) {
-        teleFinalResetFileWindow()
-        teleFinalRenderFiles()
+        try { renderFiles() } catch {}
       }
       if (options.status) setLoadState(options.status)
     }
@@ -166,8 +165,7 @@
         teleFinalMergePartial.paintTimer = setTimeout(() => {
           teleFinalMergePartial.paintTimer = null
           if (state.activeChatId != null && teleFinalKey(state.activeChatId) === key && state.view === 'files') {
-            teleFinalResetFileWindow()
-            teleFinalRenderFiles()
+            try { renderFiles() } catch {}
             setLoadState(`Indexing files… ${partial.items.length.toLocaleString()} found`)
           }
         }, 260)
@@ -458,7 +456,7 @@
             const row = all[i]
             state.selection.set(`${row.chatId}:${row.messageId}`, row)
           }
-          teleFinalRenderFiles()
+          try { renderFiles() } catch {}
           updateSelectionBar()
           return
         }
@@ -768,10 +766,10 @@
       const snapshot = teleFinalSnapshot(chatId)
       if (snapshot) teleFinalApplySnapshot(chatId, snapshot, { persist: false, render: state.view === 'files' })
       teleFinalUpdateMediaCountLabel()
-      if (state.view === 'files') {
-        teleFinalResetFileWindow()
-        teleFinalRenderFiles()
-      }
+      // Paint through the current renderFiles owner. teleFinalRenderFiles mounts
+      // a growing 240-row window and restores the previous scrollTop, which
+      // fought pagination and left the grid scrollable well past its 100 rows.
+      if (state.view === 'files') { try { renderFiles() } catch {} }
       teleFinalEnsureFiles(chatId).catch(() => {})
     }
     return result
@@ -781,9 +779,7 @@
   setView = function teleFinalSetView (view) {
     const result = teleFinalBaseSetView(view)
     if (view === 'files' && state.activeChatId != null) {
-      teleFinalResetFileWindow()
-      const snapshot = teleFinalSnapshot(state.activeChatId)
-      if (snapshot) teleFinalRenderFiles()
+      if (teleFinalSnapshot(state.activeChatId)) { try { renderFiles() } catch {} }
       teleFinalUpdateMediaCountLabel()
       teleFinalEnsureFiles(state.activeChatId).catch(() => {})
     }
