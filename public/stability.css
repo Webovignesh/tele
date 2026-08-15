@@ -1,5 +1,5 @@
-/* Final stability/polish layer: compact account controls, download telemetry,
-   and predictable large-list geometry. */
+/* Final stability/polish layer: account controls, download telemetry, and
+   predictable large-list geometry. */
 
 .sidebar-head {
   gap: 10px;
@@ -89,18 +89,51 @@
   text-align: center;
 }
 
-#media-grid {
+/* A single virtual canvas provides the real scroll height; only visible rows
+   are mounted. Flex spacers are intentionally not used. */
+#media-grid[data-file-gram-owner="1"] {
+  display: block !important;
+  position: relative !important;
+  padding: 0 !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
   overflow-anchor: none;
-  contain: strict;
+  contain: layout paint style;
+  scroll-behavior: auto !important;
 }
 
-#media-grid .gcard {
+.filegram-virtual-canvas {
+  position: relative;
+  width: 100%;
+  min-height: 100%;
+}
+
+.filegram-virtual-slot {
+  position: absolute;
+  box-sizing: border-box;
   contain: layout paint style;
 }
 
-.tele-ui-virtual-spacer {
-  width: 100%;
+.filegram-virtual-card {
+  width: 100% !important;
+  margin: 0 !important;
+  transform: none !important;
+  transition: background .12s ease, border-color .12s ease, box-shadow .12s ease !important;
+  contain: layout paint style;
+}
+
+.filegram-virtual-card:hover {
+  transform: none !important;
+}
+
+.filegram-selection-band {
+  position: absolute;
+  z-index: 70;
   pointer-events: none;
+  border: 1px solid rgba(88,170,255,.9);
+  border-radius: 9px;
+  background: rgba(88,170,255,.12);
+  box-shadow: inset 0 0 0 1px rgba(88,170,255,.12);
 }
 
 @media (max-width: 1180px) {
