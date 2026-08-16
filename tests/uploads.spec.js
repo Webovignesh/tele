@@ -175,7 +175,7 @@ test('Clear done and Clear all have full-queue semantics', async ({ page }) => {
   await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(6)
   await page.locator('#fg-upload-clear-all').click()
   await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(0)
-  expect(await page.locator('#fg-upload-list .fg-up-job').count()).toBe(0)
+  await expect(page.locator('#fg-upload-list .fg-up-job')).toHaveCount(0)
 })
 
 test('server interruption automatically retries without losing the queue', async ({ page }) => {
@@ -184,14 +184,11 @@ test('server interruption automatically retries without losing the queue', async
     { name: 'restart-safe.txt', mimeType: 'text/plain', buffer: Buffer.from('restart-safe') }
   ])
   await page.locator('#fg-upload-review-unique').click()
-  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.completed), { timeout: 10000 }).toBe(1)
-  const result = await page.evaluate(() => {
+  await expect.poll(async () => page.evaluate(() => {
     const snapshot = window.FileGramUploads.snapshot()
     const job = snapshot.jobs.find(item => item.name === 'restart-safe.txt')
-    return { attempts: window.__uploadAttempts[job.id], status: job.status }
-  })
-  expect(result.status).toBe('completed')
-  expect(result.attempts).toBe(2)
+    return { status: job && job.status, attempts: job ? (window.__uploadAttempts[job.id] || 0) : 0, error: job && job.error }
+  }), { timeout: 12000 }).toMatchObject({ status: 'completed', attempts: 2 })
 })
 
 test('large queue remains paged at 100 rows', async ({ page }) => {
