@@ -1,9 +1,8 @@
 'use strict'
 
-// Tele thumbnails belong to Telegram's own cache, not the user's selected
-// download folder. Older builds created <downloads>/.thumbs and copied every
-// preview there. The browser now streams thumbnail file ids through the normal
-// media endpoint, so block and remove that legacy cache directory.
+// FileGram does not persist file/media thumbnails. Older builds created
+// <downloads>/.thumbs and copied Telegram preview files there. Keep those paths
+// impossible to recreate and remove any leftovers on startup.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -17,7 +16,7 @@ function removeLegacyThumbDir (target) {
 }
 
 const originalMkdirSync = fs.mkdirSync.bind(fs)
-fs.mkdirSync = function teleNoDownloadThumbDir (target, options) {
+fs.mkdirSync = function fileGramNoThumbDir (target, options) {
   if (isLegacyThumbDir(target)) {
     removeLegacyThumbDir(target)
     return String(target)
@@ -26,7 +25,7 @@ fs.mkdirSync = function teleNoDownloadThumbDir (target, options) {
 }
 
 const originalMkdir = fs.promises.mkdir.bind(fs.promises)
-fs.promises.mkdir = async function teleNoDownloadThumbDirAsync (target, options) {
+fs.promises.mkdir = async function fileGramNoThumbDirAsync (target, options) {
   if (isLegacyThumbDir(target)) {
     removeLegacyThumbDir(target)
     return String(target)
@@ -34,7 +33,11 @@ fs.promises.mkdir = async function teleNoDownloadThumbDirAsync (target, options)
   return originalMkdir(target, options)
 }
 
-// Clean the path saved by the previous build immediately on startup.
+// Repo-local leftovers from old builds.
+removeLegacyThumbDir(path.join(__dirname, '.thumbs'))
+removeLegacyThumbDir(path.join(__dirname, 'downloads', '.thumbs'))
+
+// Saved download destination from the previous/current installation.
 try {
   const settingsPath = path.join(__dirname, 'settings.json')
   const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
