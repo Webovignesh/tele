@@ -24,6 +24,8 @@ jobs:
       - name: Syntax checks
         run: |
           node --check server.js
+          node --check bulk-upload-server.js
+          node --check bulk-upload-preload.js
           node --check public/app.js
           node --check public/rescue-runtime.js
           node --check public/daily-driver-final.js
@@ -31,6 +33,8 @@ jobs:
           node --check public/daily-driver-final-ui-fix.js
           node --check public/upload-queue-core.js
           node --check public/uploads.js
+          node --check public/bulk-uploads.js
+          node --check public/uploads-hardening.js
       - run: npm run verify
       - name: Install Chromium for upload behavior tests
         run: npx playwright install --with-deps chromium
@@ -44,4 +48,6 @@ jobs:
           grep -q 'upload-queue-core.js' public/index.html
           grep -q 'uploads.js' public/index.html
           grep -q 'uploads.css' public/index.html
+          grep -q 'bulk-upload-preload.js' package.json
+          grep -q 'bulk-upload-server.test.cjs' package.json
           grep -q 'photoFileId' server.js
