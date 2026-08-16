@@ -188,6 +188,35 @@ async function clearAllActuallyEmptiesEverything () {
   queue.destroy()
 }
 
+async function largeQueueStateHandlesTwentyThousandFiles () {
+  const queue = new UploadQueue({
+    concurrency: 8,
+    resolveSource: async job => job._source,
+    transport: async () => ({ ok: true })
+  })
+  // Hold the scheduler so this test measures queue state and bulk actions without
+  // trying to create 20k asynchronous transports. Large batches still retain all
+  // records while the UI is responsible for mounting only a 100-row page.
+  queue.globalPaused = true
+  queue.add(Array.from({ length: 20000 }, (_, i) => descriptor(i)))
+  let stats = queue.stats()
+  assert.equal(stats.total, 20000)
+  assert.equal(stats.remaining, 20000)
+  assert.equal(stats.queued, 20000)
+  assert.equal(queue.order.length, 20000)
+
+  queue.cancelAll()
+  stats = queue.stats()
+  assert.equal(stats.total, 20000)
+  assert.equal(stats.remaining, 0)
+  assert.equal(stats.cancelled, 20000)
+
+  queue.clearAll()
+  assert.equal(queue.stats().total, 0)
+  assert.equal(queue.order.length, 0)
+  queue.destroy()
+}
+
 ;(async () => {
   await concurrencyIsBounded()
   await cancelAllCoversFullQueue()
@@ -196,6 +225,7 @@ async function clearAllActuallyEmptiesEverything () {
   await uncertainDeliveryDoesNotDuplicate()
   await restoreRecoversInterruptedState()
   await clearAllActuallyEmptiesEverything()
+  await largeQueueStateHandlesTwentyThousandFiles()
   console.log('upload queue checks passed')
 })().catch(error => {
   console.error(error)
