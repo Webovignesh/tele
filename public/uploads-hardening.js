@@ -1,9 +1,10 @@
 'use strict'
 
 /* Small runtime hardening layer for the bulk upload workspace.
- * It owns no UI and no queue state. It only upgrades the queue's transport with
- * server idempotency/retry headers and verifies persisted source handles still
- * point at the file the user originally queued.
+ * It owns no UI and no queue state. It upgrades the queue's transport with
+ * server idempotency/retry headers, verifies persisted source handles still
+ * point at the file the user originally queued, and makes destructive Clear all
+ * emit one storage transition instead of a cancel-then-clear race.
  */
 ;(function hardenFileGramUploads () {
   if (window.__fileGramUploadsHardeningInstalled) return
@@ -101,8 +102,31 @@
       }
       return file
     }
+
     queue.transport = transport
-    api.transportVersion = 2
+
+    /* UploadQueue.clearAll() normally calls cancelAll() and then emits clear-all.
+     * In the persisted browser queue that produces two async writes: one writes
+     * every job as cancelled and the next clears the store. Under a slow IndexedDB
+     * transaction the cancelled write can land last and resurrect a supposedly
+     * cleared 10k-file queue after restart. Clear directly instead: abort active
+     * requests, discard all scheduler state, and emit exactly one clear-all event.
+     * Active runners settle later against an already-empty Map and can only issue
+     * harmless deletes for their former ids. */
+    queue.clearAll = function fileGramAtomicClearAll () {
+      this.globalPaused = false
+      this.cancelWake()
+      for (const job of this.jobs.values()) {
+        if (!this.active.has(job.id)) continue
+        job._abortIntent = 'cancel'
+        this.active.get(job.id)?.abort()
+      }
+      this.jobs.clear()
+      this.order = []
+      this.changed('clear-all')
+    }
+
+    api.transportVersion = 3
     return true
   }
 
