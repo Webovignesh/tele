@@ -40,7 +40,7 @@ async function fixture (page, options = {}) {
     </body></html>`
   }))
   await page.goto('http://filegram.test/')
-  await page.evaluate(({ initialItems, missingOnReconcile }) => {
+  await page.evaluate(({ initialItems, missingOnReconcile, completeHistory }) => {
     const snapshot = {
       chatId: 777,
       items: initialItems.map(item => ({ ...item })),
@@ -99,6 +99,11 @@ async function fixture (page, options = {}) {
     }
     window.fetch = async (url) => {
       const target = String(url)
+      if (target.includes('/api/filegram/reconcile-small-chat-history/')) {
+        const missing = missingOnReconcile ? snapshot.items.map(item => String(item.messageId)) : []
+        const existing = missingOnReconcile ? [] : snapshot.items.map(item => String(item.messageId))
+        return { ok: true, status: 200, json: async () => ({ ok: true, complete: completeHistory !== false, scanned: 0, missing, existing }) }
+      }
       if (target.includes('/api/filegram/reconcile-message-ids/')) {
         const missing = missingOnReconcile ? snapshot.items.map(item => String(item.messageId)) : []
         const existing = missingOnReconcile ? [] : snapshot.items.map(item => String(item.messageId))
@@ -112,12 +117,16 @@ async function fixture (page, options = {}) {
       }
       throw new Error(`Unexpected fetch ${target}`)
     }
-  }, { initialItems, missingOnReconcile: options.missingOnReconcile !== false })
+  }, {
+    initialItems,
+    missingOnReconcile: options.missingOnReconcile !== false,
+    completeHistory: options.completeHistory !== false
+  })
   await page.addScriptTag({ path: HARDENING })
   await page.addScriptTag({ path: CONSISTENCY })
 }
 
-test('stale deleted files are removed from the committed index and duplicate Chat info is removed', async ({ page }) => {
+test('complete Telegram history removes stale deleted files from the committed index and duplicate Chat info', async ({ page }) => {
   await fixture(page)
 
   await expect(page.locator('#mg-open-info')).toHaveCount(0)
@@ -125,6 +134,11 @@ test('stale deleted files are removed from the committed index and duplicate Cha
   await expect(page.locator('#chat-media-count')).toHaveText('0 files')
   await expect(page.locator('#select-all-media')).toBeDisabled()
   await expect.poll(async () => page.evaluate(() => window.__persistedSnapshot && window.__persistedSnapshot.items.length)).toBe(0)
+})
+
+test('incomplete history is never treated as deletion proof', async ({ page }) => {
+  await fixture(page, { missingOnReconcile: false, completeHistory: false })
+  await expect.poll(async () => page.evaluate(() => window.teleFilesIndex.snapshot(777).items.length)).toBe(2)
 })
 
 test('realtime message deletion lowers the persistent Files count instead of unioning the row back', async ({ page }) => {
