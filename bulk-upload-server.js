@@ -300,12 +300,19 @@ function createBulkUploadHandler (options) {
         completedResponse = true
         return res.json({ ok: true, recovered: true, messageId: previous.messageId, message: previous.messageId != null ? { id: previous.messageId } : null })
       }
+
+      /* Acquire the per-job lock before any asynchronous uncertain-delivery
+       * verification. Without this, two retrying HTTP requests could both await
+       * searchChatMessages, both observe the job as inactive, and then both call
+       * sendMessage. The check+add is synchronous, so only one request owns the
+       * idempotency key until this handler's finally block releases it. */
       if (active.has(uploadId)) {
         req.resume()
         const error = new Error('This upload is already active')
         error.status = 425
         throw error
       }
+      active.add(uploadId)
 
       if (previous && ['receiving', 'staged', 'sending', 'uncertain'].includes(previous.status)) {
         const delivered = await verifyUncertainRecord(client, previous)
@@ -317,7 +324,6 @@ function createBulkUploadHandler (options) {
         }
       }
 
-      active.add(uploadId)
       const createdAt = previous && previous.createdAt || Date.now()
       await ledger.set(uploadId, { ...meta, status: 'receiving', createdAt, startedAt: previous && previous.startedAt || 0 })
 
