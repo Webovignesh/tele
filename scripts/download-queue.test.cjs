@@ -620,6 +620,29 @@ async function runStallTests () {
 /* ------------------------------------------------------------------ */
 function runRecoveryContractTests () {
   assert.match(source, /STALL_AFTER_MS/, 'a stall threshold must exist')
+
+  /* The threshold has to beat TDLib's own retry backoff or it is useless.
+   *
+   * When TDLib's internal temp -> cache rename is refused - on Windows, real-time
+   * antivirus still holding the freshly written temp file - it fails the download
+   * and retries on its own schedule, measured at 36-38 seconds. Re-asserting is
+   * cheap and never cancels, so it must happen well before that: at the original
+   * 45s the batch always waited for TDLib and visibly stopped dead. Measured on 150
+   * photos, dropping to 8s took the worst pause from 38s to 4-8s and total time
+   * from 56s to 22s. */
+  const stall = /const STALL_AFTER_MS = (\d+)/.exec(source)
+  const sweep = /const SWEEP_INTERVAL_MS = (\d+)/.exec(source)
+  assert.ok(stall && sweep, 'both watchdog intervals must be declared')
+  assert.ok(Number(stall[1]) <= 20000,
+    `STALL_AFTER_MS is ${stall[1]}ms; it must be well under TDLib's ~36s retry backoff`)
+  assert.ok(Number(sweep[1]) < Number(stall[1]),
+    'the sweep must run more often than the stall window, or the window is not honoured')
+
+  // A thumbnail that times out must not leave its listener on the shared client.
+  const thumbTimeout = /const timer = setTimeout\(\(\) => \{([\s\S]*?)\}, 60000\)/.exec(source)
+  assert.ok(thumbTimeout, 'the thumbnail timeout must exist')
+  assert.match(thumbTimeout[1], /client\.off\('update', onUpdate\)/,
+    'the thumbnail timeout must detach its update listener')
   assert.match(source, /sweep \(\)/, 'a watchdog pass must exist')
   assert.match(source, /reconcile \(\)/, 'the slot count must be reconcilable')
   assert.match(source, /async reassert \(job\)/, 'quiet jobs must be re-assertable')

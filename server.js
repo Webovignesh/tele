@@ -128,14 +128,27 @@ function respond (ws, id, ok, data, error) {
 const CANCELLABLE = ['queued', 'downloading', 'paused']
 const TERMINAL = ['done', 'error', 'cancelled']
 
-/* A started job that has received no TDLib progress for this long is treated as
- * stalled and returned to the queue. TDLib can stop a download without reporting
- * anything (a cancel issued elsewhere against a shared file id, a network drop, a
- * cache eviction), and the queue is otherwise driven purely by TDLib updates, so
- * without this backstop such a job holds its concurrency slot for the life of the
- * process and enough of them stop the queue dead. */
-const STALL_AFTER_MS = 45000
-const SWEEP_INTERVAL_MS = 5000
+/* How long an active job may go without a single new byte before its download
+ * request is re-asserted.
+ *
+ * This is deliberately short, because re-asserting costs almost nothing: it is a
+ * getFile plus an idempotent downloadFile against at most CONCURRENCY jobs, and it
+ * never cancels anything. A file that is genuinely transferring refreshes its
+ * timestamp on every progress update and is therefore never touched.
+ *
+ * It has to be shorter than TDLib's own retry backoff to be any use. TDLib gives up
+ * on a file when its internal temp -> cache rename is refused - on Windows that
+ * happens when real-time antivirus still holds the freshly written temp file:
+ *   "Failed to Download file NNN of type Photo: [WindowsError : Access is denied.
+ *    : 5 : Can't rename .td_files\temp\7557 to .td_files\photos\...jpg]"
+ * It then retries on its own schedule, which measured at 36-38 seconds. With the
+ * old 45s threshold we always waited for TDLib and the user saw the batch stop
+ * dead; at 8s we nudge it back to work first. Observed against 150 photos: 146
+ * finished in 14s and the last four froze for 38s, matching those log lines
+ * exactly - including thumbnails under .td_database, which this app never touches,
+ * so the refusal is not something we cause. */
+const STALL_AFTER_MS = 8000
+const SWEEP_INTERVAL_MS = 2000
 // Bounded so a genuinely broken file cannot retry for ever.
 const MAX_ATTEMPTS = 3
 const SPEED_SMOOTHING = 0.6
@@ -146,9 +159,12 @@ class DownloadManager {
     this.activeCount = 0
     this.lastEmit = new Map()
     /* fileId -> the path a completed job delivered it to. One TDLib file can back
-     * several queued messages, and finalize() moves it out of TDLib's cache, so a
+     * several queued messages, and finalize() takes it out of TDLib's cache, so a
      * sibling needs to know where the content ended up. */
     this.deliveredByFile = new Map()
+    // TDLib file ids currently being downloaded, so the same file is never
+    // requested twice at once.
+    this.inFlightFiles = new Set()
     // Set while a bulk operation walks the queue. tryRun() is a no-op during
     // that window so cancelling job 1 of 20,000 cannot start job 9 only for the
     // same pass to cancel it a moment later (an O(n^2) scan storm plus a burst
@@ -246,7 +262,19 @@ class DownloadManager {
   tryRun () {
     if (this.bulk) return
     while (this.activeCount < CONCURRENCY) {
-      const next = [...this.jobs.values()].find(j => j.status === 'queued')
+      /* A file already in flight is skipped rather than requested again. Asking
+       * TDLib for the same file twice made it fetch the bytes a second time into
+       * another temp file, whose temp -> cache rename then collided with the copy we
+       * were taking; TDLib calls that a failed download and retries after a long
+       * backoff. The duplicate is left queued and settles as soon as the first copy
+       * lands - see settleTwins. */
+      let next = null
+      for (const job of this.jobs.values()) {
+        if (job.status !== 'queued') continue
+        if (this.inFlightFiles.has(job.fileId)) continue
+        next = job
+        break
+      }
       if (!next) break
       this.activeCount++
       // startJob handles its own failures, but it is not awaited here, so an
@@ -287,10 +315,24 @@ class DownloadManager {
     try {
       job.status = 'downloading'
       job.active = true
+      this.inFlightFiles.add(job.fileId)
       job.attempts = (job.attempts || 0) + 1
       job.lastProgressAt = Date.now()
       job.speed = 0
       this.emitJob(job)
+
+      /* Already fetched during this session through another message? Adopt that
+       * copy instead of asking Telegram for the bytes again. */
+      const delivered = this.deliveredByFile.get(job.fileId)
+      if (delivered && fs.existsSync(delivered)) {
+        job.downloaded = job.fileSize || job.downloaded || 0
+        job.destPath = delivered
+        job.status = 'done'
+        job.speed = 0
+        this.finishJob(job)
+        this.emitJob(job)
+        return
+      }
 
       const fileInfo = await client.invoke({ _: 'getFile', file_id: job.fileId }).catch(() => null)
       if (stale()) return
@@ -425,14 +467,42 @@ class DownloadManager {
         const chatFolder = path.join(downloadsDir, sanitize(job.chatTitle))
         fs.mkdirSync(chatFolder, { recursive: true })
         const dest = uniquePath(chatFolder, sanitize(job.fileName))
-        await fs.promises.rename(srcPath, dest).catch(async () => {
+        let moved = false
+        try {
+          await fs.promises.rename(srcPath, dest)
+          moved = true
+        } catch {
+          // Cross-volume moves always land here: the cache is under the app and the
+          // destination is usually another drive.
           await fs.promises.copyFile(srcPath, dest)
+        }
+        /* Retire TDLib's copy through TDLib, not behind its back.
+         *
+         * Removing the cache file directly left TDLib believing it was still
+         * cached. The next time it wanted that file it logged
+         *   "Need to redownload file NNN: Can't get stat about the file"
+         * re-fetched it, and its own temp -> cache rename then collided with ours:
+         *   "Failed to Download file NNN of type Photo: [WindowsError :
+         *    Access is denied. : 5 : Can't rename .td_files\temp\7326 to
+         *    .td_files\photos\...jpg]"
+         * TDLib treats that as a failed download and retries after a long backoff,
+         * which is what made a batch sail through most files and then sit still for
+         * half a minute. Measured: 146 of 150 photos finished in 14s, then four
+         * jobs - exactly the four files in those log lines - froze for 36s.
+         *
+         * deleteFile keeps TDLib's database consistent whether or not the bytes are
+         * still there, so it never tries to reuse a file we have taken. */
+        if (client && ready) {
+          await client.invoke({ _: 'deleteFile', file_id: job.fileId }).catch(() => {})
+        } else if (!moved) {
           await fs.promises.unlink(srcPath).catch(() => {})
-        })
+        }
         job.destPath = dest
         job.status = 'done'
         job.speed = 0
         this.deliveredByFile.set(job.fileId, dest)
+        // Anything else queued for the same file is already satisfied by this copy.
+        this.settleTwins(job)
       }
     } catch (e) {
       /* Last chance: a sibling may have delivered this same file while we were
@@ -455,10 +525,34 @@ class DownloadManager {
     this.emitJob(job)
   }
 
+  /* Settles every other job backed by the SAME TDLib file.
+   *
+   * One file can be queued through several messages. Letting each of them ask
+   * TDLib for the same file made it download the bytes again into a second temp
+   * file, and its temp -> cache rename then collided with the copy we were taking,
+   * which TDLib reports as a failed download and retries slowly. The content is
+   * already on disk, so the siblings adopt it. */
+  settleTwins (job) {
+    if (!job.destPath) return
+    for (const other of [...this.jobs.values()]) {
+      if (other === job || other.fileId !== job.fileId) continue
+      if (TERMINAL.includes(other.status)) continue
+      other.run = (other.run || 0) + 1 // invalidate any runner already in flight
+      other.destPath = job.destPath
+      other.status = 'done'
+      other.error = null
+      other.speed = 0
+      other.downloaded = other.fileSize || job.downloaded || other.downloaded
+      this.finishJob(other)
+      this.emitJob(other)
+    }
+  }
+
   finishJob (job) {
     if (job.active) {
       job.active = false
       this.activeCount = Math.max(0, this.activeCount - 1)
+      this.inFlightFiles.delete(job.fileId)
     }
     /* Pump unconditionally. This used to sit inside the `if (job.active)` branch,
      * so a terminal transition on a job that held no slot never re-pumped even
@@ -682,6 +776,7 @@ class DownloadManager {
       this.jobs.clear()
       this.lastEmit.clear()
       this.deliveredByFile.clear()
+      this.inFlightFiles.clear()
       this.activeCount = 0
       return { cancelled, removed }
     })
@@ -1197,7 +1292,15 @@ function downloadThumb (fileId, thumbDir = thumbsDir) {
     }
 
     const src = await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), 60000)
+      /* The timeout path used to resolve without removing the listener, so every
+       * thumbnail that timed out left one behind on the shared client for the life
+       * of the process - the source of
+       * "MaxListenersExceededWarning: 11 update listeners added to
+       * [StableTdClient]" - and each survivor then ran on every single updateFile. */
+      const timer = setTimeout(() => {
+        client.off('update', onUpdate)
+        resolve(null)
+      }, 60000)
       const onUpdate = (u) => {
         if (u._ !== 'updateFile' || u.file.id !== fileId) return
         const local = u.file.local || {}
