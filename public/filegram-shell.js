@@ -657,11 +657,13 @@
     const max = Number(slider.max || 64)
     const value = Number(slider.value || min)
     const span = max - min
-    // A unitless ratio, not a percentage: the stylesheet converts it into the
-    // thumb-centre position so the fill boundary lands under the head instead of
-    // running past it.
     const ratio = span > 0 ? (value - min) / span : 0
-    slider.style.setProperty('--fg-range-ratio', ratio.toFixed(5))
+    const stop = `calc(${ratio.toFixed(5)} * (100% - 14px) + 14px / 2)`
+    /* Chromium CANNOT apply background to ::-webkit-slider-runnable-track when the
+     * value involves dynamically-set custom properties, even if they are declared
+     * on the element itself. The gradient must be set inline as a --track-bg
+     * variable that the stylesheet reads. */
+    slider.style.setProperty('--fg-track-bg', `linear-gradient(to right, var(--fg-accent) 0 ${stop}, var(--fg-surface-3) ${stop} 100%)`)
   }
 
   function installRangeFill () {
@@ -907,5 +909,8 @@
     }
   }
 
-  setTimeout(() => { syncStats(); applyChatFilters() }, 400)
+  /* All idempotent installs; a double-load is harmless. Final gate: delayed one
+   * tick so state, other owners and event listeners have finished installing. */
+  setTimeout(() => { fileGramShell(); syncStats(); applyChatFilters() }, 0)
 })()
+

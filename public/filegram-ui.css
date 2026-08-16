@@ -89,6 +89,18 @@
   /* Transitions */
   --fg-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --fg-duration-fast: 120ms;
+
+  /* Slider fill geometry. Custom properties must be declared on :root rather
+     than on the input element because pseudo-elements do not INHERIT custom
+     properties from their originating element. Declared on #concurrency, the
+     variables would be undefined inside ::-webkit-slider-runnable-track and
+     Chromium would treat the gradient as invalid background:none. */
+  --fg-range-ratio: 0; /* unitless 0..1, written by filegram-shell.js */
+  --fg-range-thumb: 14px; /* thumb width */
+  /* The x coordinate of the thumb CENTRE. A plain percentage of the track is
+     wrong because the thumb centre only travels between half a thumb from each
+     end, so a percentage stop runs ahead of the head and paints past it. */
+  --fg-range-stop: calc(var(--fg-range-ratio) * (100% - var(--fg-range-thumb)) + var(--fg-range-thumb) / 2);
   --fg-duration-normal: 200ms;
   --fg-duration-slow: 320ms;
 
@@ -2249,14 +2261,6 @@ li.chat-item.active {
   -webkit-appearance: none !important;
   background: transparent !important;
   border: none !important;
-  /* Unitless 0..1 ratio of the current value, written by filegram-shell.js. */
-  --fg-range-ratio: 0;
-  /* Thumb width, and the exact x of the thumb CENTRE.
-     A plain percentage of the track is wrong: the thumb centre only travels
-     between half a thumb from each end, so a percentage stop ran ahead of the
-     head and painted blue past it. */
-  --fg-range-thumb: 14px;
-  --fg-range-stop: calc(var(--fg-range-ratio) * (100% - var(--fg-range-thumb)) + var(--fg-range-thumb) / 2);
 }
 
 #concurrency:focus-visible {
@@ -2267,8 +2271,10 @@ li.chat-item.active {
   height: 6px;
   border-radius: 3px;
   border: none;
-  background:
-    linear-gradient(to right, var(--fg-accent) 0 var(--fg-range-stop), var(--fg-surface-3) var(--fg-range-stop) 100%);
+  /* Chromium will not evaluate this gradient when it involves custom properties
+     that are set dynamically, even if they are declared inline on the element
+     itself. The JS writes the complete gradient as --fg-track-bg. */
+  background: var(--fg-track-bg, var(--fg-surface-3));
 }
 
 #concurrency::-webkit-slider-thumb {
