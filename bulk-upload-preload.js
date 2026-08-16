@@ -31,28 +31,37 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
    * replacement. The result was one stale temporary media row plus one final row
    * for every successful upload: 11 real files became 22 in FileGram.
    *
-   * Emit the equivalent delete update BEFORE server.js processes the succeeded
-   * update. This uses the existing authoritative deletion path rather than adding
-   * a second media-index owner. Extra fields are ignored by TDLib consumers and
-   * the synthetic marker prevents recursion.
+   * `tdl` clients expose `on()` but are not Node EventEmitters, so methods such as
+   * prependListener()/emit() are not available. Intercept update subscriptions
+   * instead. Any consumer subscribing after this preload receives the synthetic
+   * delete immediately before the real send-succeeded update. session-preload.js
+   * is one such consumer and forwards both updates through its stable EventEmitter
+   * facade to server.js in the correct order.
    */
   function installTemporaryMessageRetirement (client) {
     if (!client || client.__fileGramTemporaryMessageRetirement) return
+    if (typeof client.on !== 'function') return
     client.__fileGramTemporaryMessageRetirement = true
-    client.prependListener('update', update => {
-      if (!update || update.__fileGramSyntheticDelete) return
-      if (update._ !== 'updateMessageSendSucceeded') return
-      if (!update.message || update.message.chat_id == null || update.old_message_id == null) return
-      if (String(update.old_message_id) === String(update.message.id)) return
-      client.emit('update', {
-        _: 'updateDeleteMessages',
-        chat_id: update.message.chat_id,
-        message_ids: [update.old_message_id],
-        is_permanent: true,
-        from_cache: false,
-        __fileGramSyntheticDelete: true
+
+    const priorOn = client.on.bind(client)
+    client.on = function fileGramRetiringOn (eventName, listener) {
+      if (eventName !== 'update' || typeof listener !== 'function') return priorOn(eventName, listener)
+      return priorOn('update', update => {
+        if (update && !update.__fileGramSyntheticDelete && update._ === 'updateMessageSendSucceeded' &&
+            update.message && update.message.chat_id != null && update.old_message_id != null &&
+            String(update.old_message_id) !== String(update.message.id)) {
+          listener({
+            _: 'updateDeleteMessages',
+            chat_id: update.message.chat_id,
+            message_ids: [update.old_message_id],
+            is_permanent: true,
+            from_cache: false,
+            __fileGramSyntheticDelete: true
+          })
+        }
+        return listener(update)
       })
-    })
+    }
   }
 
   tdl.createClient = function createBulkUploadAwareClient (options) {
