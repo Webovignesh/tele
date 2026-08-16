@@ -8,9 +8,6 @@
  * request with x-filegram-upload-id. This preload registers first and intercepts
  * only tagged requests; all ordinary attachment requests fall through to the
  * original server.js route untouched.
- *
- * It is loaded after tdl-upload-compat.js, so bulk sendMessage calls use the same
- * proven TDLib InputFile compatibility layer as the rest of FileGram.
  */
 
 if (!global.__fileGramBulkUploadPreloadInstalled) {
@@ -85,10 +82,6 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
     })
   }
 
-  /* Never treat a generic "not found" as proof that a Telegram message was
-   * deleted. A transient/permission/chat lookup error must leave the persistent
-   * Files index untouched. Only TDLib's message-id-specific errors are evidence
-   * strong enough to prune a row. */
   function missingMessageError (error) {
     const code = Number(error && (error.code || error.error_code) || 0)
     const text = String(error && (error.message || error.error_message) || error || '')
@@ -143,6 +136,59 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
     }
   }
 
+  const LIVE_MEDIA_FILTERS = [
+    'messageFilterDocument',
+    'messageFilterPhoto',
+    'messageFilterVideo',
+    'messageFilterAudio',
+    'messageFilterVoiceNote',
+    'messageFilterAnimation',
+    'messageFilterVideoNote'
+  ]
+
+  async function collectLiveMediaIds (chatId, maxIds = 5000) {
+    const ids = new Set()
+    for (const filterName of LIVE_MEDIA_FILTERS) {
+      let fromMessageId = 0
+      let guard = 0
+      while (ids.size < maxIds && guard++ < 1000) {
+        const result = await activeClient.invoke({
+          _: 'searchChatMessages',
+          chat_id: chatId,
+          query: '',
+          from_message_id: fromMessageId,
+          offset: 0,
+          limit: 100,
+          filter: { _: filterName }
+        })
+        const messages = Array.isArray(result && result.messages) ? result.messages : []
+        if (!messages.length) break
+        let oldest = null
+        for (const message of messages) {
+          if (!message || message.id == null || message.sending_state !== undefined) continue
+          ids.add(String(message.id))
+          oldest = message.id
+          if (ids.size >= maxIds) break
+        }
+        if (messages.length < 100 || oldest == null || String(oldest) === String(fromMessageId)) break
+        fromMessageId = oldest
+      }
+    }
+    return [...ids]
+  }
+
+  async function liveMediaIds (req, res) {
+    try {
+      if (!activeClient) return res.status(503).json({ ok: false, error: 'Telegram client is not ready' })
+      const chatId = Number(req.params.chatId)
+      if (!Number.isFinite(chatId)) return res.status(400).json({ ok: false, error: 'Invalid chat id' })
+      const ids = await collectLiveMediaIds(chatId, 5000)
+      return res.json({ ok: true, ids, exact: ids.length < 5000 })
+    } catch (error) {
+      return res.status(500).json({ ok: false, error: String(error && error.message ? error.message : error) })
+    }
+  }
+
   function pickWindowsFolder () {
     return new Promise((resolve, reject) => {
       if (process.platform !== 'win32') {
@@ -151,12 +197,24 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
         reject(error)
         return
       }
+
+      /* OpenFileDialog deliberately replaces FolderBrowserDialog. With
+       * ValidateNames/CheckFileExists disabled, Windows renders the normal
+       * full-size Explorer file picker while we treat the selected directory as
+       * the result. */
       const script = [
         'Add-Type -AssemblyName System.Windows.Forms',
-        '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
-        '$dialog.Description = "Select FileGram download folder"',
-        '$dialog.ShowNewFolderButton = $true',
-        'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }'
+        '$d = New-Object System.Windows.Forms.OpenFileDialog',
+        '$d.Title = "Select FileGram download folder"',
+        '$d.ValidateNames = $false',
+        '$d.CheckFileExists = $false',
+        '$d.CheckPathExists = $true',
+        '$d.FileName = "Select this folder"',
+        '$d.Filter = "Folder|*.folder"',
+        'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {',
+        '  $p = Split-Path -Parent $d.FileName;',
+        '  if ($p) { [Console]::Out.Write($p) }',
+        '}'
       ].join('; ')
       const child = spawn('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
         windowsHide: true,
@@ -181,8 +239,7 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
       child.on('error', error => finish(reject, error))
       child.on('close', code => {
         if (code !== 0) return finish(reject, new Error(stderr.trim() || `Folder picker exited with code ${code}`))
-        const selected = stdout.trim()
-        finish(resolve, selected || null)
+        finish(resolve, stdout.trim() || null)
       })
     })
   }
@@ -205,6 +262,7 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
     })
 
     app.post('/api/filegram/reconcile-message-ids/:chatId', reconcileMessageIds)
+    app.get('/api/filegram/live-media-ids/:chatId', liveMediaIds)
 
     app.post('/api/filegram/pick-download-folder', async (req, res) => {
       try {
