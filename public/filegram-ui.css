@@ -909,18 +909,6 @@ li.chat-item.active {
   color: #f0646e;
 }
 
-/* Chat header overflow anchors downward instead of upward. */
-.fg-overflow-wrap {
-  position: relative;
-  display: inline-flex;
-}
-
-.fg-overflow-menu {
-  top: calc(100% + 6px);
-  bottom: auto;
-  right: 0;
-}
-
 /* ---------- In-app confirmation modal ---------- */
 .fg-modal {
   position: fixed;
@@ -2237,44 +2225,61 @@ li.chat-item.active {
   font-family: var(--fg-font-mono);
 }
 
-/* Parallel files slider */
+/* ---------- Parallel files slider ----------
+   The input box must be as tall as the THUMB, not as tall as the track. It was
+   pinned to 6px, which is the track height, so the 14px thumb had nowhere to sit
+   and rendered clipped and visually high. The track is drawn by the pseudo
+   element and the thumb is pulled back onto its centre line with a negative
+   margin of (track - thumb) / 2. Background is transparent so the input box
+   itself never paints a second bar behind the track. */
 #concurrency {
   width: 100% !important;
-  height: 6px !important;
-  accent-color: var(--fg-accent) !important;
+  height: 16px !important;
+  margin: 0 !important;
+  padding: 0 !important;
   cursor: pointer !important;
-  border-radius: 3px !important;
   appearance: none !important;
   -webkit-appearance: none !important;
-  background: var(--fg-surface-3) !important;
+  background: transparent !important;
+  border: none !important;
+  /* Updated by filegram-shell.js so the elapsed part of the track is filled.
+     Without it the bar was uniformly grey and gave no read on the value. */
+  --fg-range-fill: 0%;
+}
+
+#concurrency:focus-visible {
+  outline: none !important;
+}
+
+#concurrency::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  border: none;
+  background:
+    linear-gradient(to right, var(--fg-accent) 0 var(--fg-range-fill), var(--fg-surface-3) var(--fg-range-fill) 100%);
 }
 
 #concurrency::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 14px;
   height: 14px;
+  /* (6px track - 14px thumb) / 2 = -4px. This is what centres the head. */
+  margin-top: -4px;
   background: var(--fg-accent);
   border-radius: var(--fg-radius-full);
-  border: 2px solid var(--fg-surface-0);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  border: 2px solid var(--fg-surface-1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   cursor: pointer;
+  transition: transform var(--fg-duration-fast) var(--fg-ease);
 }
 
-#concurrency::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  background: var(--fg-accent);
-  border-radius: var(--fg-radius-full);
-  border: 2px solid var(--fg-surface-0);
-  cursor: pointer;
+#concurrency:hover::-webkit-slider-thumb,
+#concurrency:focus-visible::-webkit-slider-thumb {
+  transform: scale(1.12);
 }
 
-#concurrency::-webkit-slider-runnable-track {
-  height: 6px;
-  border-radius: 3px;
-  background: var(--fg-surface-3);
-}
-
+/* Firefox centres the thumb on the track itself and paints the elapsed part with
+   ::-moz-range-progress, so it needs no margin and no gradient. */
 #concurrency::-moz-range-track {
   height: 6px;
   border-radius: 3px;
@@ -2282,13 +2287,29 @@ li.chat-item.active {
   border: none;
 }
 
+#concurrency::-moz-range-progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--fg-accent);
+}
+
+#concurrency::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: var(--fg-accent);
+  border-radius: var(--fg-radius-full);
+  border: 2px solid var(--fg-surface-1);
+  cursor: pointer;
+}
+
 #concurrency-val {
   font-size: var(--fg-text-lg);
   font-weight: var(--fg-weight-bold);
   color: var(--fg-accent);
-  min-width: 24px;
-  text-align: center;
+  min-width: 2.5ch;
+  text-align: right;
   font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 /* Bulk action buttons. Hierarchy: neutral for reversible actions, tinted for
@@ -3705,11 +3726,15 @@ button.secondary {
 /* ---------- Statistics card ----------
    One cohesive panel: three metric columns with restrained dividers, then the
    Total in the lower section of the SAME card. */
+/* Margin is 0 horizontally on purpose: the card is prepended into .dl-controls,
+   which already supplies 14px of side padding. A second 14px margin indented the
+   card relative to "Save to" and the path field below it. The bottom margin adds
+   to the flex gap so the card reads as a separate block from the form controls. */
 #tele-ui-download-summary.fg-stats {
   grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
   gap: 0 !important;
   padding: 0 !important;
-  margin: 12px 14px 0 !important;
+  margin: 2px 0 14px !important;
   background: var(--fg-surface-1) !important;
   border: 1px solid var(--fg-border) !important;
   border-radius: var(--fg-radius-md) !important;
@@ -3727,12 +3752,27 @@ button.secondary {
   border-right: none !important;
 }
 
+/* The hairline belongs to the BOTTOM of the metric row, not the top of Total.
+   Drawn on the tiles, the horizontal line meets the ends of the vertical column
+   dividers at a corner. Declared on Total instead it sat below the sparkline row,
+   leaving the vertical dividers stopping short of it with a visible gap. */
+#tele-ui-download-summary.fg-stats > div:has(> strong[data-stat]) {
+  border-bottom: 1px solid var(--fg-border) !important;
+}
+
 #tele-ui-download-summary.fg-stats .fg-spark {
   grid-column: 1 / -1;
   height: 16px;
   margin: 0;
-  padding: 0 10px 8px;
+  padding: 6px 10px 4px;
   border-top: none;
+}
+
+/* paintSparkline empties this node when there is no throughput to draw. Without
+   collapsing it, an empty 24px band sat between the hairline and Total and made
+   Total look detached from the card it belongs to. */
+#tele-ui-download-summary.fg-stats .fg-spark:empty {
+  display: none !important;
 }
 
 .fg-stats-total {
@@ -3745,14 +3785,12 @@ button.secondary {
   background: var(--fg-surface-0);
 }
 
-/* The hairline between the top statistics row and Total.
-   It needs this specificity to land at all: .fg-stats-total is a direct div
-   child of the card, so `#tele-ui-download-summary.fg-stats > div` (1,2,0,
-   !important) outranks a plain .fg-stats-total border declaration, which is why
-   the divider was computing to 0px and no line was drawn. One 1px low-contrast
-   rule only - the card keeps its single border and stays cohesive. */
+/* Total carries no border of its own: the single hairline is drawn on the bottom
+   of the metric tiles above, so exactly one line separates the two sections and
+   the column dividers terminate on it. border-right is cleared because the
+   card's `> div` rule would otherwise draw one at the card edge. */
 #tele-ui-download-summary.fg-stats > .fg-stats-total {
-  border-top: 1px solid var(--fg-border) !important;
+  border-top: none !important;
   border-right: none !important;
 }
 
@@ -3784,15 +3822,13 @@ button.secondary {
    slider never shifts as you drag. */
 .dl-controls .conc:has(#concurrency) > .row {
   display: grid !important;
-  grid-template-columns: minmax(0, 1fr) 2.5ch !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
   align-items: center !important;
   gap: 12px !important;
 }
 
 #concurrency-val {
   justify-self: end !important;
-  text-align: right !important;
-  font-variant-numeric: tabular-nums !important;
 }
 
 /* ---------- Chat filter summary + empty state ---------- */

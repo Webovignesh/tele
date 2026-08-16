@@ -2395,6 +2395,37 @@ wss.on('connection', (ws) => {
           const r = await loadMessages(payload.chatId, payload.fromMessageId, payload.limit || 100)
           return respond(ws, id, true, r)
         }
+        /* Marks a chat read on Telegram.
+         *
+         * Deliberately an explicit command rather than a side effect of
+         * get-messages: the file index reconciler calls get-messages repeatedly in
+         * the background, so marking read there would silently clear the unread
+         * state of chats the user never opened.
+         *
+         * Viewing the chat's last message marks everything up to it as read.
+         * TDLib then pushes updateChatReadInbox, which already emits chat-upsert,
+         * so the client's unread count and filters update through the normal path
+         * with no extra plumbing. */
+        case 'mark-read': {
+          if (!client || !ready) return respond(ws, id, false, null, 'Not logged in')
+          if (payload.chatId == null) return respond(ws, id, false, null, 'chatId is required')
+          const chat = await client.invoke({ _: 'getChat', chat_id: payload.chatId }).catch(() => null)
+          const lastMessageId = chat && chat.last_message ? chat.last_message.id : null
+          if (!lastMessageId) return respond(ws, id, true, { ok: false, reason: 'no messages' })
+          const view = extra => client.invoke({
+            _: 'viewMessages',
+            chat_id: payload.chatId,
+            message_ids: [lastMessageId],
+            force_read: true,
+            ...extra
+          })
+          // The source parameter is required by newer TDLib builds and rejected by
+          // older ones, so fall back rather than assume a version.
+          const ok = await view({ source: { _: 'messageSourceChatHistory' } })
+            .then(() => true)
+            .catch(() => view({ message_thread_id: 0 }).then(() => true).catch(() => false))
+          return respond(ws, id, true, { ok })
+        }
         case 'search-media': {
           const r = await searchMedia(payload.chatId, payload.query, payload.fromMessageId, payload.limit, payload.filter)
           return respond(ws, id, true, r)

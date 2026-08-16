@@ -138,6 +138,21 @@
   }
   renderChats = teleUiRenderChats
 
+  /* Repaint through the CURRENT renderChats owner instead of calling
+   * teleUiRenderChats by name.
+   *
+   * teleUiRenderChats decides row.hidden from the search query and channels-only
+   * alone. Later layers add predicates on top - filegram-shell.js adds the Unread
+   * filter - and those run from the renderChats wrapper. Calling this renderer
+   * directly re-showed every row, so the Unread filter was defeated by typing in
+   * chat search or by any chat event.
+   *
+   * No recursion: the wrapper calls the base it captured at install time. */
+  function repaintChats () {
+    if (typeof renderChats === 'function' && renderChats !== teleUiRenderChats) return renderChats()
+    return teleUiRenderChats()
+  }
+
   function rebindChatFilters () {
     const oldSearch = document.querySelector('#chat-search')
     if (oldSearch && oldSearch.dataset.teleUiOwner !== '1') {
@@ -145,8 +160,8 @@
       next.value = oldSearch.value
       next.dataset.teleUiOwner = '1'
       oldSearch.replaceWith(next)
-      next.addEventListener('input', teleUiRenderChats)
-      next.addEventListener('search', teleUiRenderChats)
+      next.addEventListener('input', () => repaintChats())
+      next.addEventListener('search', () => repaintChats())
     }
     const oldOnly = document.querySelector('#channels-only')
     if (oldOnly && oldOnly.dataset.teleUiOwner !== '1') {
@@ -156,7 +171,7 @@
       oldOnly.replaceWith(next)
       next.addEventListener('change', () => {
         try { localStorage.setItem('tele-channels-only', next.checked ? '1' : '0') } catch {}
-        teleUiRenderChats()
+        repaintChats()
       })
     }
   }
@@ -377,11 +392,11 @@
         const title = document.querySelector('#chat-title')
         if (title && chat.title) title.textContent = chat.title
       }
-      teleUiRenderChats()
+      repaintChats()
       return
     }
     const result = baseHandleEvent(event)
-    if (event && event.name === 'chat-remove') teleUiRenderChats()
+    if (event && event.name === 'chat-remove') repaintChats()
     if (event && (event.name === 'message-upsert' || event.name === 'message-delete')) {
       const payload = event.payload || event
       const chatId = payload.chatId
@@ -732,7 +747,7 @@
   normalizeSearchIcon()
   installClearAll()
   ensureDownloadSummary()
-  teleUiRenderChats()
+  repaintChats()
   restoreCanonical(state.activeChatId).then(() => {
     updateCanonicalCount()
     try { renderFiles() } catch {}

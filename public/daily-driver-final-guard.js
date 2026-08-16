@@ -261,6 +261,32 @@
     return (state.chats || []).find(chat => chat && guardKey(chat.id) === guardKey(chatId)) || null
   }
 
+  /* Repaint chats through the CURRENT renderChats owner, not through
+   * guardRenderChats directly.
+   *
+   * guardRenderChats decides row.hidden from the search query and channels-only
+   * alone. Later layers add their own predicates on top - filegram-shell.js adds
+   * the Unread filter - and they run from the renderChats wrapper. Calling
+   * guardRenderChats by name therefore re-showed every row and defeated the
+   * Unread filter, which is exactly what made unrelated chats reappear the moment
+   * a chat was clicked (openChat called it directly).
+   *
+   * No recursion: the wrapper invokes the base it captured at install time, not
+   * this global. */
+  function guardRepaintChats () {
+    if (typeof renderChats === 'function' && renderChats !== guardRenderChats) return renderChats()
+    return guardRenderChats()
+  }
+
+  /* Tells Telegram the chat has been read, so unread_count drops and the chat
+   * leaves the Unread filter. Only fires when there is something unread, so
+   * revisiting an already-read chat costs no round trip. */
+  function guardMarkChatRead (chatId) {
+    const chat = guardChatById(chatId)
+    if (!chat || Number(chat.unread || 0) <= 0) return
+    Promise.resolve(request('mark-read', { chatId })).catch(() => {})
+  }
+
   /* Active chat header avatar (#fg-chat-avatar).
    *
    * Nothing populated this node, so the header showed an empty dark circle: it was
@@ -277,13 +303,22 @@
     const chatId = state.activeChatId
     if (chatId == null) {
       host.replaceChildren()
+      host.dataset.guardChat = ''
       return
     }
     const chat = guardChatById(chatId)
     if (!chat) return
-    const current = host.firstElementChild
-    const next = guardAvatar(chat, current)
-    if (next !== current) host.replaceChildren(next)
+    const key = guardKey(chatId)
+    /* guardAvatar dedupes on the photo id alone. That is correct for the sidebar,
+     * where every chat owns its own node, but wrong for this single shared host:
+     * two consecutive chats that both lack a photo share photo id 0, so the node
+     * would be reused and keep the PREVIOUS chat's initials and colour. Only offer
+     * the existing node for reuse while the chat is unchanged, so a late-arriving
+     * photo still dedupes but a chat switch always rebuilds. */
+    const reuse = host.dataset.guardChat === key ? host.firstElementChild : null
+    const next = guardAvatar(chat, reuse)
+    if (next !== host.firstElementChild) host.replaceChildren(next)
+    host.dataset.guardChat = key
   }
 
   function guardRenderChats () {
@@ -373,7 +408,7 @@
       oldOnly.replaceWith(next)
       next.addEventListener('change', () => {
         try { localStorage.setItem('tele-channels-only', next.checked ? '1' : '0') } catch {}
-        guardRenderChats()
+        guardRepaintChats()
       })
     }
   }
@@ -396,7 +431,7 @@
       // here too rather than only on open.
       guardPaintHeaderAvatar()
     }
-    guardRenderChats()
+    guardRepaintChats()
   }
 
   handleEvent = function teleFinalGuardHandleEvent (event) {
@@ -414,7 +449,7 @@
     }
     if (event && event.name === 'chat-remove') {
       removeChat(event.chatId)
-      guardRenderChats()
+      guardRepaintChats()
       return
     }
     return guardBaseHandleEvent(event)
@@ -422,7 +457,8 @@
 
   openChat = async function teleGuardOpenChat (chatId) {
     const result = await guardBaseOpenChat(chatId)
-    guardRenderChats()
+    guardMarkChatRead(chatId)
+    guardRepaintChats()
     guardUpdateMediaLabel()
     guardPaintHeaderAvatar()
     return result

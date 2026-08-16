@@ -18,7 +18,12 @@
   const $$ = sel => [...document.querySelectorAll(sel)]
 
   const ICON = {
-    brand: '<svg viewBox="0 0 28 28" aria-hidden="true"><defs><linearGradient id="fgBrand" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4da3ff"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient></defs><rect x="1.5" y="1.5" width="25" height="25" rx="7" fill="url(#fgBrand)"/><path d="M10 8.5h5.4L19 12v7.5a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1z" fill="#fff" fill-opacity=".95"/><path d="M15.2 8.7v3.1h3.3" fill="#4da3ff" fill-opacity=".5"/><path d="m12.3 15.4 3.4 1.9-3.4 2z" fill="#3f7fd0"/></svg>',
+    /* Telegram mark: brand-blue disc with the white paper plane. Self-contained
+     * inline SVG, no network asset and no emoji. The plane is scaled and offset
+     * so its bounding box sits centred in the 28x28 disc. The Telegram logo is a
+     * trademark of Telegram Messenger; it is used here to identify the service
+     * this client connects to. */
+    brand: '<svg viewBox="0 0 28 28" aria-hidden="true"><defs><linearGradient id="fgTelegramMark" x1="14" y1="0" x2="14" y2="28" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#2AABEE"/><stop offset="1" stop-color="#229ED9"/></linearGradient></defs><circle cx="14" cy="14" r="14" fill="url(#fgTelegramMark)"/><path transform="translate(2.1 2.7) scale(0.96)" fill="#fff" d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71L12.6 16.3l-1.99 1.93c-.23.23-.42.42-.83.42z"/></svg>',
     plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg>',
     search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>',
     info: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h6"/></svg>',
@@ -28,7 +33,6 @@
     trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>',
     check: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>',
     gear: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.1"/><path d="M19.1 14.4a1.5 1.5 0 0 0 .3 1.65l.05.06a1.9 1.9 0 1 1-2.68 2.68l-.06-.06a1.5 1.5 0 0 0-2.56 1.07v.16a1.9 1.9 0 1 1-3.8 0v-.1a1.5 1.5 0 0 0-2.56-1.02l-.06.05a1.9 1.9 0 1 1-2.68-2.68l.05-.06a1.5 1.5 0 0 0-1.02-2.56h-.16a1.9 1.9 0 1 1 0-3.8h.1A1.5 1.5 0 0 0 5.5 7.33l-.05-.06a1.9 1.9 0 1 1 2.68-2.68l.06.05A1.5 1.5 0 0 0 10.75 3.6v-.16a1.9 1.9 0 1 1 3.8 0v.1a1.5 1.5 0 0 0 2.56 1.02l.06-.05a1.9 1.9 0 1 1 2.68 2.68l-.05.06a1.5 1.5 0 0 0 1.07 2.56h.16a1.9 1.9 0 1 1 0 3.8h-.16a1.5 1.5 0 0 0-1.37.92z"/></svg>',
-    dots: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>',
     chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>'
   }
 
@@ -389,71 +393,9 @@
     }
   }
 
-  function installHeaderOverflow () {
-    const actions = $('.chat-actions')
-    if (!actions || $('#fg-chat-overflow')) return
-    const wrap = document.createElement('div')
-    wrap.className = 'fg-overflow-wrap'
-
-    const button = document.createElement('button')
-    button.id = 'fg-chat-overflow'
-    button.type = 'button'
-    button.className = 'fg-icon-button'
-    button.title = 'More chat actions'
-    button.setAttribute('aria-label', 'More chat actions')
-    button.setAttribute('aria-haspopup', 'menu')
-    button.setAttribute('aria-expanded', 'false')
-    button.innerHTML = `<span class="fg-icon">${ICON.dots}</span>`
-
-    const menu = document.createElement('div')
-    menu.id = 'fg-chat-overflow-menu'
-    menu.className = 'fg-account-popover fg-overflow-menu hidden'
-    menu.setAttribute('role', 'menu')
-
-    // Chat-level secondary actions only. No account actions here.
-    const infoItem = document.createElement('button')
-    infoItem.type = 'button'
-    infoItem.className = 'fg-popover-item'
-    infoItem.setAttribute('role', 'menuitem')
-    infoItem.textContent = 'Chat info'
-    infoItem.addEventListener('click', () => {
-      menu.classList.add('hidden')
-      button.setAttribute('aria-expanded', 'false')
-      $('#mg-open-info')?.click()
-    })
-
-    const zipItem = document.createElement('button')
-    zipItem.type = 'button'
-    zipItem.className = 'fg-popover-item'
-    zipItem.setAttribute('role', 'menuitem')
-    zipItem.textContent = 'Zip selected (dedupe)'
-    zipItem.addEventListener('click', () => {
-      menu.classList.add('hidden')
-      button.setAttribute('aria-expanded', 'false')
-      $('#pack-media')?.click()
-    })
-
-    menu.append(infoItem, zipItem)
-    button.addEventListener('click', event => {
-      event.stopPropagation()
-      const open = menu.classList.toggle('hidden')
-      button.setAttribute('aria-expanded', String(!open))
-    })
-    document.addEventListener('click', event => {
-      if (menu.classList.contains('hidden')) return
-      if (button.contains(event.target) || menu.contains(event.target)) return
-      menu.classList.add('hidden')
-      button.setAttribute('aria-expanded', 'false')
-    })
-    document.addEventListener('keydown', event => {
-      if (event.key !== 'Escape' || menu.classList.contains('hidden')) return
-      menu.classList.add('hidden')
-      button.setAttribute('aria-expanded', 'false')
-    })
-
-    wrap.append(button, menu)
-    actions.appendChild(wrap)
-  }
+  /* The chat-header overflow ("three dot") button is deliberately absent.
+   * Both of its entries are reachable elsewhere: Chat info from the drawer tab,
+   * and Zip selected from the downloads panel. */
 
   function relocateSelectAll () {
     const selectAll = $('#select-all-media')
@@ -701,6 +643,33 @@
     }
   }
 
+  /* Paints the elapsed portion of the concurrency track.
+   *
+   * Chromium cannot style ::-webkit-slider-runnable-track relative to the value,
+   * so the filled part is a gradient stop driven by this custom property. Purely
+   * presentational: it reads the input's own value and writes no state. The
+   * concurrency value itself stays owned by app.js, which debounces
+   * set-concurrency to the server. */
+  function paintRangeFill () {
+    const slider = $('#concurrency')
+    if (!slider) return
+    const min = Number(slider.min || 1)
+    const max = Number(slider.max || 64)
+    const value = Number(slider.value || min)
+    const span = max - min
+    const pct = span > 0 ? ((value - min) / span) * 100 : 0
+    slider.style.setProperty('--fg-range-fill', `${pct.toFixed(2)}%`)
+  }
+
+  function installRangeFill () {
+    const slider = $('#concurrency')
+    if (!slider || slider.dataset.fgRangeFill === '1') return
+    slider.dataset.fgRangeFill = '1'
+    slider.addEventListener('input', paintRangeFill)
+    slider.addEventListener('change', paintRangeFill)
+    paintRangeFill()
+  }
+
   /* The statistics card. Structure is ours; every number is read from
    * state.downloads, which the download engine owns. These are DOWNLOAD QUEUE
    * figures: with an empty queue they are legitimately 0 / 0 / 0 files. The
@@ -832,7 +801,6 @@
     installAccountPopover()
     installLogoutModal()
     installHeaderIcons()
-    installHeaderOverflow()
     relocateSelectAll()
     installFileSearch()
     installTypeDropdown()
@@ -841,6 +809,10 @@
     installPagerLabels()
     installDownloadIcons()
     installStatsCard()
+    installRangeFill()
+    // applyStatus writes the slider value from the server, which fires no input
+    // event, so the fill is repainted on every decorate pass.
+    paintRangeFill()
     paintAccount()
   }
 

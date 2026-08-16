@@ -508,27 +508,222 @@ test('active chat header avatar is never an empty circle', async ({ page }) => {
   expect(showsSomething, `photo=${avatar.hasPhoto} initials="${avatar.initials}" hidden=${avatar.initialsHidden}`).toBeTruthy()
 })
 
-test('download stats card has one hairline between the metrics and Total', async ({ page }) => {
+/* The hairline must be drawn on the BOTTOM of the metric tiles, so it meets the
+ * ends of the vertical column dividers. Declared on Total instead it sat below the
+ * sparkline row and the vertical dividers stopped short of it. */
+test('download stats hairline meets the column dividers', async ({ page }) => {
   if (!await boot(page)) return
   const card = await page.evaluate(() => {
-    const total = document.querySelector('#fg-stats-total')
     const summary = document.querySelector('#tele-ui-download-summary')
-    if (!total || !summary) return null
-    const cs = getComputedStyle(total)
+    const total = document.querySelector('#fg-stats-total')
+    if (!summary || !total) return null
+    const tiles = [...summary.children].filter(el => el.querySelector(':scope > strong[data-stat]'))
+    const visible = tiles.filter(el => getComputedStyle(el).display !== 'none')
+    const first = visible[0]
+    const spark = summary.querySelector('.fg-spark')
     return {
       insideSameCard: summary.contains(total),
-      borderTopWidth: cs.borderTopWidth,
-      borderTopStyle: cs.borderTopStyle,
-      label: (total.querySelector('span') || {}).textContent,
-      value: (total.querySelector('strong') || {}).textContent
+      tileBorderBottom: first ? getComputedStyle(first).borderBottomWidth : 'n/a',
+      tileBorderRight: first ? getComputedStyle(first).borderRightWidth : 'n/a',
+      tileBottom: first ? Math.round(first.getBoundingClientRect().bottom) : -1,
+      totalTop: Math.round(total.getBoundingClientRect().top),
+      totalBorderTop: getComputedStyle(total).borderTopWidth,
+      sparkDisplay: spark ? getComputedStyle(spark).display : 'absent',
+      sparkEmpty: spark ? spark.childElementCount === 0 : null,
+      label: (total.querySelector('span') || {}).textContent
     }
   })
   expect(card, 'the Total row must exist').not.toBeNull()
   expect(card.insideSameCard, 'Total must stay inside the same stats card').toBeTruthy()
-  expect(card.borderTopWidth, 'a 1px hairline must separate the metrics from Total').toBe('1px')
-  expect(card.borderTopStyle).toBe('solid')
+  expect(card.tileBorderBottom, 'the metric tiles must draw the 1px hairline').toBe('1px')
+  expect(card.tileBorderRight, 'the column dividers must remain').toBe('1px')
+  // The line and the divider ends share a y coordinate, so the corners join.
+  expect(card.tileBottom, 'the hairline must sit exactly where Total begins').toBe(card.totalTop)
+  expect(card.totalBorderTop, 'Total must not draw a second line').toBe('0px')
+  if (card.sparkEmpty) {
+    expect(card.sparkDisplay, 'an empty sparkline must collapse, not leave a gap').toBe('none')
+  }
   expect(card.label).toMatch(/total/i)
 })
+
+test('stats card aligns with the download controls and is spaced from them', async ({ page }) => {
+  if (!await boot(page)) return
+  const layout = await page.evaluate(() => {
+    const card = document.querySelector('#tele-ui-download-summary')
+    const label = [...document.querySelectorAll('.dl-controls .conc')]
+      .map(c => c.querySelector('span'))
+      .find(Boolean)
+    const field = document.querySelector('#dl-dir')
+    if (!card || !label || !field) return null
+    const cb = card.getBoundingClientRect()
+    return {
+      cardLeft: Math.round(cb.left),
+      cardRight: Math.round(cb.right),
+      labelLeft: Math.round(label.getBoundingClientRect().left),
+      fieldLeft: Math.round(field.getBoundingClientRect().left),
+      gap: Math.round(label.getBoundingClientRect().top - cb.bottom)
+    }
+  })
+  expect(layout, 'the stats card and Save to row must exist').not.toBeNull()
+  // The card used to carry its own 14px side margin on top of .dl-controls'
+  // padding, so it sat indented relative to the controls beneath it.
+  expect(layout.cardLeft, 'the card must share the controls left edge').toBe(layout.labelLeft)
+  expect(layout.cardLeft, 'the card must line up with the path field').toBe(layout.fieldLeft)
+  expect(layout.gap, `only ${layout.gap}px between the stats card and "Save to"`).toBeGreaterThanOrEqual(10)
+})
+
+/* The thumb was pinned inside a 6px-tall input, so it rendered high and clipped,
+ * and the track had no filled portion at all. */
+test('concurrency slider thumb is centred and the track shows the value', async ({ page }) => {
+  if (!await boot(page)) return
+  const slider = await page.evaluate(() => {
+    const input = document.querySelector('#concurrency')
+    if (!input) return null
+    const cs = getComputedStyle(input)
+    const min = Number(input.min || 1)
+    const max = Number(input.max || 64)
+    const value = Number(input.value)
+    return {
+      height: parseFloat(cs.height),
+      background: cs.backgroundColor,
+      fill: cs.getPropertyValue('--fg-range-fill').trim(),
+      expected: (((value - min) / (max - min)) * 100).toFixed(2) + '%',
+      value
+    }
+  })
+  expect(slider, 'the slider must exist').not.toBeNull()
+  // The box must be at least as tall as the 14px thumb or the head sits off-track.
+  expect(slider.height, 'the input must be tall enough for the thumb').toBeGreaterThanOrEqual(14)
+  expect(slider.fill, 'the filled portion must track the value').toBe(slider.expected)
+
+  // Moving the slider must repaint the fill.
+  await page.locator('#concurrency').focus()
+  await page.keyboard.press('ArrowRight')
+  await page.waitForTimeout(150)
+  const after = await page.evaluate(() => {
+    const input = document.querySelector('#concurrency')
+    const min = Number(input.min || 1)
+    const max = Number(input.max || 64)
+    return {
+      fill: getComputedStyle(input).getPropertyValue('--fg-range-fill').trim(),
+      expected: (((Number(input.value) - min) / (max - min)) * 100).toFixed(2) + '%'
+    }
+  })
+  expect(after.fill, 'the fill must follow the slider').toBe(after.expected)
+  await page.keyboard.press('ArrowLeft')
+  await page.waitForTimeout(400)
+})
+
+test('brand mark is the Telegram logo, self contained', async ({ page }) => {
+  if (!await boot(page)) return
+  const brand = await page.evaluate(() => {
+    const mark = document.querySelector('#fg-brand-mark')
+    if (!mark) return null
+    const svg = mark.querySelector('svg')
+    return {
+      hasSvg: !!svg,
+      hasDisc: !!mark.querySelector('circle'),
+      planePaths: mark.querySelectorAll('path').length,
+      markup: mark.innerHTML,
+      width: Math.round(mark.getBoundingClientRect().width)
+    }
+  })
+  expect(brand).not.toBeNull()
+  expect(brand.hasSvg, 'the mark must be an inline SVG').toBeTruthy()
+  expect(brand.hasDisc, 'the Telegram mark is a disc').toBeTruthy()
+  expect(brand.planePaths, 'the paper plane must be drawn').toBeGreaterThanOrEqual(1)
+  expect(brand.width).toBeGreaterThanOrEqual(24)
+  expect(brand.width).toBeLessThanOrEqual(28)
+  // No network asset and no emoji. url() is permitted only as an internal
+  // fragment reference, which is how the gradient is applied.
+  expect(brand.markup).not.toContain('<img')
+  expect(brand.markup, 'url() may only reference an in-document fragment').not.toMatch(/url\(\s*['"]?[^#'")]/)
+  expect(brand.markup, 'the mark must not fetch anything').not.toMatch(/https?:\/\//)
+})
+
+test('chat header has no overflow menu button', async ({ page }) => {
+  if (!await boot(page)) return
+  expect(await page.locator('#fg-chat-overflow').count(), 'the three-dot button must be gone').toBe(0)
+  expect(await page.locator('#fg-chat-overflow-menu').count(), 'its menu must be gone too').toBe(0)
+  const dots = await page.evaluate(() => {
+    const actions = document.querySelector('.chat-actions')
+    return actions ? actions.querySelectorAll('button').length : -1
+  })
+  // Download all media + Select all may live here; nothing else.
+  expect(dots).toBeLessThanOrEqual(2)
+})
+
+/* REGRESSION: selecting Unread then clicking a chat used to re-show every chat,
+ * because the chat renderers were called by name and bypassed the wrapper that
+ * reapplies the Unread predicate. */
+test('Unread filter survives opening a chat and typing in search', async ({ page }) => {
+  if (!await boot(page)) return
+  const seg = page.locator('#fg-filter-unread')
+  if (!await seg.count()) return
+  await seg.click()
+  await page.waitForTimeout(700)
+
+  const count = async () => page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#chat-list .chat-item[data-chat-id]')]
+    return { visible: rows.filter(r => !r.hidden).length, total: rows.length }
+  })
+
+  const before = await count()
+  if (!before.visible) {
+    test.info().annotations.push({ type: 'note', description: 'no unread chats; filter assertion skipped' })
+    return
+  }
+  expect(before.visible, 'the filter must hide read chats').toBeLessThan(before.total)
+
+  await page.locator('#chat-list .chat-item:not([hidden])').first().click().catch(() => {})
+  await page.waitForTimeout(2500)
+  const afterOpen = await count()
+  // At most the opened chat may leave the list once it is marked read.
+  expect(afterOpen.visible, `opening a chat revealed ${afterOpen.visible} of ${afterOpen.total} rows`)
+    .toBeLessThanOrEqual(before.visible)
+  expect(afterOpen.total, 'the row set itself must not change').toBe(before.total)
+
+  await page.locator('#chat-search').fill('a')
+  await page.waitForTimeout(600)
+  const afterSearch = await count()
+  expect(afterSearch.visible, 'typing in search must not defeat the Unread filter')
+    .toBeLessThanOrEqual(before.visible)
+  await page.locator('#chat-search').fill('')
+  await page.waitForTimeout(400)
+  await page.locator('#fg-filter-all').click().catch(() => {})
+})
+
+/* REGRESSION: guardAvatar dedupes on photo id, so two consecutive chats without a
+ * photo both mapped to id 0 and the header kept the previous chat's initials. */
+test('header avatar initials follow the active chat', async ({ page }) => {
+  if (!await boot(page)) return
+  const seen = []
+  for (let index = 0; index < 5; index++) {
+    const row = page.locator('#chat-list .chat-item:not([hidden])').nth(index)
+    if (!await row.count()) break
+    await row.click().catch(() => {})
+    await page.waitForTimeout(1600)
+    const info = await page.evaluate(() => {
+      const host = document.querySelector('#fg-chat-avatar')
+      const fallback = host && host.querySelector('.tele-final-avatar-fallback')
+      const img = host && host.querySelector('img')
+      return {
+        title: ((document.querySelector('#chat-title') || {}).textContent || '').trim(),
+        initials: fallback ? (fallback.textContent || '').trim() : '',
+        photoShown: !!(img && img.complete && img.naturalWidth > 0)
+      }
+    })
+    seen.push(info)
+  }
+  expect(seen.length, 'at least one chat must be openable').toBeGreaterThan(0)
+  for (const entry of seen) {
+    if (entry.photoShown || !entry.title) continue
+    const expected = entry.title.trim()[0].toUpperCase()
+    expect(entry.initials.startsWith(expected),
+      `chat "${entry.title}" shows initials "${entry.initials}", expected to start with "${expected}"`).toBeTruthy()
+  }
+})
+
 
 test('Save to and Parallel files labels share a left edge', async ({ page }) => {
   if (!await boot(page)) return
