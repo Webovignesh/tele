@@ -90,14 +90,8 @@
   --fg-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --fg-duration-fast: 120ms;
 
-  /* Concurrency slider fill. filegram-shell.js publishes --fg-range-ratio (a
-     unitless 0..1) on the input itself; the track pseudo-element inherits it.
-     --fg-range-stop is the x of the thumb CENTRE, which is NOT a plain percentage
-     of the track: the centre only travels between half a thumb from each end, so
-     a percentage stop runs ahead of the head and paints blue past it. */
-  --fg-range-ratio: 0;
-  --fg-range-thumb: 14px;
-  --fg-range-stop: calc(var(--fg-range-ratio) * (100% - var(--fg-range-thumb)) + var(--fg-range-thumb) / 2);
+  /* The concurrency slider's fill variables are declared on #concurrency itself,
+     NOT here. See that rule for why. */
   --fg-duration-normal: 200ms;
   --fg-duration-slow: 320ms;
 
@@ -2258,6 +2252,23 @@ li.chat-item.active {
   -webkit-appearance: none !important;
   background: transparent !important;
   border: none !important;
+
+  /* Fill geometry.
+   *
+   * These MUST be declared here rather than on :root. A custom property is
+   * substituted at computed-value time on the element where it is DECLARED, and
+   * the resolved token stream is what descendants inherit. Declared on :root,
+   * --fg-range-stop resolved against :root's --fg-range-ratio (0) and every
+   * descendant inherited the literal `calc(0 * ...)`, so the inline ratio that
+   * filegram-shell.js writes on this input never re-evaluated it and the fill
+   * stayed 7px wide. Declared here, the stop resolves against this element's own
+   * inline ratio, and the track pseudo-element inherits the correct result. */
+  --fg-range-ratio: 0; /* unitless 0..1, written inline by filegram-shell.js */
+  --fg-range-thumb: 14px; /* must match the thumb width below */
+  /* The x of the thumb CENTRE. Not a plain percentage of the track: the centre
+     only travels between half a thumb from each end, so a percentage stop runs
+     ahead of the head. */
+  --fg-range-stop: calc(var(--fg-range-ratio) * (100% - var(--fg-range-thumb)) + var(--fg-range-thumb) / 2);
 }
 
 #concurrency:focus-visible {

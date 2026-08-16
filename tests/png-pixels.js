@@ -99,7 +99,9 @@ function rightmostMatch (png, row, target, tolerance) {
   return found
 }
 
-// --fg-accent
+// --fg-accent, the filled part of a track
 const ACCENT = [77, 163, 255]
+// --fg-surface-3, the unfilled part
+const SURFACE3 = [26, 37, 54]
 
-module.exports = { decodePng, isNear, rightmostMatch, ACCENT }
+module.exports = { decodePng, isNear, rightmostMatch, ACCENT, SURFACE3 }

@@ -1,6 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test')
-const { decodePng, rightmostMatch, ACCENT } = require('./png-pixels')
+const { decodePng, isNear, ACCENT } = require('./png-pixels')
 
 const APP = 'http://127.0.0.1:3000'
 
@@ -1318,7 +1318,7 @@ test('ETA is clamped and never printed for a stalled transfer', async ({ page })
  * the input transparent. Reading the input's computed background is what made an
  * earlier diagnosis of this bug wrong. So the rendered pixels are sampled instead.
  */
-test('the painted fill never extends past the slider thumb', async ({ page }) => {
+test('the painted fill reaches the thumb and stops there', async ({ page }) => {
   if (!await boot(page)) return
   const slider = page.locator('#concurrency')
   if (!await slider.count()) {
@@ -1329,7 +1329,7 @@ test('the painted fill never extends past the slider thumb', async ({ page }) =>
   const original = await page.evaluate(() => Number(document.querySelector('#concurrency').value))
   const failures = []
 
-  for (const value of [1, 8, 24, 32, 48, 64]) {
+  for (const value of [1, 8, 16, 32, 48, 64]) {
     await page.evaluate(next => { document.querySelector('#concurrency').value = next }, value)
     await page.waitForTimeout(150)
 
@@ -1345,16 +1345,36 @@ test('the painted fill never extends past the slider thumb', async ({ page }) =>
 
     const png = decodePng(await slider.screenshot())
     const row = Math.round(png.height / 2)
-    const rightmostBlue = rightmostMatch(png, row, ACCENT)
-    const thumbRight = geometry.thumbCentre + 7
+    const sample = x => (x >= 0 && x < png.width ? png.pixel(x, row) : null)
 
-    // The fill stops at the thumb centre and the thumb's own accent body covers the
-    // rest, so blue may reach the thumb's right edge but never travel beyond it.
-    if (rightmostBlue > thumbRight + 4) {
-      failures.push(`value ${value}: blue reaches x=${rightmostBlue}, thumb edge is ${thumbRight.toFixed(1)} (overshoot ${(rightmostBlue - thumbRight).toFixed(1)}px)`)
+    /* BOTH sides are checked, 12px clear of the 7px-radius thumb.
+     *
+     * Checking only for overshoot is not enough: the thumb is painted in the same
+     * accent colour, so a fill that collapsed to 7px still left "rightmost accent"
+     * sitting at the thumb and looked fine. That is how an undershoot shipped. */
+    const left = Math.round(geometry.thumbCentre - 12)
+    const right = Math.round(geometry.thumbCentre + 12)
+
+    const leftPixel = sample(left)
+    if (leftPixel && !isNear(leftPixel, ACCENT)) {
+      failures.push(`value ${value}: track left of the thumb (x=${left}) is not filled, got rgb(${leftPixel.join(',')})`)
     }
-    // Sanity: the fill must actually be painted for a non-minimum value.
-    if (value > 1 && rightmostBlue < 0) failures.push(`value ${value}: no fill painted at all`)
+    const rightPixel = sample(right)
+    if (rightPixel && isNear(rightPixel, ACCENT)) {
+      failures.push(`value ${value}: fill overshoots past the thumb at x=${right}`)
+    }
+
+    // And the fill must run flush to the thumb rather than stopping short.
+    let accentEnd = -1
+    for (let x = 0; x < png.width; x++) {
+      if (Math.abs(x - geometry.thumbCentre) <= 8) continue
+      if (isNear(sample(x), ACCENT)) accentEnd = x
+      else if (x > geometry.thumbCentre) break
+    }
+    const thumbBandStart = geometry.thumbCentre - 8
+    if (accentEnd >= 0 && thumbBandStart > 2 && accentEnd < thumbBandStart - 3) {
+      failures.push(`value ${value}: fill stops at x=${accentEnd}, ${(thumbBandStart - accentEnd).toFixed(1)}px short of the thumb`)
+    }
   }
 
   await page.evaluate(value => { document.querySelector('#concurrency').value = value }, original)
