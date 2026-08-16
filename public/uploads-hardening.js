@@ -1,16 +1,23 @@
 'use strict'
 
-/* Small runtime hardening layer for the bulk upload workspace.
- * It owns no UI and no queue state. It upgrades the queue's transport with
- * server idempotency/retry headers, verifies persisted source handles still
- * point at the file the user originally queued, and makes destructive Clear all
- * emit one storage transition instead of a cancel-then-clear race.
+/* Runtime hardening for the bulk upload workspace.
+ *
+ * This layer deliberately does not own queue state or the Files index. It adds
+ * transport/recovery guarantees around the existing owners, and normalizes the
+ * temporary outgoing-message lifecycle so bulk sends cannot double the Files
+ * count or make the Messages view briefly collapse while TDLib replaces ids.
  */
 ;(function hardenFileGramUploads () {
   if (window.__fileGramUploadsHardeningInstalled) return
   window.__fileGramUploadsHardeningInstalled = true
 
   const TRANSIENT_HTTP = new Set([408, 425, 429, 500, 502, 503, 504])
+  const HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
+  const refreshTimers = new Map()
+
+  function isTemporaryId (value) {
+    return String(value == null ? '' : value).trim().startsWith('-')
+  }
 
   function retryAfterMs (xhr) {
     const raw = String(xhr.getResponseHeader('Retry-After') || '').trim()
@@ -49,10 +56,9 @@
       xhr.setRequestHeader('x-file-name', encodeURIComponent(file.name || job.name || 'file'))
       xhr.setRequestHeader('x-mime-type', encodeURIComponent(file.type || job.type || 'application/octet-stream'))
       xhr.setRequestHeader('x-filegram-upload-id', String(job.id))
-      // Bulk uploads default to Telegram documents. That preserves the exact
-      // filename/bytes and makes uncertain-delivery recovery deterministic.
+      // Bulk uploads are documents by default. Exact filename/bytes make crash
+      // recovery and duplicate verification deterministic.
       xhr.setRequestHeader('x-upload-mode', 'document')
-      if (job.caption) xhr.setRequestHeader('x-caption', encodeURIComponent(job.caption))
       xhr.upload.onprogress = event => {
         context.onProgress(event.loaded, event.lengthComputable ? event.total : (file.size || job.size || 0))
       }
@@ -74,11 +80,137 @@
     })
   }
 
-  function install () {
+  function typeCounts (items) {
+    const counts = {}
+    for (const item of items || []) {
+      if (!item || !item.type) continue
+      counts[item.type] = (counts[item.type] || 0) + 1
+    }
+    return counts
+  }
+
+  function compareIds (a, b) {
+    let aa = 0n; let bb = 0n
+    try { aa = BigInt(String(a || 0)) } catch {}
+    try { bb = BigInt(String(b || 0)) } catch {}
+    return aa === bb ? 0 : (aa < bb ? -1 : 1)
+  }
+
+  /* Older builds persisted TDLib's temporary outgoing message ids as if they
+   * were real media rows. Scrub those records in-place through the public index
+   * snapshot reference and persist the corrected snapshot. This intentionally
+   * lowers the high-water floor only when the removed rows are provably TDLib
+   * temporary ids; real Telegram message ids are never discarded here. */
+  function scrubTemporaryIndex (chatId) {
+    if (chatId == null || !window.teleFilesIndex || typeof window.teleFilesIndex.snapshot !== 'function') return 0
+    let snapshot = null
+    try { snapshot = window.teleFilesIndex.snapshot(chatId) } catch {}
+    if (!snapshot || !Array.isArray(snapshot.items)) return 0
+    const removed = snapshot.items.filter(item => item && isTemporaryId(item.messageId))
+    if (!removed.length) return 0
+
+    const clean = snapshot.items.filter(item => !item || !isTemporaryId(item.messageId))
+    clean.sort((a, b) => compareIds(b && b.messageId, a && a.messageId))
+    snapshot.items = clean
+    snapshot.found = clean.length
+    snapshot.typeCounts = typeCounts(clean)
+    snapshot.newestMessageId = clean.length ? clean[0].messageId : 0
+    snapshot.scanned = Math.max(clean.length, Number(snapshot.scanned || 0) - removed.length)
+    snapshot.savedAt = Date.now()
+
+    try {
+      const floors = JSON.parse(localStorage.getItem(HIGH_WATER_KEY) || '{}') || {}
+      floors[String(chatId)] = { count: clean.length, at: Date.now() }
+      localStorage.setItem(HIGH_WATER_KEY, JSON.stringify(floors))
+    } catch {}
+    try {
+      if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.set) rescueFileCache.set(String(chatId), snapshot)
+    } catch {}
+    try {
+      if (typeof teleP0v2WriteIndex === 'function') Promise.resolve(teleP0v2WriteIndex(chatId, snapshot)).catch(() => {})
+    } catch {}
+
+    try {
+      if (typeof state !== 'undefined' && state && String(state.activeChatId) === String(chatId)) {
+        state.mediaCount = clean.length
+        state.typeCounts = snapshot.typeCounts
+        if (Array.isArray(state.messages)) {
+          state.messages = state.messages.filter(message => !(message && message.media && isTemporaryId(message.id)))
+        }
+        if (typeof rescueSaveActiveChat === 'function') rescueSaveActiveChat()
+        if (state.view === 'messages' && typeof renderMessagesList === 'function') renderMessagesList()
+        if (state.view === 'files' && typeof renderFiles === 'function') renderFiles()
+        if (typeof updateMediaCountLabel === 'function') updateMediaCountLabel()
+      }
+    } catch {}
+    return removed.length
+  }
+
+  function scheduleRecentRefresh (chatId) {
+    const key = String(chatId == null ? '' : chatId)
+    if (!key) return
+    if (refreshTimers.has(key)) clearTimeout(refreshTimers.get(key))
+    refreshTimers.set(key, setTimeout(async () => {
+      refreshTimers.delete(key)
+      try {
+        if (typeof state === 'undefined' || !state || String(state.activeChatId) !== key) return
+        if (typeof request !== 'function' || typeof rescueMergeMessages !== 'function') return
+        const data = await request('get-messages', { chatId: Number(chatId), fromMessageId: 0, limit: 100 })
+        if (String(state.activeChatId) !== key) return
+        rescueMergeMessages(chatId, data && data.messages || [])
+        if (typeof rescueSaveActiveChat === 'function') rescueSaveActiveChat()
+        if (state.view === 'messages' && typeof renderMessagesList === 'function') renderMessagesList()
+      } catch {}
+    }, 350))
+  }
+
+  function installRealtimeHardening () {
+    if (typeof handleEvent !== 'function' || handleEvent.__fileGramUploadRealtimeHardened) return false
+    const baseHandleEvent = handleEvent
+    const wrapped = function fileGramUploadStableHandleEvent (event) {
+      if (event && event.name === 'message-upsert') {
+        const message = event.message || event.payload && event.payload.message
+        const chatId = event.chatId != null ? event.chatId : event.payload && event.payload.chatId
+        // Do not render/index TDLib's temporary outgoing media message. The final
+        // positive Telegram id arrives immediately through sendSucceeded. Showing
+        // both was the source of 11 -> 22 file counts and the visible shrink when
+        // the temporary rows were deleted before their replacements rendered.
+        if (message && message.media && message.outgoing && isTemporaryId(message.id)) return
+        const result = baseHandleEvent(event)
+        if (message && message.media && !isTemporaryId(message.id)) {
+          scrubTemporaryIndex(chatId)
+          scheduleRecentRefresh(chatId)
+        }
+        return result
+      }
+      const result = baseHandleEvent(event)
+      if (event && event.name === 'message-delete') {
+        const chatId = event.chatId != null ? event.chatId : event.payload && event.payload.chatId
+        scrubTemporaryIndex(chatId)
+      }
+      return result
+    }
+    wrapped.__fileGramUploadRealtimeHardened = true
+    handleEvent = wrapped
+    try {
+      if (typeof state !== 'undefined' && state && state.activeChatId != null) scrubTemporaryIndex(state.activeChatId)
+    } catch {}
+    return true
+  }
+
+  function removeCaptionUi () {
+    const caption = document.querySelector('.fg-up-caption')
+    if (caption) caption.remove()
+  }
+
+  function installQueueHardening () {
     const api = window.FileGramUploads
     const queue = api && api.queue
     if (!queue) return false
-    if (queue.__fileGramHardened) return true
+    if (queue.__fileGramHardened) {
+      removeCaptionUi()
+      return true
+    }
     queue.__fileGramHardened = true
 
     const baseResolve = queue.resolveSource.bind(queue)
@@ -103,6 +235,15 @@
       return file
     }
 
+    // Captioning is intentionally not part of bulk upload. Strip stale persisted
+    // values as well so an older queue cannot silently send captions after the UI
+    // has been removed.
+    for (const job of queue.jobs.values()) job.caption = ''
+    const baseAdd = queue.add.bind(queue)
+    queue.add = function fileGramCaptionlessAdd (descriptors) {
+      return baseAdd((descriptors || []).map(item => ({ ...item, caption: '' })))
+    }
+
     queue.transport = transport
 
     /* UploadQueue.clearAll() normally calls cancelAll() and then emits clear-all.
@@ -110,9 +251,7 @@
      * every job as cancelled and the next clears the store. Under a slow IndexedDB
      * transaction the cancelled write can land last and resurrect a supposedly
      * cleared 10k-file queue after restart. Clear directly instead: abort active
-     * requests, discard all scheduler state, and emit exactly one clear-all event.
-     * Active runners settle later against an already-empty Map and can only issue
-     * harmless deletes for their former ids. */
+     * requests, discard all scheduler state, and emit exactly one clear-all event. */
     queue.clearAll = function fileGramAtomicClearAll () {
       this.globalPaused = false
       this.cancelWake()
@@ -126,12 +265,15 @@
       this.changed('clear-all')
     }
 
-    api.transportVersion = 3
+    removeCaptionUi()
+    api.transportVersion = 4
     return true
   }
 
+  installRealtimeHardening()
   let tries = 0
   const timer = setInterval(() => {
-    if (install() || ++tries > 240) clearInterval(timer)
+    installRealtimeHardening()
+    if (installQueueHardening() || ++tries > 240) clearInterval(timer)
   }, 25)
 })()
