@@ -41,8 +41,11 @@
       this.verifyDelivery = typeof options.verifyDelivery === 'function' ? options.verifyDelivery : async () => false
       this.onChange = typeof options.onChange === 'function' ? options.onChange : () => {}
       this.now = typeof options.now === 'function' ? options.now : () => Date.now()
-      this.setTimer = typeof options.setTimer === 'function' ? options.setTimer : setTimeout
-      this.clearTimer = typeof options.clearTimer === 'function' ? options.clearTimer : clearTimeout
+      // Browser timer functions are Web-IDL methods and must not be invoked with
+      // an UploadQueue instance as their receiver. Wrapping them also keeps the
+      // queue deterministic in Node tests where custom timer functions are used.
+      this.setTimer = typeof options.setTimer === 'function' ? options.setTimer : ((fn, ms) => setTimeout(fn, ms))
+      this.clearTimer = typeof options.clearTimer === 'function' ? options.clearTimer : (id => clearTimeout(id))
       this.concurrency = clamp(options.concurrency || 3, 1, options.maxConcurrency || 8)
       this.maxConcurrency = Math.max(this.concurrency, Number(options.maxConcurrency || 8))
       this.retryBaseMs = Math.max(250, Number(options.retryBaseMs || 2000))
@@ -323,7 +326,7 @@
     }
 
     cancelWake () {
-      if (!this.wakeTimer) return
+      if (this.wakeTimer == null) return
       this.clearTimer(this.wakeTimer)
       this.wakeTimer = null
     }
