@@ -31,7 +31,10 @@ async function fixture (page, options = {}) {
     window.state = {
       status: 'ready',
       activeChatId: 777,
-      chats: [{ id: 777, title: 'TEST', kind: 'channel', unread: 0 }]
+      chats: [
+        { id: 777, title: 'TEST', kind: 'channel', unread: 0 },
+        { id: 888, title: 'NOT OWNED', kind: 'channel', unread: 0 }
+      ]
     }
     window.toast = (message, kind) => { window.__lastToast = { message, kind } }
     window.confirm = () => true
@@ -41,7 +44,11 @@ async function fixture (page, options = {}) {
     }
     window.request = async (type, payload) => {
       if (type === 'get-chat-management') {
-        return { chat: { id: payload.chatId, title: 'TEST', kind: 'channel' }, permissions: { isOwner: true } }
+        const owner = Number(payload.chatId) === 777
+        return {
+          chat: { id: payload.chatId, title: owner ? 'TEST' : 'NOT OWNED', kind: 'channel' },
+          permissions: { isOwner: owner }
+        }
       }
       if (type === 'search-media') return { items: [], totalCount: 0, hasMore: false }
       if (type === 'delete-chat-message') return { ok: true }
@@ -85,7 +92,8 @@ async function fixture (page, options = {}) {
   await expect(page.locator('#mg-tab-uploads')).toBeVisible()
   await page.locator('#mg-tab-uploads').click()
   await expect(page.locator('#mg-uploads-pane')).toBeVisible()
-  await expect(page.locator('#fg-upload-channel option', { hasText: 'TEST' })).toHaveCount(1)
+  await expect(page.locator('#fg-upload-channel option', { hasText: /^TEST$/ })).toHaveCount(1)
+  await expect(page.locator('#fg-upload-channel option', { hasText: /^NOT OWNED$/ })).toHaveCount(0)
   await page.locator('#fg-upload-channel').selectOption({ label: 'TEST' })
 }
 
@@ -102,6 +110,19 @@ async function addFiles (page, files) {
   const chooser = await chooserPromise
   await chooser.setFiles(files)
   await expect(page.locator('#fg-upload-review-modal')).toBeVisible()
+}
+
+async function persistedUploadCount (page) {
+  return page.evaluate(async () => new Promise((resolve, reject) => {
+    const request = indexedDB.open('filegram-uploads-v1', 1)
+    request.onerror = () => reject(request.error)
+    request.onsuccess = () => {
+      const db = request.result
+      const count = db.transaction('jobs', 'readonly').objectStore('jobs').count()
+      count.onerror = () => reject(count.error)
+      count.onsuccess = () => { resolve(count.result); db.close() }
+    }
+  }))
 }
 
 test('owned TEST channel is selectable and duplicate review explains evidence', async ({ page }) => {
@@ -152,7 +173,7 @@ test('Cancel all cancels the whole queue, not just parallel workers', async ({ p
   expect(stats.total).toBe(30)
 })
 
-test('Clear done and Clear all keep full-queue semantics', async ({ page }) => {
+test('Clear done and Clear all keep full-queue and persistent semantics', async ({ page }) => {
   await fixture(page)
   await addFiles(page, [
     { name: 'done-1.txt', mimeType: 'text/plain', buffer: Buffer.from('1') },
@@ -163,14 +184,16 @@ test('Clear done and Clear all keep full-queue semantics', async ({ page }) => {
   await page.locator('#fg-upload-clear-done').click()
   await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(0)
 
-  await addFiles(page, Array.from({ length: 10 }, (_, index) => ({
+  await addFiles(page, Array.from({ length: 40 }, (_, index) => ({
     name: `clear-${index}.txt`, mimeType: 'text/plain', buffer: Buffer.from(String(index))
   })))
   await page.locator('#fg-upload-review-unique').click()
-  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(10)
+  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(40)
   await page.locator('#fg-upload-clear-all').click()
   await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(0)
   await expect(page.locator('#fg-upload-list .fg-up-job')).toHaveCount(0)
+  await page.waitForTimeout(500)
+  expect(await persistedUploadCount(page)).toBe(0)
 })
 
 test('server interruption auto-retries without losing the file', async ({ page }) => {
