@@ -2,10 +2,10 @@
 
 /* Runtime hardening for the bulk upload workspace.
  *
- * This layer deliberately does not own queue state or the Files index. It adds
- * transport/recovery guarantees around the existing owners, and normalizes the
- * temporary outgoing-message lifecycle so bulk sends cannot double the Files
- * count or make the Messages view briefly collapse while TDLib replaces ids.
+ * This layer deliberately does not own queue scheduling. It adds transport and
+ * recovery guarantees around the existing owner, makes Telegram deletions
+ * authoritative over the append-friendly Files index, and removes duplicate UI
+ * entry points that compete with the right-panel tabs.
  */
 ;(function hardenFileGramUploads () {
   if (window.__fileGramUploadsHardeningInstalled) return
@@ -13,12 +13,21 @@
 
   const TRANSIENT_HTTP = new Set([408, 425, 429, 500, 502, 503, 504])
   const HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
+  const RECONCILE_MARK_KEY = 'filegram-files-delete-reconcile-v1'
   const refreshTimers = new Map()
+  const deletedByChat = new Map()
+  const reconcileFlights = new Map()
+  const reconciledThisSession = new Set()
   let captionObserver = null
+  let uiObserver = null
+  let folderPickerInstalled = false
+  let indexApiPatched = false
 
   function isTemporaryId (value) {
     return String(value == null ? '' : value).trim().startsWith('-')
   }
+
+  function chatKey (value) { return String(value == null ? '' : value) }
 
   function retryAfterMs (xhr) {
     const raw = String(xhr.getResponseHeader('Retry-After') || '').trim()
@@ -95,67 +104,247 @@
     return aa === bb ? 0 : (aa < bb ? -1 : 1)
   }
 
-  function scrubTemporaryIndex (chatId) {
-    if (chatId == null || !window.teleFilesIndex || typeof window.teleFilesIndex.snapshot !== 'function') return 0
-    let snapshot = null
-    try { snapshot = window.teleFilesIndex.snapshot(chatId) } catch {}
-    if (!snapshot || !Array.isArray(snapshot.items)) return 0
-    const removed = snapshot.items.filter(item => item && isTemporaryId(item.messageId))
-    if (!removed.length) return 0
+  function indexSnapshot (chatId) {
+    try {
+      if (window.teleFilesIndex && typeof window.teleFilesIndex.snapshot === 'function') {
+        const snapshot = window.teleFilesIndex.snapshot(chatId)
+        if (snapshot && Array.isArray(snapshot.items)) return snapshot
+      }
+    } catch {}
+    try {
+      if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.get) {
+        const snapshot = rescueFileCache.get(chatKey(chatId))
+        if (snapshot && Array.isArray(snapshot.items)) return snapshot
+      }
+    } catch {}
+    return null
+  }
 
-    const clean = snapshot.items.filter(item => !item || !isTemporaryId(item.messageId))
+  function exactHighWater (chatId, count) {
+    try {
+      const floors = JSON.parse(localStorage.getItem(HIGH_WATER_KEY) || '{}') || {}
+      const key = chatKey(chatId)
+      if (count > 0) floors[key] = { count, at: Date.now() }
+      else delete floors[key]
+      localStorage.setItem(HIGH_WATER_KEY, JSON.stringify(floors))
+    } catch {}
+  }
+
+  function paintFileCount (chatId, snapshot) {
+    try {
+      if (typeof state === 'undefined' || !state || chatKey(state.activeChatId) !== chatKey(chatId)) return
+      const total = Array.isArray(snapshot && snapshot.items) ? snapshot.items.length : 0
+      state.mediaCount = total
+      state.typeCounts = snapshot && snapshot.typeCounts || {}
+      const label = document.querySelector('#chat-media-count')
+      if (label) label.textContent = `${total.toLocaleString()} file${total === 1 ? '' : 's'}`
+      const selectAll = document.querySelector('#select-all-media')
+      if (selectAll) {
+        selectAll.textContent = `Select all (${total.toLocaleString()})`
+        selectAll.disabled = total === 0
+      }
+    } catch {}
+  }
+
+  function persistSnapshot (chatId, snapshot) {
+    try {
+      if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.set) rescueFileCache.set(chatKey(chatId), snapshot)
+    } catch {}
+    try {
+      if (typeof teleP0v2WriteIndex === 'function') Promise.resolve(teleP0v2WriteIndex(chatId, snapshot)).catch(() => {})
+    } catch {}
+  }
+
+  function rememberDeletedIds (chatId, ids) {
+    const key = chatKey(chatId)
+    if (!key) return new Set()
+    let set = deletedByChat.get(key)
+    if (!set) {
+      set = new Set()
+      deletedByChat.set(key, set)
+    }
+    for (const id of ids || []) if (id != null) set.add(String(id))
+    return set
+  }
+
+  /* Files indexes are intentionally union-based so a partial 100-message scan can
+   * never shrink a proven 20k index. Deletion is the one operation where union is
+   * wrong. teleFilesIndex.snapshot() returns the committed object by reference, so
+   * filtering it here updates the actual current owner rather than painting a fake
+   * count over stale data. The same object is written back to the persistent index.
+   */
+  function pruneDeletedIndex (chatId, extraIds, options = {}) {
+    const key = chatKey(chatId)
+    if (!key) return 0
+    const deleted = rememberDeletedIds(chatId, extraIds)
+    const snapshot = indexSnapshot(chatId)
+    if (!snapshot || !Array.isArray(snapshot.items)) return 0
+
+    const before = snapshot.items.length
+    const clean = snapshot.items.filter(item => item && !deleted.has(String(item.messageId)) && !isTemporaryId(item.messageId))
+    if (clean.length === before && !extraIds?.length) {
+      paintFileCount(chatId, snapshot)
+      return 0
+    }
     clean.sort((a, b) => compareIds(b && b.messageId, a && a.messageId))
     snapshot.items = clean
     snapshot.found = clean.length
     snapshot.typeCounts = typeCounts(clean)
     snapshot.newestMessageId = clean.length ? clean[0].messageId : 0
-    snapshot.scanned = Math.max(clean.length, Number(snapshot.scanned || 0) - removed.length)
     snapshot.savedAt = Date.now()
+    if (snapshot.done == null) snapshot.done = true
+
+    exactHighWater(chatId, clean.length)
+    persistSnapshot(chatId, snapshot)
 
     try {
-      const floors = JSON.parse(localStorage.getItem(HIGH_WATER_KEY) || '{}') || {}
-      floors[String(chatId)] = { count: clean.length, at: Date.now() }
-      localStorage.setItem(HIGH_WATER_KEY, JSON.stringify(floors))
-    } catch {}
-    try {
-      if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.set) rescueFileCache.set(String(chatId), snapshot)
-    } catch {}
-    try {
-      if (typeof teleP0v2WriteIndex === 'function') Promise.resolve(teleP0v2WriteIndex(chatId, snapshot)).catch(() => {})
-    } catch {}
-
-    try {
-      if (typeof state !== 'undefined' && state && String(state.activeChatId) === String(chatId)) {
-        state.mediaCount = clean.length
-        state.typeCounts = snapshot.typeCounts
+      if (typeof state !== 'undefined' && state && chatKey(state.activeChatId) === key) {
         if (Array.isArray(state.messages)) {
-          state.messages = state.messages.filter(message => !(message && message.media && isTemporaryId(message.id)))
+          state.messages = state.messages.filter(message => message && !deleted.has(String(message.id)) && !isTemporaryId(message.id))
         }
         if (typeof rescueSaveActiveChat === 'function') rescueSaveActiveChat()
-        if (state.view === 'messages' && typeof renderMessagesList === 'function') renderMessagesList()
-        if (state.view === 'files' && typeof renderFiles === 'function') renderFiles()
-        if (typeof updateMediaCountLabel === 'function') updateMediaCountLabel()
+        paintFileCount(chatId, snapshot)
+        if (options.render !== false) {
+          if (state.view === 'messages' && typeof renderMessagesList === 'function') renderMessagesList()
+          if (state.view === 'files' && typeof renderFiles === 'function') renderFiles()
+        }
       }
     } catch {}
-    return removed.length
+    return before - clean.length
+  }
+
+  function scrubTemporaryIndex (chatId) {
+    const snapshot = indexSnapshot(chatId)
+    if (!snapshot || !Array.isArray(snapshot.items)) return 0
+    const temporary = snapshot.items.filter(item => item && isTemporaryId(item.messageId)).map(item => item.messageId)
+    return temporary.length ? pruneDeletedIndex(chatId, temporary) : 0
+  }
+
+  function readReconcileMarks () {
+    try { return JSON.parse(localStorage.getItem(RECONCILE_MARK_KEY) || '{}') || {} } catch { return {} }
+  }
+
+  function markReconciled (chatId) {
+    try {
+      const marks = readReconcileMarks()
+      marks[chatKey(chatId)] = Date.now()
+      localStorage.setItem(RECONCILE_MARK_KEY, JSON.stringify(marks))
+    } catch {}
+  }
+
+  async function reconcilePersistedIndex (chatId, force = false) {
+    const key = chatKey(chatId)
+    if (!key || reconcileFlights.has(key)) return reconcileFlights.get(key) || null
+    if (!force && reconciledThisSession.has(key)) return null
+    const marks = readReconcileMarks()
+    if (!force && Number(marks[key] || 0) > 0) {
+      reconciledThisSession.add(key)
+      return null
+    }
+
+    const snapshot = indexSnapshot(chatId)
+    if (!snapshot || !Array.isArray(snapshot.items) || !snapshot.items.length) {
+      reconciledThisSession.add(key)
+      markReconciled(chatId)
+      exactHighWater(chatId, 0)
+      paintFileCount(chatId, snapshot || { items: [], typeCounts: {} })
+      return null
+    }
+
+    const flight = (async () => {
+      let unknown = 0
+      const ids = snapshot.items.map(item => String(item.messageId)).filter(id => /^-?\d+$/.test(id))
+      for (let offset = 0; offset < ids.length; offset += 750) {
+        const messageIds = ids.slice(offset, offset + 750)
+        const response = await fetch(`/api/filegram/reconcile-message-ids/${encodeURIComponent(String(chatId))}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ messageIds })
+        })
+        let payload = {}
+        try { payload = await response.json() } catch {}
+        if (!response.ok || !payload.ok) throw new Error(payload.error || `Index reconciliation failed (${response.status})`)
+        unknown += Array.isArray(payload.unknown) ? payload.unknown.length : 0
+        const missing = Array.isArray(payload.missing) ? payload.missing : []
+        if (missing.length) pruneDeletedIndex(chatId, missing)
+        await new Promise(resolve => setTimeout(resolve, 0))
+      }
+      scrubTemporaryIndex(chatId)
+      if (!unknown) {
+        reconciledThisSession.add(key)
+        markReconciled(chatId)
+      }
+      return { unknown }
+    })().catch(() => null).finally(() => reconcileFlights.delete(key))
+    reconcileFlights.set(key, flight)
+    return flight
   }
 
   function scheduleRecentRefresh (chatId) {
-    const key = String(chatId == null ? '' : chatId)
+    const key = chatKey(chatId)
     if (!key) return
     if (refreshTimers.has(key)) clearTimeout(refreshTimers.get(key))
     refreshTimers.set(key, setTimeout(async () => {
       refreshTimers.delete(key)
       try {
-        if (typeof state === 'undefined' || !state || String(state.activeChatId) !== key) return
+        if (typeof state === 'undefined' || !state || chatKey(state.activeChatId) !== key) return
         if (typeof request !== 'function' || typeof rescueMergeMessages !== 'function') return
         const data = await request('get-messages', { chatId: Number(chatId), fromMessageId: 0, limit: 100 })
-        if (String(state.activeChatId) !== key) return
+        if (chatKey(state.activeChatId) !== key) return
         rescueMergeMessages(chatId, data && data.messages || [])
+        pruneDeletedIndex(chatId, [], { render: false })
         if (typeof rescueSaveActiveChat === 'function') rescueSaveActiveChat()
         if (state.view === 'messages' && typeof renderMessagesList === 'function') renderMessagesList()
       } catch {}
     }, 350))
+  }
+
+  function installIndexApiHardening () {
+    if (indexApiPatched || !window.teleFilesIndex) return false
+    const api = window.teleFilesIndex
+    const baseSnapshot = typeof api.snapshot === 'function' ? api.snapshot.bind(api) : null
+    const baseEnsure = typeof api.ensure === 'function' ? api.ensure.bind(api) : null
+    const baseHardRefresh = typeof api.hardRefresh === 'function' ? api.hardRefresh.bind(api) : null
+
+    if (baseSnapshot) {
+      api.snapshot = chatId => {
+        const snapshot = baseSnapshot(chatId)
+        if (!snapshot || !Array.isArray(snapshot.items)) return snapshot
+        const deleted = deletedByChat.get(chatKey(chatId))
+        if (deleted && deleted.size) {
+          const clean = snapshot.items.filter(item => item && !deleted.has(String(item.messageId)) && !isTemporaryId(item.messageId))
+          if (clean.length !== snapshot.items.length) {
+            snapshot.items = clean
+            snapshot.found = clean.length
+            snapshot.typeCounts = typeCounts(clean)
+            snapshot.newestMessageId = clean.length ? clean[0].messageId : 0
+          }
+        }
+        return snapshot
+      }
+    }
+    if (baseEnsure) {
+      api.ensure = async (...args) => {
+        const result = await baseEnsure(...args)
+        const chatId = args[0]
+        pruneDeletedIndex(chatId, [], { render: false })
+        return api.snapshot ? api.snapshot(chatId) : result
+      }
+    }
+    api.count = chatId => {
+      const snapshot = api.snapshot ? api.snapshot(chatId) : null
+      return snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0
+    }
+    api.total = api.count
+    if (baseHardRefresh) {
+      api.hardRefresh = async (...args) => {
+        const result = await baseHardRefresh(...args)
+        pruneDeletedIndex(args[0], [], { render: false })
+        return api.snapshot ? api.snapshot(args[0]) : result
+      }
+    }
+    indexApiPatched = true
+    return true
   }
 
   function installRealtimeHardening () {
@@ -167,16 +356,25 @@
         const chatId = event.chatId != null ? event.chatId : event.payload && event.payload.chatId
         if (message && message.media && message.outgoing && isTemporaryId(message.id)) return
         const result = baseHandleEvent(event)
+        pruneDeletedIndex(chatId, [], { render: false })
         if (message && message.media && !isTemporaryId(message.id)) {
           scrubTemporaryIndex(chatId)
           scheduleRecentRefresh(chatId)
         }
         return result
       }
+
       const result = baseHandleEvent(event)
       if (event && event.name === 'message-delete') {
-        const chatId = event.chatId != null ? event.chatId : event.payload && event.payload.chatId
-        scrubTemporaryIndex(chatId)
+        const payload = event.payload || event
+        const chatId = event.chatId != null ? event.chatId : payload.chatId
+        const ids = event.messageIds || payload.messageIds || []
+        pruneDeletedIndex(chatId, ids)
+        // Older index owners repaint asynchronously. Repeat the authoritative
+        // deletion after their queued microtasks/timers so deleted rows cannot
+        // flash back into Files or the header.
+        setTimeout(() => pruneDeletedIndex(chatId, ids), 0)
+        setTimeout(() => pruneDeletedIndex(chatId, ids), 120)
       }
       return result
     }
@@ -192,19 +390,109 @@
     document.querySelectorAll('.fg-up-caption').forEach(node => node.remove())
   }
 
-  /* bulk-uploads exports its queue before its UI finishes mounting. A one-shot
-   * removal therefore races createUi(). Observe only during bootstrap and remove
-   * the caption the moment cached/new markup inserts it. */
-  function installCaptionRemoval () {
+  function removeDuplicateHeaderInfo () {
+    document.querySelectorAll('#mg-open-info').forEach(node => node.remove())
+  }
+
+  function installHardeningStyles () {
+    if (document.querySelector('#fg-hardening-style')) return
+    const style = document.createElement('style')
+    style.id = 'fg-hardening-style'
+    style.textContent = `
+      #dl-dir, #dl-dir-current { display: none !important; }
+      #set-dir.fg-download-folder-picker {
+        width: 100% !important; min-width: 0 !important; min-height: 42px !important;
+        display: flex !important; align-items: center !important; justify-content: flex-start !important;
+        gap: 10px !important; padding: 8px 12px !important; overflow: hidden !important;
+        text-align: left !important;
+      }
+      #set-dir.fg-download-folder-picker .fg-folder-icon { flex: 0 0 auto; font-size: 16px; }
+      #set-dir.fg-download-folder-picker .fg-folder-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+      #set-dir.fg-download-folder-picker .fg-folder-label { color: var(--fg-text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; }
+      #set-dir.fg-download-folder-picker .fg-folder-path { color: var(--fg-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    `
+    document.head.appendChild(style)
+  }
+
+  function paintFolderButton () {
+    const button = document.querySelector('#set-dir')
+    const input = document.querySelector('#dl-dir')
+    if (!button || !input) return
+    const current = String(input.value || '').trim() || 'Choose a download folder'
+    button.title = current
+    button.innerHTML = `<span class="fg-folder-icon" aria-hidden="true">📁</span><span class="fg-folder-copy"><span class="fg-folder-label">Save to</span><span class="fg-folder-path"></span></span>`
+    const path = button.querySelector('.fg-folder-path')
+    if (path) path.textContent = current
+  }
+
+  function installDownloadFolderPicker () {
+    const button = document.querySelector('#set-dir')
+    const input = document.querySelector('#dl-dir')
+    if (!button || !input) return false
+    installHardeningStyles()
+    button.classList.add('fg-download-folder-picker')
+    paintFolderButton()
+    if (!folderPickerInstalled) {
+      folderPickerInstalled = true
+      button.onclick = async () => {
+        if (button.disabled) return
+        button.disabled = true
+        try {
+          const response = await fetch('/api/filegram/pick-download-folder', { method: 'POST' })
+          let payload = {}
+          try { payload = await response.json() } catch {}
+          if (!response.ok || !payload.ok) throw new Error(payload.error || `Folder picker failed (${response.status})`)
+          if (payload.cancelled || !payload.path) return
+          if (typeof request !== 'function') throw new Error('FileGram is not connected')
+          const result = await request('set-download-dir', { dir: payload.path })
+          if (typeof setDirLabel === 'function') setDirLabel(result.downloadsDir || payload.path)
+          else input.value = result.downloadsDir || payload.path
+          paintFolderButton()
+          if (typeof toastOk === 'function') toastOk('Download folder changed')
+          else if (typeof toast === 'function') toast('Download folder changed', 'ok')
+        } catch (error) {
+          if (typeof toast === 'function') toast(error.message || String(error), 'error')
+        } finally {
+          button.disabled = false
+        }
+      }
+      try {
+        if (typeof setDirLabel === 'function' && !setDirLabel.__fileGramFolderAware) {
+          const baseSetDirLabel = setDirLabel
+          const wrapped = function fileGramFolderAwareSetDirLabel (dir) {
+            const result = baseSetDirLabel(dir)
+            paintFolderButton()
+            return result
+          }
+          wrapped.__fileGramFolderAware = true
+          setDirLabel = wrapped
+        }
+      } catch {}
+    }
+    return true
+  }
+
+  /* bulk-uploads exports its queue before its UI finishes mounting. Observe only
+   * during bootstrap and remove the caption/duplicate header entry as soon as any
+   * legacy layer inserts them. */
+  function installUiCleanup () {
     removeCaptionUi()
-    if (captionObserver || !document.body) return
-    captionObserver = new MutationObserver(() => removeCaptionUi())
-    captionObserver.observe(document.body, { childList: true, subtree: true })
-    setTimeout(() => {
-      if (captionObserver) captionObserver.disconnect()
-      captionObserver = null
+    removeDuplicateHeaderInfo()
+    installDownloadFolderPicker()
+    if (uiObserver || !document.body) return
+    uiObserver = new MutationObserver(() => {
       removeCaptionUi()
-    }, 10000)
+      removeDuplicateHeaderInfo()
+      installDownloadFolderPicker()
+    })
+    uiObserver.observe(document.body, { childList: true, subtree: true })
+    setTimeout(() => {
+      if (uiObserver) uiObserver.disconnect()
+      uiObserver = null
+      removeCaptionUi()
+      removeDuplicateHeaderInfo()
+      installDownloadFolderPicker()
+    }, 15000)
   }
 
   function installQueueHardening () {
@@ -261,16 +549,46 @@
     }
 
     removeCaptionUi()
-    api.transportVersion = 4
+    api.transportVersion = 5
     return true
   }
 
-  installCaptionRemoval()
+  function reconcileActiveChat () {
+    try {
+      if (typeof state === 'undefined' || !state || state.activeChatId == null) return
+      const chatId = state.activeChatId
+      pruneDeletedIndex(chatId, [], { render: false })
+      reconcilePersistedIndex(chatId).then(() => {
+        pruneDeletedIndex(chatId, [])
+      }).catch(() => {})
+    } catch {}
+  }
+
+  installUiCleanup()
+  installIndexApiHardening()
   installRealtimeHardening()
+  reconcileActiveChat()
+
   let tries = 0
   const timer = setInterval(() => {
     installRealtimeHardening()
-    installCaptionRemoval()
+    installIndexApiHardening()
+    installUiCleanup()
+    reconcileActiveChat()
     if (installQueueHardening() || ++tries > 240) clearInterval(timer)
   }, 25)
+
+  // Chat switches can happen long after the upload bootstrap timer has stopped.
+  // Reconcile a newly opened persisted index in the background; this never blocks
+  // opening the chat or rendering its cached page.
+  let lastActiveChat = ''
+  setInterval(() => {
+    try {
+      const current = typeof state !== 'undefined' && state ? chatKey(state.activeChatId) : ''
+      if (!current || current === lastActiveChat) return
+      lastActiveChat = current
+      pruneDeletedIndex(current, [], { render: false })
+      reconcilePersistedIndex(current).then(() => pruneDeletedIndex(current, [])).catch(() => {})
+    } catch {}
+  }, 900)
 })()
