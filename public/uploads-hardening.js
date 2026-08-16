@@ -18,7 +18,6 @@
   const deletedByChat = new Map()
   const reconcileFlights = new Map()
   const reconciledThisSession = new Set()
-  let captionObserver = null
   let uiObserver = null
   let folderPickerInstalled = false
   let indexApiPatched = false
@@ -167,12 +166,6 @@
     return set
   }
 
-  /* Files indexes are intentionally union-based so a partial 100-message scan can
-   * never shrink a proven 20k index. Deletion is the one operation where union is
-   * wrong. teleFilesIndex.snapshot() returns the committed object by reference, so
-   * filtering it here updates the actual current owner rather than painting a fake
-   * count over stale data. The same object is written back to the persistent index.
-   */
   function pruneDeletedIndex (chatId, extraIds, options = {}) {
     const key = chatKey(chatId)
     if (!key) return 0
@@ -182,10 +175,11 @@
 
     const before = snapshot.items.length
     const clean = snapshot.items.filter(item => item && !deleted.has(String(item.messageId)) && !isTemporaryId(item.messageId))
-    if (clean.length === before && !extraIds?.length) {
+    if (clean.length === before && !(extraIds && extraIds.length)) {
       paintFileCount(chatId, snapshot)
       return 0
     }
+
     clean.sort((a, b) => compareIds(b && b.messageId, a && a.messageId))
     snapshot.items = clean
     snapshot.found = clean.length
@@ -243,11 +237,16 @@
     }
 
     const snapshot = indexSnapshot(chatId)
-    if (!snapshot || !Array.isArray(snapshot.items) || !snapshot.items.length) {
+    // Do not stamp a chat reconciled merely because its persistent index has not
+    // finished restoring yet. That race permanently preserved stale counts on a
+    // fast chat switch because the later real snapshot was never verified.
+    if (!snapshot || !Array.isArray(snapshot.items)) return null
+    if (!snapshot.items.length) {
+      if (snapshot.done === false) return null
       reconciledThisSession.add(key)
       markReconciled(chatId)
       exactHighWater(chatId, 0)
-      paintFileCount(chatId, snapshot || { items: [], typeCounts: {} })
+      paintFileCount(chatId, snapshot)
       return null
     }
 
@@ -370,9 +369,6 @@
         const chatId = event.chatId != null ? event.chatId : payload.chatId
         const ids = event.messageIds || payload.messageIds || []
         pruneDeletedIndex(chatId, ids)
-        // Older index owners repaint asynchronously. Repeat the authoritative
-        // deletion after their queued microtasks/timers so deleted rows cannot
-        // flash back into Files or the header.
         setTimeout(() => pruneDeletedIndex(chatId, ids), 0)
         setTimeout(() => pruneDeletedIndex(chatId, ids), 120)
       }
@@ -419,10 +415,16 @@
     const input = document.querySelector('#dl-dir')
     if (!button || !input) return
     const current = String(input.value || '').trim() || 'Choose a download folder'
+    const ready = button.dataset.fgFolderPath === current && !!button.querySelector('.fg-folder-path')
+    if (ready) return
+
+    button.dataset.fgFolderPath = current
     button.title = current
-    button.innerHTML = `<span class="fg-folder-icon" aria-hidden="true">📁</span><span class="fg-folder-copy"><span class="fg-folder-label">Save to</span><span class="fg-folder-path"></span></span>`
+    if (!button.querySelector('.fg-folder-copy')) {
+      button.innerHTML = '<span class="fg-folder-icon" aria-hidden="true">📁</span><span class="fg-folder-copy"><span class="fg-folder-label">Save to</span><span class="fg-folder-path"></span></span>'
+    }
     const path = button.querySelector('.fg-folder-path')
-    if (path) path.textContent = current
+    if (path && path.textContent !== current) path.textContent = current
   }
 
   function installDownloadFolderPicker () {
@@ -432,6 +434,7 @@
     installHardeningStyles()
     button.classList.add('fg-download-folder-picker')
     paintFolderButton()
+
     if (!folderPickerInstalled) {
       folderPickerInstalled = true
       button.onclick = async () => {
@@ -456,6 +459,7 @@
           button.disabled = false
         }
       }
+
       try {
         if (typeof setDirLabel === 'function' && !setDirLabel.__fileGramFolderAware) {
           const baseSetDirLabel = setDirLabel
@@ -472,14 +476,15 @@
     return true
   }
 
-  /* bulk-uploads exports its queue before its UI finishes mounting. Observe only
-   * during bootstrap and remove the caption/duplicate header entry as soon as any
-   * legacy layer inserts them. */
   function installUiCleanup () {
     removeCaptionUi()
     removeDuplicateHeaderInfo()
     installDownloadFolderPicker()
     if (uiObserver || !document.body) return
+
+    // Bootstrap-only observer. Every repaint below is idempotent; in particular
+    // paintFolderButton does not mutate the DOM if its path is unchanged, so the
+    // observer cannot feed itself forever.
     uiObserver = new MutationObserver(() => {
       removeCaptionUi()
       removeDuplicateHeaderInfo()
@@ -549,7 +554,7 @@
     }
 
     removeCaptionUi()
-    api.transportVersion = 5
+    api.transportVersion = 6
     return true
   }
 
@@ -578,9 +583,6 @@
     if (installQueueHardening() || ++tries > 240) clearInterval(timer)
   }, 25)
 
-  // Chat switches can happen long after the upload bootstrap timer has stopped.
-  // Reconcile a newly opened persisted index in the background; this never blocks
-  // opening the chat or rendering its cached page.
   let lastActiveChat = ''
   setInterval(() => {
     try {
