@@ -2,10 +2,9 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const { ScalableUploadLedger } = require('./bulk-upload-ledger')
 
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
-const LEDGER_TTL_MS = 30 * 24 * 60 * 60 * 1000
-const LEDGER_MAX_RECORDS = 100000
 const SEND_TIMEOUT_MS = 30 * 60 * 1000
 
 function decodeHeader (value) {
@@ -74,64 +73,6 @@ function statusForError (error) {
   if (/invalid chat|invalid upload|empty|source file/i.test(text)) return 400
   if (floodWaitSeconds(error)) return 429
   return 502
-}
-
-class UploadLedger {
-  constructor (root) {
-    this.dir = path.join(root, '.filegram_state')
-    this.file = path.join(this.dir, 'bulk-upload-ledger.json')
-    this.backup = path.join(this.dir, 'bulk-upload-ledger.backup.json')
-    this.records = new Map()
-    this.loaded = false
-    this.writeChain = Promise.resolve()
-  }
-
-  async load () {
-    if (this.loaded) return
-    this.loaded = true
-    await fs.promises.mkdir(this.dir, { recursive: true })
-    let parsed = null
-    for (const file of [this.file, this.backup]) {
-      try {
-        parsed = JSON.parse(await fs.promises.readFile(file, 'utf8'))
-        if (parsed && typeof parsed === 'object') break
-      } catch {}
-    }
-    const now = Date.now()
-    const entries = Object.entries(parsed && parsed.records || {})
-      .filter(([, value]) => value && now - Number(value.updatedAt || 0) <= LEDGER_TTL_MS)
-      .sort((a, b) => Number(b[1].updatedAt || 0) - Number(a[1].updatedAt || 0))
-      .slice(0, LEDGER_MAX_RECORDS)
-    this.records = new Map(entries)
-  }
-
-  async get (id) {
-    await this.load()
-    return this.records.get(String(id)) || null
-  }
-
-  async set (id, value) {
-    await this.load()
-    this.records.set(String(id), { ...value, updatedAt: Date.now() })
-    await this.flush()
-  }
-
-  async flush () {
-    const snapshot = Object.fromEntries(this.records)
-    this.writeChain = this.writeChain.then(async () => {
-      await fs.promises.mkdir(this.dir, { recursive: true })
-      const temp = this.file + '.tmp'
-      const payload = JSON.stringify({ version: 1, savedAt: Date.now(), records: snapshot })
-      await fs.promises.writeFile(temp, payload, 'utf8')
-      try {
-        await fs.promises.rm(this.backup, { force: true })
-        await fs.promises.rename(this.file, this.backup)
-      } catch {}
-      await fs.promises.rename(temp, this.file)
-      fs.promises.rm(this.backup, { force: true }).catch(() => {})
-    })
-    return this.writeChain
-  }
 }
 
 function inputContent (mode, filePath, fileName, mimeType, caption) {
@@ -298,7 +239,7 @@ async function verifyUncertainRecord (client, record) {
 function createBulkUploadHandler (options) {
   const root = options.root
   const getClient = options.getClient
-  const ledger = options.ledger || new UploadLedger(root)
+  const ledger = options.ledger || new ScalableUploadLedger(root)
   const active = options.active || new Set()
 
   return async function bulkUploadHandler (req, res) {
@@ -334,8 +275,8 @@ function createBulkUploadHandler (options) {
         error.status = 400
         throw error
       }
-      let fileName = sanitizeFileName(decodeHeader(req.headers['x-file-name'] || 'file'))
-      let mimeType = decodeHeader(req.headers['x-mime-type'] || 'application/octet-stream').slice(0, 200)
+      const fileName = sanitizeFileName(decodeHeader(req.headers['x-file-name'] || 'file'))
+      const mimeType = decodeHeader(req.headers['x-mime-type'] || 'application/octet-stream').slice(0, 200)
       const caption = decodeHeader(req.headers['x-caption'] || '').slice(0, 1024)
       const mode = String(req.headers['x-upload-mode'] || 'document') === 'auto' ? 'auto' : 'document'
       const expectedSize = Math.max(0, Number(req.headers['content-length'] || 0))
@@ -406,7 +347,7 @@ function createBulkUploadHandler (options) {
         throw error
       }
       if (expectedSize && total !== expectedSize) {
-        const error = new Error(`Source file transfer was incomplete (${total} of ${expectedSize} bytes)`) 
+        const error = new Error(`Source file transfer was incomplete (${total} of ${expectedSize} bytes)`)
         error.status = 400
         throw error
       }
@@ -473,7 +414,7 @@ function installBulkUploadRoutes (app, getClient, options = {}) {
   if (!app || app.__fileGramBulkUploadRoutes) return
   app.__fileGramBulkUploadRoutes = true
   const root = options.root || __dirname
-  const ledger = new UploadLedger(root)
+  const ledger = new ScalableUploadLedger(root)
   const active = new Set()
   app.post('/api/bulk-upload/:chatId', createBulkUploadHandler({ root, getClient, ledger, active }))
   app.get('/api/bulk-upload-health', async (req, res) => {
@@ -490,7 +431,6 @@ function installBulkUploadRoutes (app, getClient, options = {}) {
 module.exports = {
   installBulkUploadRoutes,
   createBulkUploadHandler,
-  UploadLedger,
   sanitizeFileName,
   safeUploadId,
   metadataMatches,
