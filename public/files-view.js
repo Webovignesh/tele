@@ -65,8 +65,22 @@
     ].join('|')
   }
 
+  /* Reads the authoritative index owner, NOT the shared legacy cache.
+   *
+   * Legacy layers still write rescueFileCache, so reading it here made the list a
+   * second, independent source of truth: Select all and the pager could report
+   * 21,045 while the header reported 22,479 from the committed index. Everything
+   * that displays a total now derives from one snapshot. rescueFileCache remains
+   * as a fallback for the window before the index owner installs. */
   function activeSnapshot () {
     if (state.activeChatId == null) return null
+    try {
+      const index = window.teleFilesIndex
+      if (index && typeof index.snapshot === 'function') {
+        const owned = index.snapshot(state.activeChatId)
+        if (owned && Array.isArray(owned.items)) return owned
+      }
+    } catch {}
     try {
       if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.get) {
         const snapshot = rescueFileCache.get(idOf(state.activeChatId))

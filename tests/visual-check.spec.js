@@ -586,8 +586,8 @@ test('concurrency slider thumb is centred and the track shows the value', async 
     return {
       height: parseFloat(cs.height),
       background: cs.backgroundColor,
-      fill: cs.getPropertyValue('--fg-range-fill').trim(),
-      expected: (((value - min) / (max - min)) * 100).toFixed(2) + '%',
+      fill: cs.getPropertyValue('--fg-range-ratio').trim(),
+      expected: ((value - min) / (max - min)).toFixed(5),
       value
     }
   })
@@ -605,8 +605,8 @@ test('concurrency slider thumb is centred and the track shows the value', async 
     const min = Number(input.min || 1)
     const max = Number(input.max || 64)
     return {
-      fill: getComputedStyle(input).getPropertyValue('--fg-range-fill').trim(),
-      expected: (((Number(input.value) - min) / (max - min)) * 100).toFixed(2) + '%'
+      fill: getComputedStyle(input).getPropertyValue('--fg-range-ratio').trim(),
+      expected: ((Number(input.value) - min) / (max - min)).toFixed(5)
     }
   })
   expect(after.fill, 'the fill must follow the slider').toBe(after.expected)
@@ -681,7 +681,9 @@ test('Unread filter survives opening a chat and typing in search', async ({ page
   // At most the opened chat may leave the list once it is marked read.
   expect(afterOpen.visible, `opening a chat revealed ${afterOpen.visible} of ${afterOpen.total} rows`)
     .toBeLessThanOrEqual(before.visible)
-  expect(afterOpen.total, 'the row set itself must not change').toBe(before.total)
+  // The row set may GROW as more chats stream in from the server; what must not
+  // happen is previously hidden rows becoming visible.
+  expect(afterOpen.total, 'rows must not disappear').toBeGreaterThanOrEqual(before.total)
 
   await page.locator('#chat-search').fill('a')
   await page.waitForTimeout(600)
@@ -818,4 +820,248 @@ test('Parallel files slider fills its row and drives concurrency', async ({ page
   // Put it back so the run leaves no state behind.
   await page.keyboard.press('ArrowLeft')
   await page.waitForTimeout(400)
+})
+
+/* ==========================================================================
+ * P0: one authoritative total, and a completeness flag that can recover
+ * ========================================================================== */
+
+/* REGRESSION: header 22,479 while Select all and the pager read 21,045.
+ *
+ * Two causes, both fixed: the header displayed max(measured, floor), which
+ * fabricated a number the list could not back up; and files-view derived its list
+ * from rescueFileCache while the header derived from the committed index, so any
+ * legacy write to the shared cache desynchronised them. */
+test('every total agrees with the committed index', async ({ page }) => {
+  if (!await openFirstChatFiles(page)) return
+
+  // Give a large channel time to settle; a cold index streams in batches.
+  let reading = null
+  for (let attempt = 0; attempt < 24; attempt++) {
+    reading = await page.evaluate(() => {
+      const num = s => Number(String(s || '').replace(/[^\d]/g, '')) || 0
+      const index = window.teleFilesIndex
+      const owned = index && typeof index.snapshot === 'function' ? index.snapshot(state.activeChatId) : null
+      return {
+        header: num((document.querySelector('#chat-media-count') || {}).textContent),
+        downloadAll: num((document.querySelector('#download-all-media') || {}).textContent),
+        selectAll: num((document.querySelector('#select-all-media') || {}).textContent),
+        pager: (document.querySelector('.filegram-page-summary') || {}).textContent || '',
+        items: owned && Array.isArray(owned.items) ? owned.items.length : -1,
+        done: owned ? owned.done : null
+      }
+    })
+    if (reading.done === true) break
+    await page.waitForTimeout(2500)
+  }
+  if (!reading || reading.items <= 0) {
+    test.info().annotations.push({ type: 'note', description: 'chat has no indexed files; total agreement skipped' })
+    return
+  }
+
+  /* The completeness flag must be able to reach true. It used to be ANDed in
+   * union(), so the first progress flush (done:false) pinned it false forever. */
+  expect(reading.done, 'a settled index must report itself complete').toBe(true)
+
+  expect(reading.header, 'the header must equal the committed index').toBe(reading.items)
+  expect(reading.downloadAll, 'Download all must equal the committed index').toBe(reading.items)
+  expect(reading.selectAll, 'Select all must equal the committed index').toBe(reading.items)
+  // With no filter applied the pager reports plain "of N files"; the "matching"
+  // form would mean the list is deriving from a different source than the header.
+  expect(reading.pager, `pager disagreed: ${reading.pager}`).toContain(reading.items.toLocaleString())
+  expect(reading.pager, 'an unfiltered view must not report a matching subset').not.toContain('matching')
+})
+
+test('a settled index stops reporting that it is still indexing', async ({ page }) => {
+  if (!await openFirstChatFiles(page)) return
+  let settled = null
+  for (let attempt = 0; attempt < 24; attempt++) {
+    settled = await page.evaluate(() => {
+      const index = window.teleFilesIndex
+      const owned = index && typeof index.snapshot === 'function' ? index.snapshot(state.activeChatId) : null
+      return {
+        done: owned ? owned.done : null,
+        items: owned && owned.items ? owned.items.length : 0,
+        loadState: ((document.querySelector('#load-state') || {}).textContent || '').trim()
+      }
+    })
+    if (settled.done === true) break
+    await page.waitForTimeout(2500)
+  }
+  if (!settled || !settled.items) return
+  // The status line was stuck on "Indexing files..." forever because the snapshot
+  // never reported completeness.
+  expect(settled.loadState, `status still reads "${settled.loadState}"`).not.toMatch(/indexing/i)
+})
+
+/* ==========================================================================
+ * Remaining UI details
+ * ========================================================================== */
+
+test('auth screens carry the Telegram mark', async ({ page }) => {
+  await boot(page)
+  const marks = await page.evaluate(() => {
+    const out = []
+    for (const selector of ['#login-screen h1', '#config-screen h1']) {
+      const h1 = document.querySelector(selector)
+      if (!h1) continue
+      const mark = h1.querySelector('.fg-auth-mark')
+      out.push({
+        selector,
+        hasMark: !!mark,
+        hasDisc: !!(mark && mark.querySelector('circle')),
+        planePaths: mark ? mark.querySelectorAll('path').length : 0,
+        name: (h1.querySelector('.fg-auth-name') || {}).textContent || '',
+        // The old placeholder was a CSS ::before gradient square.
+        legacyBefore: getComputedStyle(h1, '::before').content
+      })
+    }
+    return out
+  })
+  expect(marks.length, 'both auth screens must exist').toBe(2)
+  for (const mark of marks) {
+    expect(mark.hasMark, `${mark.selector} must carry the mark`).toBeTruthy()
+    expect(mark.hasDisc, `${mark.selector} mark must be the Telegram disc`).toBeTruthy()
+    expect(mark.planePaths, `${mark.selector} must draw the paper plane`).toBeGreaterThanOrEqual(1)
+    expect(mark.name).toBe('FileGram')
+    expect(mark.legacyBefore, `${mark.selector} must not keep the placeholder square`).toBe('none')
+  }
+})
+
+/* REGRESSION: the fill ran past the thumb. A plain percentage stop is wrong
+ * because the thumb centre only travels between half a thumb from each end. */
+test('slider fill boundary is computed at the thumb centre', async ({ page }) => {
+  if (!await boot(page)) return
+  const geometry = await page.evaluate(() => {
+    const input = document.querySelector('#concurrency')
+    if (!input) return null
+    const cs = getComputedStyle(input)
+    const min = Number(input.min || 1)
+    const max = Number(input.max || 64)
+    const ratio = (Number(input.value) - min) / (max - min)
+    return {
+      ratioVar: cs.getPropertyValue('--fg-range-ratio').trim(),
+      expected: ratio.toFixed(5),
+      stop: cs.getPropertyValue('--fg-range-stop').trim(),
+      thumb: cs.getPropertyValue('--fg-range-thumb').trim()
+    }
+  })
+  expect(geometry, 'the slider must exist').not.toBeNull()
+  expect(geometry.ratioVar, 'the ratio must track the value').toBe(geometry.expected)
+  expect(geometry.thumb, 'the thumb width must be declared for the inset maths').toBe('14px')
+  // The stop must subtract a thumb width and re-centre by half of one, otherwise
+  // the painted fill overshoots the head.
+  expect(geometry.stop).toContain('100%')
+  expect(geometry.stop, `stop expression was "${geometry.stop}"`).toMatch(/100%\s*-\s*(var\(--fg-range-thumb\)|14px)/)
+  expect(geometry.stop).toMatch(/\/\s*2/)
+
+  await page.locator('#concurrency').focus()
+  await page.keyboard.press('ArrowRight')
+  await page.waitForTimeout(150)
+  const moved = await page.evaluate(() => {
+    const input = document.querySelector('#concurrency')
+    const min = Number(input.min || 1)
+    const max = Number(input.max || 64)
+    return {
+      ratioVar: getComputedStyle(input).getPropertyValue('--fg-range-ratio').trim(),
+      expected: ((Number(input.value) - min) / (max - min)).toFixed(5)
+    }
+  })
+  expect(moved.ratioVar).toBe(moved.expected)
+  await page.keyboard.press('ArrowLeft')
+  await page.waitForTimeout(400)
+})
+
+/* REGRESSION: forcing display:block on the fallback put the initial in the corner
+ * of the 36px box, where border-radius + overflow:hidden clipped it away, leaving
+ * an apparently empty coloured circle. */
+test('header avatar initials are centred, not clipped into a corner', async ({ page }) => {
+  if (!await boot(page)) return
+  let checked = 0
+  for (let index = 0; index < 6; index++) {
+    const row = page.locator('#chat-list .chat-item:not([hidden])').nth(index)
+    if (!await row.count()) break
+    await row.click().catch(() => {})
+    await page.waitForTimeout(1600)
+    const avatar = await page.evaluate(() => {
+      const host = document.querySelector('#fg-chat-avatar')
+      const fallback = host && host.querySelector('.tele-final-avatar-fallback')
+      const img = host && host.querySelector('img')
+      if (!host || !fallback) return null
+      const photoShown = !!(img && img.complete && img.naturalWidth > 0)
+      if (photoShown) return { photoShown }
+      const hostBox = host.getBoundingClientRect()
+      const glyphBox = fallback.getBoundingClientRect()
+      return {
+        photoShown,
+        title: ((document.querySelector('#chat-title') || {}).textContent || '').trim(),
+        initials: (fallback.textContent || '').trim(),
+        display: getComputedStyle(fallback).display,
+        offsetX: Math.round((glyphBox.left + glyphBox.width / 2) - (hostBox.left + hostBox.width / 2)),
+        offsetY: Math.round((glyphBox.top + glyphBox.height / 2) - (hostBox.top + hostBox.height / 2))
+      }
+    })
+    if (!avatar || avatar.photoShown) continue
+    checked++
+    expect(avatar.initials.length, `"${avatar.title}" must show initials`).toBeGreaterThan(0)
+    expect(avatar.display, 'the fallback must stay a centring grid').toBe('grid')
+    // Centred on the circle, so the glyph cannot be clipped by the border radius.
+    expect(Math.abs(avatar.offsetX), `"${avatar.title}" glyph is off-centre by ${avatar.offsetX}px`).toBeLessThanOrEqual(1)
+    expect(Math.abs(avatar.offsetY), `"${avatar.title}" glyph is off-centre by ${avatar.offsetY}px`).toBeLessThanOrEqual(1)
+  }
+  if (!checked) {
+    test.info().annotations.push({ type: 'note', description: 'every visible chat had a photo; initials centring not exercised' })
+  }
+})
+
+/* Reading is tied to SEEING messages: opening into Files must not mark a chat read,
+ * switching to Messages must, and a single user action must issue one request. */
+test('mark-read is issued by the Messages tab, once', async ({ page }) => {
+  if (!await boot(page)) return
+  const result = await page.evaluate(async () => {
+    const chat = (state.chats || [])[0]
+    if (!chat) return null
+    const calls = []
+    const base = request
+    request = function fileGramSpyRequest (type, payload) {
+      if (type === 'mark-read') calls.push(String(payload && payload.chatId))
+      return base(type, payload)
+    }
+    const wanted = String(chat.id)
+    /* Re-resolve from state every time. guardUpsertChat replaces
+     * state.chats[index] with a NEW object, so a captured reference goes stale and
+     * writing unread onto it would silently do nothing. */
+    const markUnread = () => {
+      const live = (state.chats || []).find(entry => entry && String(entry.id) === wanted)
+      if (live) live.unread = 3
+      return !!live
+    }
+    try {
+      // The chat must be ACTIVE: the guard resolves it from state.activeChatId, so
+      // marking an unopened chat unread proves nothing.
+      await openChat(chat.id)
+      setView('files')
+      await new Promise(resolve => setTimeout(resolve, 600))
+      if (!markUnread()) return { skipped: 'chat vanished from state' }
+      calls.length = 0
+
+      setView('files')
+      await new Promise(resolve => setTimeout(resolve, 800))
+      const onFiles = calls.length
+
+      markUnread()
+      setView('messages')
+      await new Promise(resolve => setTimeout(resolve, 1500))
+      const onMessages = calls.length
+      return { onFiles, onMessages, chatId: wanted, active: String(state.activeChatId) }
+    } finally {
+      request = base
+    }
+  })
+  if (!result || result.skipped) return
+  expect(result.active, 'the chat under test must be the active one').toBe(result.chatId)
+  expect(result.onFiles, 'the Files tab must not mark a chat read').toBe(0)
+  // Exactly one: openChat restores the view through setView, so both hooks can fire
+  // for one action and the in-flight guard must collapse them.
+  expect(result.onMessages, `Messages tab issued ${result.onMessages} mark-read requests`).toBe(1)
 })

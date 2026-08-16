@@ -281,10 +281,20 @@
   /* Tells Telegram the chat has been read, so unread_count drops and the chat
    * leaves the Unread filter. Only fires when there is something unread, so
    * revisiting an already-read chat costs no round trip. */
+  const guardReadInFlight = new Set()
+
   function guardMarkChatRead (chatId) {
     const chat = guardChatById(chatId)
     if (!chat || Number(chat.unread || 0) <= 0) return
-    Promise.resolve(request('mark-read', { chatId })).catch(() => {})
+    // openChat restores the preferred view through setView, so both hooks can fire
+    // for a single user action. One request per chat at a time; the unread count
+    // drops to 0 via chat-upsert, which stops any further call by itself.
+    const key = guardKey(chatId)
+    if (guardReadInFlight.has(key)) return
+    guardReadInFlight.add(key)
+    Promise.resolve(request('mark-read', { chatId }))
+      .catch(() => {})
+      .finally(() => guardReadInFlight.delete(key))
   }
 
   /* Active chat header avatar (#fg-chat-avatar).
@@ -457,10 +467,22 @@
 
   openChat = async function teleGuardOpenChat (chatId) {
     const result = await guardBaseOpenChat(chatId)
-    guardMarkChatRead(chatId)
+    // Only counts as read if the messages are actually on screen.
+    if (state.view === 'messages') guardMarkChatRead(chatId)
     guardRepaintChats()
     guardUpdateMediaLabel()
     guardPaintHeaderAvatar()
+    return result
+  }
+
+  /* Reading is tied to SEEING the messages, not merely to opening the chat.
+   * Opening straight into the Files tab shows no message, so the chat stays
+   * unread; switching to Messages is what marks it read and drops it out of the
+   * Unread filter. */
+  const guardBaseSetView = setView
+  setView = function teleGuardSetView (view) {
+    const result = guardBaseSetView(view)
+    if (view === 'messages' && state.activeChatId != null) guardMarkChatRead(state.activeChatId)
     return result
   }
 

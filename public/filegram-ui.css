@@ -1076,8 +1076,15 @@ li.chat-item.active {
    specificity (1,1,0) and would outrank .hidden (0,1,0), pinning the initials
    visible behind the photo - the same trap that once made #media-grid
    unhideable. */
+/* Must stay a centring grid. daily-driver-final.css positions this span
+   absolute/inset:0 and centres the glyph with display:grid + place-items:center.
+   Forcing display:block put the initial in the top-left corner of the 36px box,
+   where the circular border-radius and overflow:hidden clipped it away entirely -
+   which is why some chats showed an empty coloured circle. */
 #fg-chat-avatar .tele-final-avatar-fallback:not(.hidden) {
-  display: block !important;
+  display: grid !important;
+  place-items: center !important;
+  inset: 0 !important;
   line-height: 1 !important;
 }
 
@@ -2242,9 +2249,14 @@ li.chat-item.active {
   -webkit-appearance: none !important;
   background: transparent !important;
   border: none !important;
-  /* Updated by filegram-shell.js so the elapsed part of the track is filled.
-     Without it the bar was uniformly grey and gave no read on the value. */
-  --fg-range-fill: 0%;
+  /* Unitless 0..1 ratio of the current value, written by filegram-shell.js. */
+  --fg-range-ratio: 0;
+  /* Thumb width, and the exact x of the thumb CENTRE.
+     A plain percentage of the track is wrong: the thumb centre only travels
+     between half a thumb from each end, so a percentage stop ran ahead of the
+     head and painted blue past it. */
+  --fg-range-thumb: 14px;
+  --fg-range-stop: calc(var(--fg-range-ratio) * (100% - var(--fg-range-thumb)) + var(--fg-range-thumb) / 2);
 }
 
 #concurrency:focus-visible {
@@ -2256,7 +2268,7 @@ li.chat-item.active {
   border-radius: 3px;
   border: none;
   background:
-    linear-gradient(to right, var(--fg-accent) 0 var(--fg-range-fill), var(--fg-surface-3) var(--fg-range-fill) 100%);
+    linear-gradient(to right, var(--fg-accent) 0 var(--fg-range-stop), var(--fg-surface-3) var(--fg-range-stop) 100%);
 }
 
 #concurrency::-webkit-slider-thumb {
@@ -2815,14 +2827,20 @@ button.secondary {
   gap: var(--fg-space-3);
 }
 
-.screen .card h1::before {
-  content: '';
-  display: inline-block;
+/* The auth screens carry the real Telegram mark as static markup in the heading,
+   so it renders before any script runs. The old ::before drew a plain gradient
+   square placeholder. */
+.screen .card h1 .fg-auth-mark {
+  display: inline-flex;
   width: 32px;
   height: 32px;
-  background: linear-gradient(135deg, var(--fg-accent), #7c5cfc);
-  border-radius: var(--fg-radius-md);
   flex-shrink: 0;
+}
+
+.screen .card h1 .fg-auth-mark svg {
+  width: 32px;
+  height: 32px;
+  display: block;
 }
 
 .screen .card p {

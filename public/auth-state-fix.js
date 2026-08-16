@@ -11,7 +11,13 @@
 
   function applyBrand () {
     document.title = 'FileGram'
-    document.querySelectorAll('#login-screen h1, #config-screen h1').forEach(el => { el.textContent = 'FileGram' })
+    // Only the name text is rewritten. Setting textContent on the heading would
+    // wipe the Telegram mark that ships as static markup inside it.
+    document.querySelectorAll('#login-screen h1, #config-screen h1').forEach(el => {
+      const name = el.querySelector('.fg-auth-name')
+      if (name) name.textContent = 'FileGram'
+      else el.textContent = 'FileGram'
+    })
     const boot = document.querySelector('#boot-status')
     if (boot && /Tele/i.test(boot.textContent || '')) boot.textContent = 'Connecting to FileGram…'
   }

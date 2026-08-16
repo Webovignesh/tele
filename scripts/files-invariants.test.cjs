@@ -43,9 +43,29 @@ assert.match(stability, /rescueUpdateMediaLabel = paint/, 'rescueUpdateMediaLabe
 assert.match(stability, /ownCountLabel\(\)/, 'ownCountLabel must actually be installed')
 assert.match(stability, /function totalFloor/, 'a durable total floor must exist')
 assert.match(stability, /function rememberTotalFloor/, 'the floor must be recorded as the total grows')
-assert.match(stability, /Math\.max\(measured, totalFloor\(chatId\)\)/, 'the header total must be raised to the floor')
 assert.match(stability, /snapshot\.items\.length >= totalFloor\(chatId\)/, 'completeness must be size aware, not flag-only')
 assert.match(stability, /function clearTotalFloor/, 'a hard refresh must be able to drop the floor')
+
+/* The displayed total must be the REAL committed count. Raising the display to the
+ * floor produced a number the list could not back up: the header read 22,479 while
+ * Select all and the pager read 21,045. The floor drives repair, never display. */
+assert.doesNotMatch(stability, /Math\.max\(measured, totalFloor/, 'the header must not be inflated to the floor')
+assert.match(stability, /const total = snapshot\.items\.length/, 'the header must show the committed count')
+assert.match(stability, /function maybeRepairIndex/, 'a shortfall against the floor must trigger repair')
+assert.match(stability, /repairAttempts/, 'repair must not loop')
+assert.match(stability, /if \(snapshot\.done !== false\) rememberTotalFloor/, 'only a complete snapshot may raise the floor')
+
+/* `done` means "covers the whole history", so a union is complete if ANY input is.
+ * AND made incompleteness permanent: the first progress flush (done:false) poisoned
+ * the committed index forever, which disabled the guard that ignores obsolete
+ * partial scans and left the status stuck on "Indexing files...". */
+assert.match(stability, /done = done \|\| snapshot\.done !== false/, 'union must OR the completeness flag, not AND it')
+assert.doesNotMatch(stability, /done = done && snapshot\.done !== false/, 'the AND form must not come back')
+
+/* One source of truth for every total. */
+assert.match(stability, /snapshot: chatId => committed\.get/, 'the index owner must expose its snapshot')
+assert.match(filesView, /window\.teleFilesIndex/, 'the Files list must read the index owner')
+assert.match(filesView, /index\.snapshot\(state\.activeChatId\)/, 'the Files list must derive from the owned snapshot')
 
 // The count label must not be reassigned after this layer takes it. Any later
 // assignment would silently restore the old partial-reading writer.

@@ -657,8 +657,11 @@
     const max = Number(slider.max || 64)
     const value = Number(slider.value || min)
     const span = max - min
-    const pct = span > 0 ? ((value - min) / span) * 100 : 0
-    slider.style.setProperty('--fg-range-fill', `${pct.toFixed(2)}%`)
+    // A unitless ratio, not a percentage: the stylesheet converts it into the
+    // thumb-centre position so the fill boundary lands under the head instead of
+    // running past it.
+    const ratio = span > 0 ? (value - min) / span : 0
+    slider.style.setProperty('--fg-range-ratio', ratio.toFixed(5))
   }
 
   function installRangeFill () {
