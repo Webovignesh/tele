@@ -61,6 +61,7 @@ class FakeClient extends EventEmitter {
         return pending
       }
       case 'searchChatMessages':
+        await new Promise(resolve => setTimeout(resolve, 5))
         return { messages: [...this.messages.values()].reverse().slice(0, query.limit || 50), total_count: this.messages.size }
       case 'getMessage':
         return this.messages.get(String(query.message_id)) || null
@@ -154,6 +155,31 @@ async function retryIsIdempotentAfterResponseLoss () {
   })
 }
 
+async function concurrentUncertainRetryHasOneSender () {
+  const client = new FakeClient()
+  await withHarness(client, async ({ ledger, handler }) => {
+    const body = 'payload'
+    await ledger.set('job-race', {
+      chatId: 777,
+      fileName: 'race.bin',
+      size: Buffer.byteLength(body),
+      mimeType: 'application/octet-stream',
+      mode: 'document',
+      status: 'uncertain',
+      createdAt: Date.now() - 1000,
+      startedAt: Date.now() - 500,
+      messageId: null
+    })
+    const responses = await Promise.all([
+      runRequest(handler, { uploadId: 'job-race', fileName: 'race.bin', mimeType: 'application/octet-stream', body }),
+      runRequest(handler, { uploadId: 'job-race', fileName: 'race.bin', mimeType: 'application/octet-stream', body })
+    ])
+    const statuses = responses.map(res => res.statusCode).sort((a, b) => a - b)
+    assert.deepEqual(statuses, [200, 425], 'one concurrent retry must be rejected while the job is locked')
+    assert.equal(client.sendCount, 1, 'concurrent uncertain retries must never create duplicate Telegram messages')
+  })
+}
+
 async function reusedIdWithDifferentFileIsRejected () {
   const client = new FakeClient()
   await withHarness(client, async ({ handler }) => {
@@ -212,6 +238,7 @@ async function completedLedgerSurvivesNewProcessInstance () {
 ;(async () => {
   await sendsAndPersistsFinalMessage()
   await retryIsIdempotentAfterResponseLoss()
+  await concurrentUncertainRetryHasOneSender()
   await reusedIdWithDifferentFileIsRejected()
   await nonOwnerCannotUpload()
   await floodWaitReturnsRetryAfter()
