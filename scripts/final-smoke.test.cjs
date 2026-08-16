@@ -16,7 +16,11 @@ const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8')
 assert.match(js, /handleEvent = function teleFinalHandleEvent/)
 assert.match(js, /event\.name === 'media-index-progress'/)
 assert.match(js, /rescueEnsureAllFiles = teleFinalEnsureFiles/)
-assert.match(js, /renderFiles = teleFinalRenderFiles/)
+// The 240-row grow-on-scroll renderer was removed: files-view.js owns renderFiles
+// with real 100-per-page pagination and must not be shadowed by a second
+// windowed renderer. buildGridCard ownership stays here.
+assert.doesNotMatch(js, /renderFiles = teleFinalRenderFiles/)
+assert.doesNotMatch(js, /teleFinalRenderFiles/)
 assert.match(js, /buildGridCard = teleFinalBuildGridCard/)
 assert.match(js, /rescuePreviewFile = teleFinalOpenPreview/)
 assert.match(js, /teleP1RenderDedupeReport = function teleFinalRenderDedupeReport/)
@@ -39,13 +43,43 @@ assert.match(guard, /event\.name === 'chat-upsert'/)
 assert.match(guard, /guardMemorySnapshot\(state\.activeChatId\)/)
 
 assert.match(uiFix, /renderChats = teleUiRenderChats/)
-assert.match(uiFix, /renderFiles = \(\) => renderFilesVirtual\(true\)/)
-assert.match(uiFix, /function renderFilesVirtual/)
-assert.match(uiFix, /event\.stopImmediatePropagation\(\)/)
+// The virtual files renderer was removed. It padded the scroll surface with
+// spacers sized for the whole index while its re-windowing scroll listener was
+// dead, so the Files list scrolled far past its rows into blank space. This layer
+// must not render files or bind grid scroll handlers any more.
+assert.doesNotMatch(uiFix, /renderFilesVirtual/)
+assert.doesNotMatch(uiFix, /tele-ui-virtual-spacer/)
+assert.doesNotMatch(uiFix, /addEventListener\('scroll'/)
 assert.match(uiFix, /teleP1RenderDedupeReport = function teleUiRenderDedupeReport/)
 assert.match(uiFix, /upsertDownload = function teleUiUpsertDownload/)
-assert.match(uiFix, /renderDownloads = renderDownloadsNow/)
-assert.match(uiFix, /requestAnimationFrame/)
+/* The global entry point must be the THROTTLED wrapper, not renderDownloadsNow.
+ * app.js answers the 200ms download-stats broadcast by calling renderDownloads()
+ * directly, so binding it to the immediate painter bypassed the coalescer and
+ * drove ~10 full repaints a second. */
+assert.match(uiFix, /renderDownloads = function teleUiRenderDownloads/)
+assert.match(uiFix, /teleUiRenderDownloads \(\) \{ scheduleDownloads\(false\) \}/)
+// The rAF that used to be asserted here drove the virtual files scroll handler,
+// which is gone. Download painting is still throttled, which is the property
+// worth pinning.
+assert.match(uiFix, /DOWNLOAD_PAINT_MS/)
+assert.match(uiFix, /function scheduleDownloads/)
+
+/* The download list must be reconciled in place, never cleared. #download-list is
+ * the scroll container, so replaceChildren collapsed scrollHeight and the browser
+ * clamped scrollTop to 0 on every paint, making the list unscrollable while
+ * anything was downloading. */
+assert.doesNotMatch(uiFix, /list\.replaceChildren/)
+assert.match(uiFix, /node\.dataset\.jobId/)
+assert.match(uiFix, /list\.insertBefore\(node/)
+assert.match(uiFix, /function actionsSignature/)
+
+/* Speed must snap to a hard zero when a transfer stops. The EMA decays
+ * geometrically and never reaches zero, so a stalled job kept a denormal speed
+ * alive, every `speed > 0` guard stayed true and remaining/speed exploded into
+ * "ETA 4.99e+33h". */
+assert.match(uiFix, /SPEED_FLOOR/)
+assert.match(uiFix, /STALL_AFTER_MS/)
+assert.match(uiFix, /sample\.speed = 0/)
 assert.match(uiFix, /tele-ui-kind-icon/)
 assert.doesNotMatch(uiFix, /MutationObserver/)
 

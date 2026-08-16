@@ -11,7 +11,13 @@
 
   function applyBrand () {
     document.title = 'FileGram'
-    document.querySelectorAll('#login-screen h1, #config-screen h1').forEach(el => { el.textContent = 'FileGram' })
+    // Only the name text is rewritten. Setting textContent on the heading would
+    // wipe the Telegram mark that ships as static markup inside it.
+    document.querySelectorAll('#login-screen h1, #config-screen h1').forEach(el => {
+      const name = el.querySelector('.fg-auth-name')
+      if (name) name.textContent = 'FileGram'
+      else el.textContent = 'FileGram'
+    })
     const boot = document.querySelector('#boot-status')
     if (boot && /Tele/i.test(boot.textContent || '')) boot.textContent = 'Connecting to FileGram…'
   }
@@ -128,7 +134,13 @@
     button.title = 'Log out of Telegram on this FileGram installation'
     button.addEventListener('click', async () => {
       if (button.disabled) return
-      if (!confirm('Log out of Telegram on this FileGram installation?')) return
+      // The shell presents an in-app confirmation dialog and sets this flag
+      // before invoking the button, so the native prompt is skipped. Any other
+      // caller still gets the confirmation. The logout pipeline below is
+      // unchanged.
+      const preconfirmed = button.dataset.fgPreconfirmed === '1'
+      delete button.dataset.fgPreconfirmed
+      if (!preconfirmed && !confirm('Log out of Telegram on this FileGram installation?')) return
       button.disabled = true
       button.textContent = 'Logging out…'
       try {

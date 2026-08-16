@@ -13,8 +13,7 @@
   const teleFinalLastSync = new Map()
   const teleFinalAvatarRetries = new Map()
   const teleFinalThumbTargets = new WeakMap()
-  const teleFinalPage = { key: '', limit: 240 }
-  const TELE_FINAL_PAGE_SIZE = 240
+
   const TELE_FINAL_SYNC_TTL = 120000
 
   function teleFinalKey (value) { return String(value) }
@@ -74,8 +73,7 @@
     if (state.activeChatId != null && teleFinalKey(state.activeChatId) === key) {
       teleFinalUpdateMediaCountLabel()
       if (state.view === 'files' && options.render !== false) {
-        teleFinalResetFileWindow()
-        teleFinalRenderFiles()
+        try { renderFiles() } catch {}
       }
       if (options.status) setLoadState(options.status)
     }
@@ -166,8 +164,7 @@
         teleFinalMergePartial.paintTimer = setTimeout(() => {
           teleFinalMergePartial.paintTimer = null
           if (state.activeChatId != null && teleFinalKey(state.activeChatId) === key && state.view === 'files') {
-            teleFinalResetFileWindow()
-            teleFinalRenderFiles()
+            try { renderFiles() } catch {}
             setLoadState(`Indexing files… ${partial.items.length.toLocaleString()} found`)
           }
         }, 260)
@@ -325,15 +322,6 @@
     return list
   }
 
-  function teleFinalViewKey (items) {
-    return [state.activeChatId, state.files.mode, state.files.query, state.files.filter, state.files.sort, items.length].join('|')
-  }
-
-  function teleFinalResetFileWindow () {
-    teleFinalPage.key = ''
-    teleFinalPage.limit = TELE_FINAL_PAGE_SIZE
-  }
-
   function teleFinalMediaUrl (item, fileId) {
     const id = fileId == null ? item.fileId : fileId
     const params = new URLSearchParams()
@@ -458,7 +446,7 @@
             const row = all[i]
             state.selection.set(`${row.chatId}:${row.messageId}`, row)
           }
-          teleFinalRenderFiles()
+          try { renderFiles() } catch {}
           updateSelectionBar()
           return
         }
@@ -475,47 +463,12 @@
 
   buildGridCard = teleFinalBuildGridCard
 
-  function teleFinalRenderFiles () {
-    const grid = document.querySelector('#media-grid')
-    if (!grid) return
-    const items = filesItems()
-    const key = teleFinalViewKey(items)
-    if (teleFinalPage.key !== key) {
-      teleFinalPage.key = key
-      teleFinalPage.limit = TELE_FINAL_PAGE_SIZE
-    }
-    const limit = Math.min(items.length, teleFinalPage.limit)
-    const scrollTop = grid.scrollTop
-    grid.innerHTML = ''
-    for (let i = 0; i < limit; i++) grid.appendChild(teleFinalBuildGridCard(items[i]))
-    if (items.length > limit) {
-      const status = document.createElement('div')
-      status.className = 'tele-final-list-status'
-      status.textContent = `Showing ${limit.toLocaleString()} of ${items.length.toLocaleString()} · scroll for more`
-      grid.appendChild(status)
-    }
-    grid.scrollTop = scrollTop
-
-    const selectAll = document.querySelector('#select-all-media')
-    if (selectAll) {
-      selectAll.textContent = items.length ? `Select all (${items.length.toLocaleString()})` : 'Select all'
-      selectAll.disabled = items.length === 0
-    }
-  }
-
-  renderFiles = teleFinalRenderFiles
-
-  const teleFinalGrid = document.querySelector('#media-grid')
-  if (teleFinalGrid && !teleFinalGrid.dataset.teleFinalScroll) {
-    teleFinalGrid.dataset.teleFinalScroll = '1'
-    teleFinalGrid.addEventListener('scroll', () => {
-      if (teleFinalGrid.scrollTop + teleFinalGrid.clientHeight < teleFinalGrid.scrollHeight - 900) return
-      const items = filesItems()
-      if (teleFinalPage.limit >= items.length) return
-      teleFinalPage.limit = Math.min(items.length, teleFinalPage.limit + TELE_FINAL_PAGE_SIZE)
-      teleFinalRenderFiles()
-    }, { passive: true })
-  }
+  /* The 240-row grow-on-scroll files renderer that used to live here is gone,
+   * along with its scroll listener. It mounted 240 rows and restored the previous
+   * scrollTop, which made the grid taller than the page and fought the pager.
+   * files-view.js owns renderFiles and mounts exactly one 100-row page.
+   * teleFinalBuildGridCard is kept: it is still the buildGridCard owner and
+   * files-view.js builds its cards through it. */
 
   /* ------------------------------ Unified popup preview ------------------------------ */
 
@@ -768,10 +721,11 @@
       const snapshot = teleFinalSnapshot(chatId)
       if (snapshot) teleFinalApplySnapshot(chatId, snapshot, { persist: false, render: state.view === 'files' })
       teleFinalUpdateMediaCountLabel()
-      if (state.view === 'files') {
-        teleFinalResetFileWindow()
-        teleFinalRenderFiles()
-      }
+      // Paint through the current renderFiles owner. The renderer this layer used
+      // to call mounted a growing 240-row window and restored the previous
+      // scrollTop, which fought pagination and left the grid scrollable well past
+      // its 100 rows.
+      if (state.view === 'files') { try { renderFiles() } catch {} }
       teleFinalEnsureFiles(chatId).catch(() => {})
     }
     return result
@@ -781,9 +735,7 @@
   setView = function teleFinalSetView (view) {
     const result = teleFinalBaseSetView(view)
     if (view === 'files' && state.activeChatId != null) {
-      teleFinalResetFileWindow()
-      const snapshot = teleFinalSnapshot(state.activeChatId)
-      if (snapshot) teleFinalRenderFiles()
+      if (teleFinalSnapshot(state.activeChatId)) { try { renderFiles() } catch {} }
       teleFinalUpdateMediaCountLabel()
       teleFinalEnsureFiles(state.activeChatId).catch(() => {})
     }
@@ -819,6 +771,9 @@
     const uniqueCount = Number(report.uniqueCount || 0)
     const existingCount = duplicates.filter(row => row.reason === 'existing').length
     const repeatedCount = Math.max(0, duplicateCount - existingCount)
+    // Selected but already finished earlier in this browser, so not on disk under a
+    // matching name yet still not worth fetching again.
+    const completedCount = Number(report.completedCount || 0)
 
     modal.querySelector('#tele-dedupe-subtitle').textContent = duplicateCount
       ? `${duplicateCount.toLocaleString()} duplicate${duplicateCount === 1 ? '' : 's'} found · ${uniqueCount.toLocaleString()} ready to download`
@@ -834,9 +789,25 @@
 
     const stats = document.createElement('div')
     stats.className = 'tele-dedupe-stats'
-    for (const [label, value] of [
-      ['Selected', selectedCount], ['Already there', existingCount], ['Repeated selection', repeatedCount], ['Will download', uniqueCount]
-    ]) {
+    /* Every selected file lands in exactly one bucket, so these add up to Selected.
+     * That invariant is what makes the numbers checkable:
+     * selected = on disk + marked done + repeated + will download.
+     *
+     * The labels name the EVIDENCE, not the outcome. "Already there" next to
+     * "Already downloaded" read as two words for the same thing, because both only
+     * said the file would be skipped and neither said how that was established. */
+    const tiles = [
+      ['Selected', selectedCount],
+      // A matching file is physically in the destination folder.
+      ['On disk', existingCount]
+    ]
+    // Exceptional, so only shown when it applies: this app's own completed list
+    // says the file was fetched, but nothing matching it is in the folder now.
+    if (completedCount) tiles.push(['Marked done', completedCount])
+    // The same file chosen twice in one selection.
+    if (repeatedCount) tiles.push(['Repeated in selection', repeatedCount])
+    tiles.push(['Will download', uniqueCount])
+    for (const [label, value] of tiles) {
       const card = document.createElement('div')
       card.className = 'tele-dedupe-stat'
       const name = document.createElement('span')
@@ -847,6 +818,16 @@
       stats.appendChild(card)
     }
     body.appendChild(stats)
+
+    /* "Marked done" is the one bucket whose meaning is not self-evident, so it is
+     * spelled out rather than left to the label. Its own element, because the
+     * validation line below is rewritten by a later layer. */
+    if (completedCount) {
+      const legend = document.createElement('div')
+      legend.className = 'tele-dedupe-legend'
+      legend.textContent = `Marked done: ${completedCount.toLocaleString()} of these were downloaded before, but no matching file is in this folder now. They are skipped; use Unmark to fetch them again.`
+      body.appendChild(legend)
+    }
 
     const validation = document.createElement('div')
     validation.className = 'tele-dedupe-validation'

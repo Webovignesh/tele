@@ -45,10 +45,33 @@ function signatureFor (name, size) {
   return `${normalizedName}\u0000${bytes}`
 }
 
+/* Strips the " (N)" that server.js uniquePath() appends when a name is already
+ * taken, so a file saved as "photo (1).jpg" is still recognised as "photo.jpg"
+ * being on disk.
+ *
+ * Without this every collision-renamed copy was invisible to the duplicate check
+ * and got downloaded again, which is a real undercount of "already there". The
+ * byte size still has to match exactly, so this cannot turn genuinely different
+ * files into duplicates - and a file that really is named "photo (1).jpg" with the
+ * identical size as "photo.jpg" is the same content anyway. */
+function withoutCopySuffix (name) {
+  return name.replace(/ \((\d+)\)(\.[^.]*)?$/, '$2')
+}
+
 async function walkMatchingFiles (rootDir, wantedSignatures) {
   const matches = new Map()
   let scannedFiles = 0
   let scannedDirs = 0
+
+  /* Names are indexed up front. The previous version tested every file against
+   * EVERY wanted signature with startsWith, i.e. files x signatures string
+   * comparisons - about 60 million for a 6,000-file folder and a 9,500-file
+   * selection. A set lookup makes it O(1) per file. */
+  const wantedNames = new Set()
+  for (const signature of wantedSignatures) {
+    const cut = signature.indexOf('\u0000')
+    if (cut > 0) wantedNames.add(signature.slice(0, cut))
+  }
 
   async function walk (dir) {
     let entries
@@ -70,23 +93,21 @@ async function walkMatchingFiles (rootDir, wantedSignatures) {
       scannedFiles++
 
       const lowerName = entry.name.toLocaleLowerCase('en-US')
-      let relevant = false
-      for (const signature of wantedSignatures) {
-        if (signature.startsWith(lowerName + '\u0000')) {
-          relevant = true
-          break
-        }
-      }
-      if (!relevant) continue
+      const baseName = withoutCopySuffix(lowerName)
+      const candidateNames = baseName !== lowerName ? [lowerName, baseName] : [lowerName]
+      if (!candidateNames.some(name => wantedNames.has(name))) continue
 
       let stat
       try { stat = await fs.promises.stat(fullPath) } catch { continue }
       if (!stat.isFile()) continue
-      const signature = `${lowerName}\u0000${stat.size}`
-      if (!wantedSignatures.has(signature)) continue
 
-      if (!matches.has(signature)) matches.set(signature, [])
-      matches.get(signature).push(fullPath)
+      for (const name of candidateNames) {
+        const signature = `${name}\u0000${stat.size}`
+        if (!wantedSignatures.has(signature)) continue
+        if (!matches.has(signature)) matches.set(signature, [])
+        matches.get(signature).push(fullPath)
+        break
+      }
     }
   }
 
@@ -100,18 +121,25 @@ async function walkMatchingFiles (rootDir, wantedSignatures) {
   return { matches, scannedFiles, scannedDirs }
 }
 
-async function buildDedupeReport (rawItems) {
+/* rootOverride lets a caller that already knows the destination pass it in, which
+ * keeps the tests from having to rewrite settings.json to point the scan somewhere
+ * safe. Production callers omit it and the configured downloads dir is used. */
+async function buildDedupeReport (rawItems, rootOverride) {
   const startedAt = Date.now()
-  const rootDir = configuredDownloadsDir()
+  const rootDir = rootOverride ? path.resolve(String(rootOverride)) : configuredDownloadsDir()
   const items = []
   const wanted = new Set()
 
   for (const raw of Array.isArray(rawItems) ? rawItems : []) {
     const messageId = String(raw && raw.messageId != null ? raw.messageId : '')
+    /* Opaque per-item identity supplied by the caller (chatId:messageId). Results
+     * used to be correlated by messageId alone, which two different chats can
+     * share. */
+    const uid = String(raw && raw.uid != null ? raw.uid : messageId)
     const fileName = sanitize(raw && raw.fileName)
     const fileSize = Number(raw && raw.fileSize || 0)
     const signature = signatureFor(fileName, fileSize)
-    const item = { messageId, fileName, fileSize, signature }
+    const item = { uid, messageId, fileName, fileSize, signature }
     items.push(item)
     if (signature) wanted.add(signature)
   }
@@ -119,13 +147,19 @@ async function buildDedupeReport (rawItems) {
   const { matches, scannedFiles, scannedDirs } = await walkMatchingFiles(rootDir, wanted)
   const duplicates = []
   const uniqueMessageIds = []
+  const uniqueUids = []
   const unknownSizeMessageIds = []
   const keptSelectionSignatures = new Set()
   let duplicateBytes = 0
 
+  const keep = item => {
+    uniqueMessageIds.push(item.messageId)
+    uniqueUids.push(item.uid)
+  }
+
   for (const item of items) {
     if (!item.signature) {
-      uniqueMessageIds.push(item.messageId)
+      keep(item)
       unknownSizeMessageIds.push(item.messageId)
       continue
     }
@@ -134,6 +168,7 @@ async function buildDedupeReport (rawItems) {
     if (diskMatches.length) {
       const existingPath = diskMatches[0]
       duplicates.push({
+        uid: item.uid,
         messageId: item.messageId,
         fileName: item.fileName,
         fileSize: item.fileSize,
@@ -148,6 +183,7 @@ async function buildDedupeReport (rawItems) {
 
     if (keptSelectionSignatures.has(item.signature)) {
       duplicates.push({
+        uid: item.uid,
         messageId: item.messageId,
         fileName: item.fileName,
         fileSize: item.fileSize,
@@ -161,7 +197,7 @@ async function buildDedupeReport (rawItems) {
     }
 
     keptSelectionSignatures.add(item.signature)
-    uniqueMessageIds.push(item.messageId)
+    keep(item)
   }
 
   return {
@@ -177,6 +213,7 @@ async function buildDedupeReport (rawItems) {
     unknownSizeCount: unknownSizeMessageIds.length,
     unknownSizeMessageIds,
     uniqueMessageIds,
+    uniqueUids,
     duplicates
   }
 }

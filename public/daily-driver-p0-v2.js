@@ -43,8 +43,21 @@ async function teleP0v2ReadIndex (chatId) {
   })
 }
 
-async function teleP0v2WriteIndex (chatId, snapshot) {
+/* The persistent index is monotonic. A snapshot may only replace a stored record
+ * that is the same size or smaller.
+ *
+ * teleP0v2ValidSnapshot only checks the done flag and chat ownership, so a short
+ * scan stamped done:true used to overwrite a larger committed index on disk. The
+ * next reload then restored the short version and the header shrank until a full
+ * rescan grew it back. Shrinking requires an explicit hard refresh, which passes
+ * allowShrink. */
+async function teleP0v2WriteIndex (chatId, snapshot, options = {}) {
   if (!teleP0v2ValidSnapshot(chatId, snapshot)) return
+  if (!options.allowShrink) {
+    const existing = await teleP0v2ReadIndex(chatId).catch(() => null)
+    const storedCount = existing && Array.isArray(existing.items) ? existing.items.length : 0
+    if (storedCount > snapshot.items.length) return
+  }
   const db = await teleP0v2Db().catch(() => null)
   if (!db) return
   const record = {

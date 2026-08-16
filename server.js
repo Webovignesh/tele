@@ -48,6 +48,9 @@ let CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 8))
 let client = null
 let ready = false
 let authState = null
+// Last known signed-in identity, so a browser reload can restore the account
+// display without waiting for another authorizationStateReady transition.
+let currentUser = null
 let lastChatOffset = { order: '9223372036854775807', chat_id: 0 }
 
 const senderCache = new Map()
@@ -108,11 +111,119 @@ function respond (ws, id, ok, data, error) {
 
 /* ------------------------------ Download manager ------------------------------ */
 
+/* Queue state machine. The server owns the whole queue; the browser only ever
+ * sees a projection of it, so every bulk operation and every statistic must be
+ * derived here and never from what the client happens to have received.
+ *
+ *   queued  -> downloading -> done
+ *              |  |  |
+ *              |  |  +------> error
+ *              |  +---------> paused -> queued (resume)
+ *              +------------> cancelled
+ *   queued  -> paused | cancelled          (never started)
+ *
+ * PENDING = 'queued', ACTIVE = 'downloading', and done/error/cancelled are
+ * terminal. Cancellable work is exactly queued | downloading | paused.
+ */
+const CANCELLABLE = ['queued', 'downloading', 'paused']
+const TERMINAL = ['done', 'error', 'cancelled']
+
+/* How long an active job may go without a single new byte before its download
+ * request is re-asserted.
+ *
+ * This is deliberately short, because re-asserting costs almost nothing: it is a
+ * getFile plus an idempotent downloadFile against at most CONCURRENCY jobs, and it
+ * never cancels anything. A file that is genuinely transferring refreshes its
+ * timestamp on every progress update and is therefore never touched.
+ *
+ * It has to be shorter than TDLib's own retry backoff to be any use. TDLib gives up
+ * on a file when its internal temp -> cache rename is refused - on Windows that
+ * happens when real-time antivirus still holds the freshly written temp file:
+ *   "Failed to Download file NNN of type Photo: [WindowsError : Access is denied.
+ *    : 5 : Can't rename .td_files\temp\7557 to .td_files\photos\...jpg]"
+ * It then retries on its own schedule, which measured at 36-38 seconds. With the
+ * old 45s threshold we always waited for TDLib and the user saw the batch stop
+ * dead; at 8s we nudge it back to work first. Observed against 150 photos: 146
+ * finished in 14s and the last four froze for 38s, matching those log lines
+ * exactly - including thumbnails under .td_database, which this app never touches,
+ * so the refusal is not something we cause. */
+const STALL_AFTER_MS = 8000
+const SWEEP_INTERVAL_MS = 2000
+// Bounded so a genuinely broken file cannot retry for ever.
+const MAX_ATTEMPTS = 3
+const SPEED_SMOOTHING = 0.6
+
 class DownloadManager {
   constructor () {
     this.jobs = new Map()
     this.activeCount = 0
     this.lastEmit = new Map()
+    /* fileId -> the path a completed job delivered it to. One TDLib file can back
+     * several queued messages, and finalize() takes it out of TDLib's cache, so a
+     * sibling needs to know where the content ended up. */
+    this.deliveredByFile = new Map()
+    // TDLib file ids currently being downloaded, so the same file is never
+    // requested twice at once.
+    this.inFlightFiles = new Set()
+    // Set while a bulk operation walks the queue. tryRun() is a no-op during
+    // that window so cancelling job 1 of 20,000 cannot start job 9 only for the
+    // same pass to cancel it a moment later (an O(n^2) scan storm plus a burst
+    // of pointless TDLib downloadFile round-trips).
+    this.bulk = false
+    this.statsTimer = null
+    // Watchdog; unref'd so it never keeps the process alive on its own.
+    this.sweepTimer = setInterval(() => { try { this.sweep() } catch {} }, SWEEP_INTERVAL_MS)
+    if (this.sweepTimer && this.sweepTimer.unref) this.sweepTimer.unref()
+  }
+
+  /* Aggregate over the FULL queue. This is the only sanctioned source for the
+   * Speed / Downloaded / Remaining / Total figures. */
+  stats () {
+    let queued = 0
+    let downloading = 0
+    let paused = 0
+    let done = 0
+    let error = 0
+    let cancelled = 0
+    let speed = 0
+    let downloadedBytes = 0
+    let expectedBytes = 0
+    for (const job of this.jobs.values()) {
+      switch (job.status) {
+        case 'queued': queued++; break
+        case 'downloading': downloading++; speed += Math.max(0, Number(job.speed || 0)); break
+        case 'paused': paused++; break
+        case 'done': done++; break
+        case 'error': error++; break
+        case 'cancelled': cancelled++; break
+      }
+      downloadedBytes += Math.max(0, Number(job.downloaded || 0))
+      expectedBytes += Math.max(0, Number(job.fileSize || 0))
+    }
+    return {
+      total: this.jobs.size,
+      queued,
+      downloading,
+      paused,
+      done,
+      error,
+      cancelled,
+      // Work that still needs to finish, whether or not it has started.
+      remaining: queued + downloading + paused,
+      speed,
+      downloadedBytes,
+      expectedBytes,
+      concurrency: CONCURRENCY
+    }
+  }
+
+  /* Coalesced so a 20k enqueue produces a handful of broadcasts, not 20k. */
+  scheduleStats () {
+    if (this.statsTimer) return
+    this.statsTimer = setTimeout(() => {
+      this.statsTimer = null
+      sendAll({ type: 'event', event: { name: 'download-stats', stats: this.stats() } })
+    }, 200)
   }
 
   add (chatId, chatTitle, messageId, fileId, fileName, fileSize) {
@@ -131,32 +242,113 @@ class DownloadManager {
       speed: 0,
       error: null,
       destPath: null,
-      active: false
+      active: false,
+      // Generation counter, incremented on every start, so a stale runner whose
+      // await finally settles can detect that it no longer owns the job.
+      run: 0,
+      attempts: 0,
+      lastProgressAt: 0,
+      finalizing: false
     }
     this.jobs.set(jobId, job)
+    // Enqueue is not broadcast per job: a "download all" on a 20k channel would
+    // otherwise push 20k socket frames. The coalesced aggregate keeps the client
+    // honest about queue size without that flood.
+    this.scheduleStats()
     this.tryRun()
     return jobId
   }
 
   tryRun () {
+    if (this.bulk) return
     while (this.activeCount < CONCURRENCY) {
-      const next = [...this.jobs.values()].find(j => j.status === 'queued')
+      /* A file already in flight is skipped rather than requested again. Asking
+       * TDLib for the same file twice made it fetch the bytes a second time into
+       * another temp file, whose temp -> cache rename then collided with the copy we
+       * were taking; TDLib calls that a failed download and retries after a long
+       * backoff. The duplicate is left queued and settles as soon as the first copy
+       * lands - see settleTwins. */
+      let next = null
+      for (const job of this.jobs.values()) {
+        if (job.status !== 'queued') continue
+        if (this.inFlightFiles.has(job.fileId)) continue
+        next = job
+        break
+      }
       if (!next) break
       this.activeCount++
-      this.startJob(next)
+      // startJob handles its own failures, but it is not awaited here, so an
+      // unexpected rejection must not become an unhandled rejection that leaves
+      // activeCount incremented with nothing running.
+      Promise.resolve(this.startJob(next)).catch(() => {})
+    }
+  }
+
+  /* Runs fn with the scheduler suspended, then pumps once. */
+  runBulk (fn) {
+    const wasBulk = this.bulk
+    this.bulk = true
+    try {
+      return fn()
+    } finally {
+      this.bulk = wasBulk
+      if (!this.bulk) this.tryRun()
+      this.scheduleStats()
     }
   }
 
   async startJob (job) {
-    job.status = 'downloading'
-    job.active = true
-    this.emitJob(job)
+    /* Every start takes a generation token.
+     *
+     * pause() frees the slot immediately while this runner's downloadFile promise
+     * is still pending, so a resume can begin a SECOND runner for the same job.
+     * Without the token the stale runner would later finalize the job, or flip it
+     * to error, and release the slot the new runner owns - under-counting
+     * activeCount and over-subscribing TDLib. */
+    const run = (job.run || 0) + 1
+    job.run = run
+    const stale = () => job.run !== run
+
+    // The whole body is guarded. The status/active/emitJob prologue used to sit
+    // OUTSIDE the try, so a throw in emitJob escaped as an unhandled rejection
+    // with activeCount already incremented: a permanent slot leak, unlogged.
     try {
+      job.status = 'downloading'
+      job.active = true
+      this.inFlightFiles.add(job.fileId)
+      job.attempts = (job.attempts || 0) + 1
+      job.lastProgressAt = Date.now()
+      job.speed = 0
+      this.emitJob(job)
+
+      /* Already fetched during this session through another message? Adopt that
+       * copy instead of asking Telegram for the bytes again. */
+      const delivered = this.deliveredByFile.get(job.fileId)
+      if (delivered && fs.existsSync(delivered)) {
+        job.downloaded = job.fileSize || job.downloaded || 0
+        job.destPath = delivered
+        job.status = 'done'
+        job.speed = 0
+        this.finishJob(job)
+        this.emitJob(job)
+        return
+      }
+
       const fileInfo = await client.invoke({ _: 'getFile', file_id: job.fileId }).catch(() => null)
+      if (stale()) return
       if (fileInfo && (fileInfo.size || fileInfo.expected_size)) {
         job.fileSize = fileInfo.size || fileInfo.expected_size
         this.emitJob(job)
       }
+      /* A file that is already complete in TDLib's cache produces no further
+       * updateFile, so it has to be finalized from this result or it would sit in
+       * 'downloading' holding a slot until the watchdog noticed. */
+      const cached = fileInfo && fileInfo.local
+      if (cached && cached.is_downloading_completed && cached.path) {
+        job.downloaded = job.fileSize || cached.downloaded_size || 0
+        return await this.finalize(job, cached.path)
+      }
+
       const res = await client.invoke({
         _: 'downloadFile',
         file_id: job.fileId,
@@ -165,16 +357,23 @@ class DownloadManager {
         limit: 0,
         synchronous: false
       })
-      if (job.status === 'paused') return
+      if (stale()) return
+      // downloadFile can resolve after the job was cancelled or paused. Both are
+      // deliberate terminations, so neither may be overwritten by done/error.
+      if (job.status === 'paused' || job.status === 'cancelled') return
       const local = res && res.local
       if (local && local.is_downloading_completed && local.path) {
         job.downloaded = job.fileSize || local.downloaded_size || 0
-        this.finalize(job, local.path)
+        await this.finalize(job, local.path)
       }
+      // Otherwise the job stays 'downloading' and completion arrives through
+      // onFileUpdate, with sweep() as the backstop if no update ever comes.
     } catch (e) {
-      if (job.status === 'paused') return
+      if (stale()) return
+      if (job.status === 'paused' || job.status === 'cancelled') return
       job.status = 'error'
       job.error = String(e.message || e)
+      job.speed = 0
       this.finishJob(job)
       this.emitJob(job)
     }
@@ -182,13 +381,43 @@ class DownloadManager {
 
   onFileUpdate (file) {
     if (!file || !file.id) return
+    const now = Date.now()
     for (const job of this.jobs.values()) {
       if (job.fileId !== file.id) continue
       const local = file.local || {}
       if (job.status === 'paused' || job.status === 'cancelled') continue
+      // A finished job must not be resurrected by a late update.
+      if (TERMINAL.includes(job.status)) continue
+
+      const bytes = Math.max(0, Number(local.downloaded_size || 0))
+
+      /* Completion is handled FIRST and for any live status, not only
+       * 'downloading'.
+       *
+       * The same TDLib file id can be driven by something other than this job's
+       * runner (a duplicate entry in the same batch, downloadThumb,
+       * ensureLocalFile), so a job can still be 'queued' at the moment its bytes
+       * complete. Gating completion on 'downloading' dropped that signal on the
+       * floor: the row kept a full progress bar labelled QUEUED for ever and
+       * stats().done never incremented, which is exactly the reported symptom. */
+      if (local.is_downloading_completed && local.path) {
+        job.downloaded = job.fileSize || bytes || job.downloaded || 0
+        job.speed = 0
+        this.finalize(job, local.path)
+        continue
+      }
+
       if (local.is_downloading_active) {
-        job.downloaded = local.downloaded_size || 0
-        const now = Date.now()
+        const elapsed = (now - (job.lastProgressAt || now)) / 1000
+        const delta = bytes - Math.max(0, Number(job.downloaded || 0))
+        // Server-side speed. job.speed was never assigned anywhere, so
+        // stats().speed was structurally 0 despite being the documented source.
+        if (elapsed > 0.05 && delta > 0) {
+          const instant = delta / elapsed
+          job.speed = job.speed ? job.speed * SPEED_SMOOTHING + instant * (1 - SPEED_SMOOTHING) : instant
+        }
+        if (delta > 0) job.lastProgressAt = now
+        job.downloaded = bytes
         const last = this.lastEmit.get(job.jobId) || 0
         if (now - last > 250) {
           this.lastEmit.set(job.jobId, now)
@@ -196,38 +425,265 @@ class DownloadManager {
         }
         continue
       }
-      if (local.is_downloading_completed && local.path && job.status === 'downloading') {
-        job.downloaded = job.fileSize || local.downloaded_size || 0
-        this.finalize(job, local.path)
-      }
+
+      /* Neither active nor complete.
+       *
+       * This is NOT a failure and must not be treated as one. TDLib accepts every
+       * downloadFile request and then schedules the transfers itself, running far
+       * fewer in parallel than we ask for, so "not active, no bytes yet" is the
+       * normal resting state of most of a large batch.
+       *
+       * Requeueing here cancelled healthy downloads, discarded their partial data,
+       * sent them to the back of TDLib's queue and eventually failed them outright.
+       * That is what made large batches stop and later start again on their own.
+       * sweep() re-asserts the request if a job really does go quiet for too long. */
+      job.speed = 0
     }
   }
 
   async finalize (job, srcPath) {
+    /* Two completion signals can arrive inside the await window below - a TDLib
+     * update and the watchdog's getFile, say. Without this guard both proceed:
+     * the winner renames the file out of TDLib's cache and the loser then fails
+     * with ENOENT and flips an already-'done' job to 'error'. */
+    if (job.finalizing || TERMINAL.includes(job.status)) return
+    job.finalizing = true
     try {
-      const chatFolder = path.join(downloadsDir, sanitize(job.chatTitle))
-      fs.mkdirSync(chatFolder, { recursive: true })
-      const dest = uniquePath(chatFolder, sanitize(job.fileName))
-      await fs.promises.rename(srcPath, dest).catch(async () => {
-        await fs.promises.copyFile(srcPath, dest)
-        await fs.promises.unlink(srcPath).catch(() => {})
-      })
-      job.destPath = dest
-      job.status = 'done'
+      /* One TDLib file can back more than one queued message - the same photo
+       * reposted, or the same item indexed twice. Whichever job finalizes first
+       * MOVES the file out of TDLib's cache, so a sibling arriving afterwards has
+       * nothing left to move and used to fail with
+       * "ENOENT ... copyfile .td_files\photos\... -> ... (1).jpg".
+       *
+       * That is not a failure: the bytes are already on disk. The sibling adopts
+       * the delivered path instead of writing a second copy, which also stops the
+       * duplicate checker from later seeing phantom "(1)" files. */
+      const delivered = this.deliveredByFile.get(job.fileId)
+      if (delivered && fs.existsSync(delivered) && !fs.existsSync(srcPath)) {
+        job.destPath = delivered
+        job.status = 'done'
+        job.speed = 0
+      } else {
+        const chatFolder = path.join(downloadsDir, sanitize(job.chatTitle))
+        fs.mkdirSync(chatFolder, { recursive: true })
+        const dest = uniquePath(chatFolder, sanitize(job.fileName))
+        let moved = false
+        try {
+          await fs.promises.rename(srcPath, dest)
+          moved = true
+        } catch {
+          // Cross-volume moves always land here: the cache is under the app and the
+          // destination is usually another drive.
+          await fs.promises.copyFile(srcPath, dest)
+        }
+        /* Retire TDLib's copy through TDLib, not behind its back.
+         *
+         * Removing the cache file directly left TDLib believing it was still
+         * cached. The next time it wanted that file it logged
+         *   "Need to redownload file NNN: Can't get stat about the file"
+         * re-fetched it, and its own temp -> cache rename then collided with ours:
+         *   "Failed to Download file NNN of type Photo: [WindowsError :
+         *    Access is denied. : 5 : Can't rename .td_files\temp\7326 to
+         *    .td_files\photos\...jpg]"
+         * TDLib treats that as a failed download and retries after a long backoff,
+         * which is what made a batch sail through most files and then sit still for
+         * half a minute. Measured: 146 of 150 photos finished in 14s, then four
+         * jobs - exactly the four files in those log lines - froze for 36s.
+         *
+         * deleteFile keeps TDLib's database consistent whether or not the bytes are
+         * still there, so it never tries to reuse a file we have taken. */
+        if (client && ready) {
+          await client.invoke({ _: 'deleteFile', file_id: job.fileId }).catch(() => {})
+        } else if (!moved) {
+          await fs.promises.unlink(srcPath).catch(() => {})
+        }
+        job.destPath = dest
+        job.status = 'done'
+        job.speed = 0
+        this.deliveredByFile.set(job.fileId, dest)
+        // Anything else queued for the same file is already satisfied by this copy.
+        this.settleTwins(job)
+      }
     } catch (e) {
-      job.status = 'error'
-      job.error = String(e.message || e)
+      /* Last chance: a sibling may have delivered this same file while we were
+       * awaiting, in which case the content is on disk and this is not an error. */
+      const delivered = this.deliveredByFile.get(job.fileId)
+      if (delivered && fs.existsSync(delivered)) {
+        job.destPath = delivered
+        job.status = 'done'
+        job.error = null
+        job.speed = 0
+      } else {
+        job.status = 'error'
+        job.error = String(e.message || e)
+        job.speed = 0
+      }
+    } finally {
+      job.finalizing = false
     }
     this.finishJob(job)
     this.emitJob(job)
+  }
+
+  /* Settles every other job backed by the SAME TDLib file.
+   *
+   * One file can be queued through several messages. Letting each of them ask
+   * TDLib for the same file made it download the bytes again into a second temp
+   * file, and its temp -> cache rename then collided with the copy we were taking,
+   * which TDLib reports as a failed download and retries slowly. The content is
+   * already on disk, so the siblings adopt it. */
+  settleTwins (job) {
+    if (!job.destPath) return
+    for (const other of [...this.jobs.values()]) {
+      if (other === job || other.fileId !== job.fileId) continue
+      if (TERMINAL.includes(other.status)) continue
+      other.run = (other.run || 0) + 1 // invalidate any runner already in flight
+      other.destPath = job.destPath
+      other.status = 'done'
+      other.error = null
+      other.speed = 0
+      other.downloaded = other.fileSize || job.downloaded || other.downloaded
+      this.finishJob(other)
+      this.emitJob(other)
+    }
   }
 
   finishJob (job) {
     if (job.active) {
       job.active = false
       this.activeCount = Math.max(0, this.activeCount - 1)
-      this.tryRun()
+      this.inFlightFiles.delete(job.fileId)
     }
+    /* Pump unconditionally. This used to sit inside the `if (job.active)` branch,
+     * so a terminal transition on a job that held no slot never re-pumped even
+     * when capacity was free. */
+    this.tryRun()
+  }
+
+  /* Recomputes activeCount from the jobs that actually hold a slot.
+   *
+   * tryRun's only gate is activeCount < CONCURRENCY, so one leaked increment
+   * permanently lowers throughput and enough of them stop the queue with no error
+   * logged anywhere. Deriving the counter instead of trusting incremental
+   * bookkeeping means any leak self-heals on the next sweep. */
+  reconcile () {
+    let active = 0
+    for (const job of this.jobs.values()) {
+      if (TERMINAL.includes(job.status)) job.active = false
+      if (job.active) active++
+    }
+    const drifted = active !== this.activeCount
+    this.activeCount = active
+    return drifted
+  }
+
+  /* Watchdog pass.
+   *
+   * A job that has not received a byte for a while is NOT assumed dead, because
+   * with a large batch that is the normal condition of everything TDLib has not
+   * scheduled yet. Recovery is to RE-ASSERT the request, never to cancel it:
+   * downloadFile is idempotent, so for a file TDLib is already working on it only
+   * refreshes the priority, and for one TDLib has genuinely forgotten it starts it
+   * again. Nothing is discarded either way.
+   *
+   * Only jobs holding a slot are examined, so this is bounded by CONCURRENCY
+   * however large the queue is. */
+  sweep () {
+    if (this.bulk || !client || !ready) return
+    const now = Date.now()
+    this.reconcile()
+    for (const job of [...this.jobs.values()]) {
+      if (job.status !== 'downloading' || !job.active) continue
+      if (now - (job.lastProgressAt || now) < STALL_AFTER_MS) continue
+      job.speed = 0
+      Promise.resolve(this.reassert(job)).catch(() => {})
+    }
+    this.tryRun()
+  }
+
+  /* Re-states a download request for a job that has gone quiet. */
+  async reassert (job) {
+    const run = job.run
+    const stale = () => job.run !== run || TERMINAL.includes(job.status) ||
+      job.status === 'paused' || job.status === 'cancelled'
+    try {
+      const info = await client.invoke({ _: 'getFile', file_id: job.fileId })
+      if (stale()) return
+      const local = (info && info.local) || {}
+
+      // The completion update may simply have been missed rather than never sent.
+      if (local.is_downloading_completed && local.path) {
+        job.downloaded = job.fileSize || local.downloaded_size || 0
+        return await this.finalize(job, local.path)
+      }
+
+      // A file Telegram will not serve any more is genuinely terminal.
+      if (info && info.can_be_downloaded === false) {
+        job.status = 'error'
+        job.error = 'Telegram will no longer serve this file'
+        job.speed = 0
+        this.finishJob(job)
+        this.emitJob(job)
+        return
+      }
+
+      /* Still pending or transferring. Re-assert without cancelling and give it a
+       * fresh window. Deliberately does NOT count an attempt: waiting for TDLib is
+       * not a failed try, and counting it here is what previously turned slow
+       * files into errors. */
+      job.idleChecks = (job.idleChecks || 0) + 1
+      job.lastProgressAt = Date.now()
+      if (local.downloaded_size) job.downloaded = Math.max(job.downloaded || 0, local.downloaded_size)
+      await client.invoke({
+        _: 'downloadFile',
+        file_id: job.fileId,
+        priority: 32,
+        offset: 0,
+        limit: 0,
+        synchronous: false
+      }).catch(() => {})
+      this.emitJob(job)
+    } catch (e) {
+      if (stale()) return
+      /* Only a repeatedly unreadable file state is treated as fatal. A single
+       * failed getFile is usually transient. */
+      job.stateFailures = (job.stateFailures || 0) + 1
+      if (job.stateFailures >= MAX_ATTEMPTS) {
+        job.status = 'error'
+        job.error = `cannot read file state: ${String(e.message || e)}`
+        job.speed = 0
+        this.finishJob(job)
+        this.emitJob(job)
+      } else {
+        job.lastProgressAt = Date.now()
+      }
+    }
+  }
+
+  /* Immediate recovery, used by Resume all so the button is never a no-op. */
+  recover () {
+    const now = Date.now()
+    this.reconcile()
+    let recovered = 0
+    for (const job of [...this.jobs.values()]) {
+      if (job.status !== 'downloading') continue
+      if (!job.active) {
+        // Marked downloading but holding no slot: its runner is gone.
+        job.status = 'queued'
+        job.speed = 0
+        job.lastProgressAt = now
+        recovered++
+        this.emitJob(job)
+      } else if (now - (job.lastProgressAt || now) >= STALL_AFTER_MS) {
+        /* Re-assert rather than cancel. A quiet job is usually just waiting for
+         * TDLib to schedule it, and cancelling would throw away whatever it has
+         * already fetched. */
+        Promise.resolve(this.reassert(job)).catch(() => {})
+        recovered++
+      }
+    }
+    this.tryRun()
+    return recovered
   }
 
   pause (jobId) {
@@ -244,31 +700,86 @@ class DownloadManager {
 
   resume (jobId) {
     const job = this.jobs.get(jobId)
-    if (!job || job.status !== 'paused') return false
+    if (!job) return false
+    // A job marked 'downloading' while holding no slot has lost its runner, so it
+    // is resumable too. Otherwise Resume did nothing for exactly the jobs that
+    // most needed it.
+    if (job.status === 'downloading' && !job.active) job.status = 'paused'
+    if (job.status !== 'paused') return false
     job.status = 'queued'
+    // An explicit user resume restarts the retry budget.
+    job.attempts = 0
+    job.speed = 0
+    job.lastProgressAt = Date.now()
     this.tryRun()
     this.emitJob(job)
     return true
   }
 
   pauseAll () {
-    const ids = [...this.jobs.values()].filter(j => j.status === 'queued' || j.status === 'downloading').map(j => j.jobId)
-    for (const id of ids) this.pause(id)
-    return ids.length
+    return this.runBulk(() => {
+      const ids = [...this.jobs.values()].filter(j => j.status === 'queued' || j.status === 'downloading').map(j => j.jobId)
+      for (const id of ids) this.pause(id)
+      return ids.length
+    })
   }
 
   resumeAll () {
     const ids = [...this.jobs.values()].filter(j => j.status === 'paused').map(j => j.jobId)
+    // Not wrapped in runBulk: resuming is precisely the case where the pump has
+    // to start work, and pause() already released every slot.
     for (const id of ids) this.resume(id)
-    return ids.length
+    /* Resume all must also un-wedge work that is not merely paused. Jobs parked in
+     * 'downloading' are invisible to the filter above, so with a leaked slot count
+     * this button reported success and started precisely nothing. */
+    const recovered = this.recover()
+    this.scheduleStats()
+    return ids.length + recovered
   }
 
+  /* Cancels the ENTIRE queue: active, pending and paused alike. Nothing may
+   * auto-start afterwards, which holds because tryRun only ever selects
+   * 'queued' and every cancellable job leaves this loop as 'cancelled'. */
   cancelAll () {
-    const ids = [...this.jobs.values()]
-      .filter(j => j.status === 'queued' || j.status === 'downloading' || j.status === 'paused')
-      .map(j => j.jobId)
-    for (const id of ids) this.cancel(id)
-    return ids.length
+    return this.runBulk(() => {
+      const ids = [...this.jobs.values()]
+        .filter(j => CANCELLABLE.includes(j.status))
+        .map(j => j.jobId)
+      for (const id of ids) this.cancel(id)
+      return ids.length
+    })
+  }
+
+  /* Removes finished entries only. Never touches live work. */
+  clearDone () {
+    return this.runBulk(() => {
+      let removed = 0
+      for (const job of [...this.jobs.values()]) {
+        if (TERMINAL.includes(job.status)) {
+          this.jobs.delete(job.jobId)
+          this.lastEmit.delete(job.jobId)
+          removed++
+        }
+      }
+      return removed
+    })
+  }
+
+  /* Cancels everything still running, then empties the queue and history. */
+  clearAll () {
+    return this.runBulk(() => {
+      let cancelled = 0
+      for (const job of [...this.jobs.values()]) {
+        if (CANCELLABLE.includes(job.status) && this.cancel(job.jobId)) cancelled++
+      }
+      const removed = this.jobs.size
+      this.jobs.clear()
+      this.lastEmit.clear()
+      this.deliveredByFile.clear()
+      this.inFlightFiles.clear()
+      this.activeCount = 0
+      return { cancelled, removed }
+    })
   }
 
   cancel (jobId) {
@@ -286,14 +797,34 @@ class DownloadManager {
     return false
   }
 
+  /* Removing a live job must terminate it first. Deleting the record alone left
+   * the TDLib download running and never released the concurrency slot, so the
+   * queue permanently lost a worker and the pump immediately started more jobs
+   * that reappeared in the list the user had just cleared. */
   remove (jobId) {
-    return this.jobs.delete(jobId)
+    const job = this.jobs.get(jobId)
+    if (!job) return false
+    if (CANCELLABLE.includes(job.status)) {
+      if (job.active) {
+        client.invoke({ _: 'cancelDownloadFile', file_id: job.fileId, only_if_pending: false }).catch(() => {})
+      }
+      job.status = 'cancelled'
+      this.finishJob(job)
+    }
+    this.jobs.delete(jobId)
+    this.lastEmit.delete(jobId)
+    this.scheduleStats()
+    return true
   }
 
   emitJob (job) {
     const { destPath, ...rest } = job
+    this.scheduleStats()
     sendAll({ type: 'event', event: { name: 'download-update', job: rest } })
-    if (job.status === 'done') {
+    // destPath is guarded: emitJob is reachable with status 'done' from more than
+    // one path, and an unguarded .replace() here would throw inside a
+    // fire-and-forget runner and silently leak its concurrency slot.
+    if (job.status === 'done' && destPath) {
       sendAll({ type: 'event', event: { name: 'download-done', job: { ...rest, destPath: destPath.replace(downloadsDir, '').replace(/\\/g, '/') } } })
     }
   }
@@ -761,7 +1292,15 @@ function downloadThumb (fileId, thumbDir = thumbsDir) {
     }
 
     const src = await new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), 60000)
+      /* The timeout path used to resolve without removing the listener, so every
+       * thumbnail that timed out left one behind on the shared client for the life
+       * of the process - the source of
+       * "MaxListenersExceededWarning: 11 update listeners added to
+       * [StableTdClient]" - and each survivor then ran on every single updateFile. */
+      const timer = setTimeout(() => {
+        client.off('update', onUpdate)
+        resolve(null)
+      }, 60000)
       const onUpdate = (u) => {
         if (u._ !== 'updateFile' || u.file.id !== fileId) return
         const local = u.file.local || {}
@@ -795,17 +1334,70 @@ function downloadThumb (fileId, thumbDir = thumbsDir) {
 
 /* ------------------------------ Auth handling ------------------------------ */
 
+/* Best available file id for the signed-in user's avatar.
+ *
+ * A `user` record only exposes profile_photo.small, which is absent if TDLib has
+ * not populated it yet. userFullInfo carries the richer chatPhoto variants, and
+ * getUserProfilePhotos is the last resort. */
+async function resolveOwnPhotoFileId (userId) {
+  const smallest = photo => {
+    const sizes = (photo && photo.sizes) || []
+    const size = sizes.find(s => s && s.photo && s.photo.id) || null
+    return size ? size.photo.id : null
+  }
+
+  const user = await client.invoke({ _: 'getUser', user_id: userId }).catch(() => null)
+  if (user && user.profile_photo && user.profile_photo.small) return user.profile_photo.small.id
+
+  const full = await client.invoke({ _: 'getUserFullInfo', user_id: userId }).catch(() => null)
+  for (const candidate of [full && full.personal_photo, full && full.photo, full && full.public_photo]) {
+    if (!candidate) continue
+    if (candidate.small && candidate.small.id) return candidate.small.id
+    const id = smallest(candidate)
+    if (id) return id
+  }
+
+  const photos = await client.invoke({ _: 'getUserProfilePhotos', user_id: userId, offset: 0, limit: 1 })
+    .catch(() => null)
+  const first = photos && photos.photos && photos.photos[0]
+  return smallest(first)
+}
+
 function handleAuthState (state) {
   authState = state
   if (!state) return
 
   if (state._ === 'authorizationStateReady') {
     ready = true
-    client.invoke({ _: 'getMe' }).then(me => {
-      sendAll({ type: 'event', event: { name: 'auth', payload: { status: 'ready', me: { id: me.id, name: [me.first_name, me.last_name].filter(Boolean).join(' '), username: me.username } } } })
+    client.invoke({ _: 'getMe' }).then(async me => {
+      currentUser = {
+        id: me.id,
+        name: [me.first_name, me.last_name].filter(Boolean).join(' '),
+        username: me.username,
+        // Reuses the existing /api/media-preview file resolver on the client;
+        // no separate profile photo pipeline is introduced.
+        photoFileId: me.profile_photo && me.profile_photo.small ? me.profile_photo.small.id : null
+      }
+      sendAll({ type: 'event', event: { name: 'auth', payload: { status: 'ready', me: currentUser } } })
+
+      /* getMe can answer before TDLib has attached the profile photo, and a
+       * user record only carries the small thumbnail. Fall back through the
+       * fuller sources so the sidebar can show a real avatar rather than
+       * initials. updateUser covers any later change. */
+      if (!currentUser.photoFileId) {
+        const photoFileId = await resolveOwnPhotoFileId(me.id)
+        console.log(`[identity] ${currentUser.name || currentUser.username || me.id} profile photo: ${photoFileId || 'none found'}`)
+        if (photoFileId) {
+          currentUser = { ...currentUser, photoFileId }
+          sendAll({ type: 'event', event: { name: 'auth', payload: { status: 'ready', me: currentUser } } })
+        }
+      }
     }).catch(() => {})
   } else if (state._ === 'authorizationStateWaitPhoneNumber') {
     ready = false
+    // A fresh phone prompt means the previous session is gone; do not let the
+    // old identity leak into the next login.
+    currentUser = null
     sendAll({ type: 'event', event: { name: 'login-prompt', kind: 'phone', info: null } })
   } else if (state._ === 'authorizationStateWaitCode') {
     ready = false
@@ -889,6 +1481,30 @@ function initClient (config) {
     }
     if (u._ === 'updateFile') {
       dm.onFileUpdate(u.file)
+      return
+    }
+
+    /* Keep the signed-in identity fresh.
+     *
+     * getMe() runs the moment authorizationStateReady arrives, which is often
+     * before TDLib has populated the user's profile photo, so photoFileId came
+     * back null and the sidebar could only ever draw initials. TDLib fills the
+     * record in later and reports it here, so the identity is refreshed and
+     * rebroadcast whenever anything the UI shows has actually changed. */
+    if (u._ === 'updateUser' && u.user && currentUser && String(u.user.id) === String(currentUser.id)) {
+      const next = {
+        id: u.user.id,
+        name: [u.user.first_name, u.user.last_name].filter(Boolean).join(' ') || currentUser.name,
+        username: u.user.username || currentUser.username,
+        photoFileId: u.user.profile_photo && u.user.profile_photo.small
+          ? u.user.profile_photo.small.id
+          : currentUser.photoFileId
+      }
+      const changed = next.name !== currentUser.name ||
+        next.username !== currentUser.username ||
+        String(next.photoFileId) !== String(currentUser.photoFileId)
+      currentUser = next
+      if (changed) sendAll({ type: 'event', event: { name: 'auth', payload: { status: 'ready', me: currentUser } } })
       return
     }
 
@@ -2215,7 +2831,8 @@ wss.on('connection', (ws) => {
             ready,
             concurrency: CONCURRENCY,
             downloadsDir,
-            authState: authState ? authState._ : null
+            authState: authState ? authState._ : null,
+            me: ready ? currentUser : null
           })
         }
         case 'login-input':
@@ -2229,6 +2846,37 @@ wss.on('connection', (ws) => {
         case 'get-messages': {
           const r = await loadMessages(payload.chatId, payload.fromMessageId, payload.limit || 100)
           return respond(ws, id, true, r)
+        }
+        /* Marks a chat read on Telegram.
+         *
+         * Deliberately an explicit command rather than a side effect of
+         * get-messages: the file index reconciler calls get-messages repeatedly in
+         * the background, so marking read there would silently clear the unread
+         * state of chats the user never opened.
+         *
+         * Viewing the chat's last message marks everything up to it as read.
+         * TDLib then pushes updateChatReadInbox, which already emits chat-upsert,
+         * so the client's unread count and filters update through the normal path
+         * with no extra plumbing. */
+        case 'mark-read': {
+          if (!client || !ready) return respond(ws, id, false, null, 'Not logged in')
+          if (payload.chatId == null) return respond(ws, id, false, null, 'chatId is required')
+          const chat = await client.invoke({ _: 'getChat', chat_id: payload.chatId }).catch(() => null)
+          const lastMessageId = chat && chat.last_message ? chat.last_message.id : null
+          if (!lastMessageId) return respond(ws, id, true, { ok: false, reason: 'no messages' })
+          const view = extra => client.invoke({
+            _: 'viewMessages',
+            chat_id: payload.chatId,
+            message_ids: [lastMessageId],
+            force_read: true,
+            ...extra
+          })
+          // The source parameter is required by newer TDLib builds and rejected by
+          // older ones, so fall back rather than assume a version.
+          const ok = await view({ source: { _: 'messageSourceChatHistory' } })
+            .then(() => true)
+            .catch(() => view({ message_thread_id: 0 }).then(() => true).catch(() => false))
+          return respond(ws, id, true, { ok })
         }
         case 'search-media': {
           const r = await searchMedia(payload.chatId, payload.query, payload.fromMessageId, payload.limit, payload.filter)
@@ -2374,17 +3022,21 @@ wss.on('connection', (ws) => {
         case 'resume-job':
           return respond(ws, id, true, { ok: dm.resume(payload.jobId) })
         case 'pause-all':
-          return respond(ws, id, true, { paused: dm.pauseAll() })
+          return respond(ws, id, true, { paused: dm.pauseAll(), stats: dm.stats() })
         case 'resume-all':
-          return respond(ws, id, true, { resumed: dm.resumeAll() })
+          return respond(ws, id, true, { resumed: dm.resumeAll(), stats: dm.stats() })
         case 'cancel-all':
-          return respond(ws, id, true, { cancelled: dm.cancelAll() })
+          return respond(ws, id, true, { cancelled: dm.cancelAll(), stats: dm.stats() })
+        case 'clear-done':
+          return respond(ws, id, true, { removed: dm.clearDone(), stats: dm.stats() })
+        case 'clear-all':
+          return respond(ws, id, true, { ...dm.clearAll(), stats: dm.stats() })
         case 'cancel-download':
           return respond(ws, id, true, { ok: dm.cancel(payload.jobId) })
         case 'remove-download':
           return respond(ws, id, true, { ok: dm.remove(payload.jobId) })
         case 'get-downloads':
-          return respond(ws, id, true, { jobs: dm.snapshot(), concurrency: CONCURRENCY })
+          return respond(ws, id, true, { jobs: dm.snapshot(), concurrency: CONCURRENCY, stats: dm.stats() })
         case 'get-thumb': {
           const p = await downloadThumb(payload.fileId)
           return respond(ws, id, true, { path: p && p.startsWith(downloadsDir) ? p.replace(downloadsDir, '').replace(/\\/g, '/') : null })
@@ -2423,8 +3075,37 @@ if (config) {
   console.log('No API credentials found. Open the web UI to enter api_id and api_hash.')
 }
 
+/* Fail with an explanation instead of an unhandled 'error' event.
+ *
+ * The common case is starting FileGram when it is already running, which used to
+ * print a raw EADDRINUSE stack trace. The handler is attached to BOTH the http
+ * server and the WebSocket server on purpose: ws forwards the underlying server's
+ * 'listening', 'error' and 'upgrade' events onto itself, so handling it only on
+ * `server` still leaves an unhandled 'error' on `wss` and node throws anyway. */
+let listenFailureReported = false
+
+function reportListenFailure (error) {
+  if (listenFailureReported) return
+  listenFailureReported = true
+  if (error && error.code === 'EADDRINUSE') {
+    console.error(`\nFileGram cannot start: port ${PORT} is already in use.`)
+    console.error('It is most likely already running, in which case just open:')
+    console.error(`  http://127.0.0.1:${PORT}`)
+    console.error('\nTo find and stop whatever is holding the port:')
+    console.error(`  Get-NetTCPConnection -LocalPort ${PORT} -State Listen | Select-Object OwningProcess`)
+    console.error('  Stop-Process -Id <OwningProcess>')
+    console.error(`\nOr start on a different port:  $env:PORT=3010; npm start\n`)
+  } else {
+    console.error('\nFileGram server error:', (error && error.message) || error, '\n')
+  }
+  process.exit(1)
+}
+
+server.on('error', reportListenFailure)
+wss.on('error', reportListenFailure)
+
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Tele running at http://127.0.0.1:${PORT}`)
+  console.log(`FileGram running at http://127.0.0.1:${PORT}`)
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

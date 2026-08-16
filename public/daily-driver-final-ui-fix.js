@@ -1,8 +1,11 @@
 'use strict'
 
 /* Final UI/runtime ownership pass.
- * Loaded last. Owns chat rows, the canonical per-chat file index + virtualized
- * Files view, dedupe confirmation normalization, and download rendering/actions.
+ * Loaded last. Owns chat rows, the canonical per-chat file index, dedupe
+ * confirmation normalization, and download rendering/actions.
+ *
+ * It does NOT render the Files list: files-view.js owns renderFiles and paints
+ * exactly one 100-row page. The virtual renderer that used to live here is gone.
  */
 ;(function teleFinalUiFix () {
   const iconSvg = {
@@ -135,6 +138,21 @@
   }
   renderChats = teleUiRenderChats
 
+  /* Repaint through the CURRENT renderChats owner instead of calling
+   * teleUiRenderChats by name.
+   *
+   * teleUiRenderChats decides row.hidden from the search query and channels-only
+   * alone. Later layers add predicates on top - filegram-shell.js adds the Unread
+   * filter - and those run from the renderChats wrapper. Calling this renderer
+   * directly re-showed every row, so the Unread filter was defeated by typing in
+   * chat search or by any chat event.
+   *
+   * No recursion: the wrapper calls the base it captured at install time. */
+  function repaintChats () {
+    if (typeof renderChats === 'function' && renderChats !== teleUiRenderChats) return renderChats()
+    return teleUiRenderChats()
+  }
+
   function rebindChatFilters () {
     const oldSearch = document.querySelector('#chat-search')
     if (oldSearch && oldSearch.dataset.teleUiOwner !== '1') {
@@ -142,8 +160,8 @@
       next.value = oldSearch.value
       next.dataset.teleUiOwner = '1'
       oldSearch.replaceWith(next)
-      next.addEventListener('input', teleUiRenderChats)
-      next.addEventListener('search', teleUiRenderChats)
+      next.addEventListener('input', () => repaintChats())
+      next.addEventListener('search', () => repaintChats())
     }
     const oldOnly = document.querySelector('#channels-only')
     if (oldOnly && oldOnly.dataset.teleUiOwner !== '1') {
@@ -153,7 +171,7 @@
       oldOnly.replaceWith(next)
       next.addEventListener('change', () => {
         try { localStorage.setItem('tele-channels-only', next.checked ? '1' : '0') } catch {}
-        teleUiRenderChats()
+        repaintChats()
       })
     }
   }
@@ -345,69 +363,18 @@
     return list
   }
 
-  const fileWindow = { key: '', rowHeight: 90, overscan: 10, lastStart: -1, lastEnd: -1, raf: 0 }
-  function fileViewKey () { return [state.activeChatId, state.files.mode, state.files.query, state.files.filter, state.files.sort].join('|') }
-  function spacer (height) {
-    const el = document.createElement('div')
-    el.className = 'tele-ui-virtual-spacer'
-    el.style.height = `${Math.max(0, height)}px`
-    return el
-  }
-  function renderFilesVirtual (force = false) {
-    const grid = document.querySelector('#media-grid')
-    if (!grid) return
-    const items = filesItems()
-    const nextKey = fileViewKey()
-    const changedView = fileWindow.key !== nextKey
-    if (changedView) {
-      fileWindow.key = nextKey
-      fileWindow.lastStart = -1
-      fileWindow.lastEnd = -1
-      grid.scrollTop = 0
-    }
-    const rowHeight = Math.max(70, Number(fileWindow.rowHeight || 90))
-    const viewport = Math.max(grid.clientHeight || 600, 300)
-    const firstVisible = Math.max(0, Math.floor(grid.scrollTop / rowHeight))
-    const start = Math.max(0, firstVisible - fileWindow.overscan)
-    const count = Math.ceil(viewport / rowHeight) + fileWindow.overscan * 2
-    const end = Math.min(items.length, start + count)
-    if (!force && !changedView && start === fileWindow.lastStart && end === fileWindow.lastEnd) {
-      updateCanonicalCount()
-      return
-    }
-    fileWindow.lastStart = start
-    fileWindow.lastEnd = end
-    const fragment = document.createDocumentFragment()
-    fragment.appendChild(spacer(start * rowHeight))
-    for (let i = start; i < end; i++) fragment.appendChild(buildGridCard(items[i]))
-    fragment.appendChild(spacer((items.length - end) * rowHeight))
-    grid.replaceChildren(fragment)
-    const firstCard = grid.querySelector('.gcard[data-key]')
-    if (firstCard) {
-      const measured = Math.ceil(firstCard.getBoundingClientRect().height + 8)
-      if (measured >= 70 && measured <= 180 && Math.abs(measured - rowHeight) > 3) fileWindow.rowHeight = measured
-    }
-    const selectAll = document.querySelector('#select-all-media')
-    if (selectAll) {
-      selectAll.textContent = items.length ? `Select all (${items.length.toLocaleString()})` : 'Select all'
-      selectAll.disabled = items.length === 0
-    }
-    updateCanonicalCount()
-  }
-  renderFiles = () => renderFilesVirtual(true)
-
-  const grid = document.querySelector('#media-grid')
-  if (grid) {
-    grid.addEventListener('scroll', event => {
-      if (event.target !== grid) return
-      event.stopImmediatePropagation()
-      if (fileWindow.raf) return
-      fileWindow.raf = requestAnimationFrame(() => {
-        fileWindow.raf = 0
-        renderFilesVirtual(false)
-      })
-    }, { capture: true, passive: true })
-  }
+  /* The virtual files renderer that used to live here is gone.
+   *
+   * It windowed the rows and padded the scroll surface with two spacer divs, the
+   * trailing one sized (items.length - end) * rowHeight. On a 22k index that is a
+   * ~2 million pixel spacer behind ~20 real rows. Its companion scroll listener,
+   * which was supposed to re-window as you scrolled, was bound to the #media-grid
+   * node that files-view.js later replaced, so it never ran: scrolling produced
+   * blank space that nothing refilled.
+   *
+   * Files are paged now (files-view.js, 100 per page). Pagination is the
+   * scalability mechanism and must not be combined with virtualisation, so this
+   * layer no longer renders files at all and no longer touches grid geometry. */
 
   const baseHandleEvent = handleEvent
   handleEvent = function teleUiHandleEvent (event) {
@@ -425,11 +392,11 @@
         const title = document.querySelector('#chat-title')
         if (title && chat.title) title.textContent = chat.title
       }
-      teleUiRenderChats()
+      repaintChats()
       return
     }
     const result = baseHandleEvent(event)
-    if (event && event.name === 'chat-remove') teleUiRenderChats()
+    if (event && event.name === 'chat-remove') repaintChats()
     if (event && (event.name === 'message-upsert' || event.name === 'message-delete')) {
       const payload = event.payload || event
       const chatId = payload.chatId
@@ -437,7 +404,11 @@
         const rescue = rescueFileCache.get(key(chatId))
         if (validIndex(chatId, rescue)) paintCanonical(chatId, rescue, { persist: true, render: false })
       }
-      if (state.view === 'files') queueMicrotask(() => renderFilesVirtual(true))
+      // Repaint through the current renderFiles owner (files-view.js, which is
+      // paged). Painting here directly used to bypass pagination and mount a
+      // window of ~20 rows under a spacer sized for the whole index, which is
+      // what let the Files list scroll far past its 100 rows into blank space.
+      if (state.view === 'files') queueMicrotask(() => { try { renderFiles() } catch {} })
     }
     return result
   }
@@ -519,38 +490,47 @@
     }
   }
 
+  /* Bytes per second below which a job is reported as not moving at all.
+   * The EMA below decays geometrically (x0.65 per sample) and never reaches zero,
+   * so a job that is still flagged 'downloading' but has stopped advancing kept a
+   * denormal speed alive. Every `speed > 0` guard stayed true and
+   * remaining / speed exploded, which is where the absurd ETAs came from. */
+  const SPEED_FLOOR = 64
+  // How long without a single new byte before the speed is treated as zero.
+  const STALL_AFTER_MS = 4000
+
   function sampleSpeed (job, now, downloaded) {
     let sample = state.samples.get(job.jobId)
-    if (!sample || Array.isArray(sample)) sample = { time: now, downloaded, speed: 0 }
+    if (!sample || Array.isArray(sample)) sample = { time: now, downloaded, speed: 0, movedAt: now }
+    if (!sample.movedAt) sample.movedAt = now
     const elapsed = (now - sample.time) / 1000
     if (elapsed >= 0.18) {
-      const instant = Math.max(0, (downloaded - sample.downloaded) / Math.max(elapsed, 0.001))
+      const delta = downloaded - sample.downloaded
+      const instant = Math.max(0, delta / Math.max(elapsed, 0.001))
       sample.speed = sample.speed ? sample.speed * 0.65 + instant * 0.35 : instant
+      if (delta > 0) sample.movedAt = now
       sample.time = now
       sample.downloaded = downloaded
     }
+    // Snap to a hard zero once the transfer has clearly stopped, so callers can
+    // trust `speed > 0` to mean "actually moving".
+    if (sample.speed < SPEED_FLOOR || now - sample.movedAt > STALL_AFTER_MS) sample.speed = 0
     state.samples.set(job.jobId, sample)
     return Number(sample.speed || 0)
   }
 
-  function renderDownloadJob (job, speed) {
-    const downloaded = Math.max(0, Number(job.downloaded || 0))
-    const fileSize = Math.max(0, Number(job.fileSize || 0))
-    const el = h('div', 'djob ' + job.status)
-    el.appendChild(h('div', 'name', job.fileName || '…'))
-    const sub = h('div', 'sub')
-    const statusText = { downloading: speed > 0 ? `● ${fmtSpeed(speed)}` : 'downloading', queued: 'queued', paused: 'paused', done: 'saved', cancelled: 'cancelled', cancelling: 'cancelling…', error: 'failed' }[job.status] || job.status
-    sub.appendChild(h('span', '', fileSize ? `${fmtSize(downloaded)} / ${fmtSize(fileSize)}` : fmtSize(downloaded)))
-    sub.appendChild(h('span', 'status-tag', statusText))
-    el.appendChild(sub)
-    const bar = h('div', 'bar')
-    const fill = h('div', '')
-    fill.style.width = `${fileSize ? Math.min(100, downloaded / fileSize * 100) : 0}%`
-    bar.appendChild(fill)
-    el.appendChild(bar)
-    if (job.status === 'downloading' && speed > 0 && fileSize > downloaded) el.appendChild(h('div', 'sub', `ETA ${fmtEta((fileSize - downloaded) / speed)}`))
-    else el.appendChild(h('div', 'sub', ''))
-    el.appendChild(h('div', 'error-text', job.error || ''))
+  function setText (node, value) {
+    if (node && node.textContent !== value) node.textContent = value
+  }
+
+  /* The action set depends only on the status (and, for done, whether there is a
+   * path), so the buttons are rebuilt only when that signature changes rather
+   * than on every paint. */
+  function actionsSignature (job) {
+    return `${job.status}|${job.destPath ? 1 : 0}`
+  }
+
+  function buildActions (job) {
     const actions = h('div', 'actions')
     if (job.status === 'downloading' || job.status === 'queued') {
       const pause = h('button', 'ghost small', 'Pause')
@@ -579,8 +559,145 @@
       remove.onclick = () => { state.downloads.delete(job.jobId); state.samples.delete(job.jobId); scheduleDownloads(true); request('remove-download', { jobId: job.jobId }).catch(() => {}) }
       actions.appendChild(remove)
     }
-    el.appendChild(actions)
+    return actions
+  }
+
+  /* Patches an existing row in place, or builds one if there is none.
+   *
+   * Rows used to be rebuilt from scratch on every paint and the whole list swapped
+   * with replaceChildren. #download-list is itself the scroll container, so
+   * emptying it collapsed scrollHeight and the browser clamped scrollTop back to
+   * 0 about ten times a second: scrolling the list while anything was downloading
+   * was impossible, and the buttons under the cursor were destroyed mid-hover. */
+  function renderDownloadJob (job, speed, existing) {
+    const downloaded = Math.max(0, Number(job.downloaded || 0))
+    const fileSize = Math.max(0, Number(job.fileSize || 0))
+    let el = existing
+    if (!el) {
+      el = h('div', 'djob ' + job.status)
+      el.dataset.jobId = job.jobId
+      el.appendChild(h('div', 'name', ''))
+      const sub = h('div', 'sub')
+      sub.appendChild(h('span', '', ''))
+      sub.appendChild(h('span', 'status-tag', ''))
+      el.appendChild(sub)
+      const bar = h('div', 'bar')
+      bar.appendChild(h('div', ''))
+      el.appendChild(bar)
+      el.appendChild(h('div', 'sub', ''))
+      el.appendChild(h('div', 'error-text', ''))
+      el.appendChild(buildActions(job))
+      el.dataset.actions = actionsSignature(job)
+    }
+
+    const className = 'djob ' + job.status
+    if (el.className !== className) el.className = className
+
+    const nameEl = el.children[0]
+    const subEl = el.children[1]
+    const barEl = el.children[2]
+    const etaEl = el.children[3]
+    const errorEl = el.children[4]
+
+    setText(nameEl, job.fileName || '\u2026')
+    const statusText = { downloading: speed > 0 ? `● ${fmtSpeed(speed)}` : 'downloading', queued: 'queued', paused: 'paused', done: 'saved', cancelled: 'cancelled', cancelling: 'cancelling…', error: 'failed' }[job.status] || job.status
+    setText(subEl.children[0], fileSize ? `${fmtSize(downloaded)} / ${fmtSize(fileSize)}` : fmtSize(downloaded))
+    setText(subEl.children[1], statusText)
+
+    const fill = barEl.firstElementChild
+    const width = `${fileSize ? Math.min(100, downloaded / fileSize * 100) : 0}%`
+    if (fill && fill.style.width !== width) fill.style.width = width
+
+    // speed is now snapped to a hard zero when the transfer has stopped, so this
+    // no longer publishes an ETA derived from a decaying denormal.
+    const eta = job.status === 'downloading' && speed > 0 && fileSize > downloaded
+      ? fmtEta((fileSize - downloaded) / speed)
+      : ''
+    setText(etaEl, eta ? `ETA ${eta}` : '')
+    setText(errorEl, job.error || '')
+
+    const signature = actionsSignature(job)
+    if (el.dataset.actions !== signature) {
+      el.dataset.actions = signature
+      el.replaceChild(buildActions(job), el.children[5])
+    }
     return el
+  }
+
+  /* Which jobs deserve a row, most urgent first. Used only to CHOOSE rows, never
+   * to order the ones already on screen. */
+  const DISPLAY_RANK = { downloading: 0, cancelling: 1, paused: 2, error: 3, queued: 4, done: 5, cancelled: 6 }
+  const rankOf = status => (DISPLAY_RANK[status] === undefined ? 7 : DISPLAY_RANK[status])
+
+  /* The window is deliberately sticky: a job keeps its row, and its position, for
+   * as long as it is shown. At most this many rows may be swapped out per paint so
+   * newly active work can become visible without the list reshuffling.
+   *
+   * The previous version re-sorted the whole window by status on every paint.
+   * Measured with 6,000 jobs, a single "one finishes, the next starts" advance -
+   * which happens several times a second in a real batch - moved 101 of the 140
+   * visible rows, changed the top row every single time, and let the browser's
+   * scroll anchoring drag scrollTop from 600 to 1636 across twelve advances. The
+   * list ran away under the cursor. Frames were a solid 60fps throughout, which is
+   * why it read as sluggish rather than measuring slow. */
+  const MAX_SUBSTITUTIONS_PER_PAINT = 6
+  const displayOrder = []
+
+  /* Chooses the visible job ids, preserving the order of rows already shown. */
+  function chooseDisplayIds () {
+    const shown = []
+    const seen = new Set()
+    for (const jobId of displayOrder) {
+      if (!state.downloads.has(jobId) || seen.has(jobId)) continue
+      shown.push(jobId)
+      seen.add(jobId)
+    }
+
+    /* Free slots are filled by priority. Once the window is full this whole block
+     * is skipped, so the steady-state paint is O(window) rather than O(queue). */
+    if (shown.length < DOWNLOAD_LIST_LIMIT) {
+      const candidates = []
+      for (const job of state.downloads.values()) {
+        if (!seen.has(job.jobId)) candidates.push(job)
+      }
+      candidates.sort((a, b) => rankOf(a.status) - rankOf(b.status))
+      for (const job of candidates) {
+        if (shown.length >= DOWNLOAD_LIST_LIMIT) break
+        shown.push(job.jobId)
+        seen.add(job.jobId)
+      }
+    } else {
+      /* Full window: let work that needs attention take the place of a row that
+       * does not, IN PLACE. Substituting at the same index moves exactly one row
+       * instead of resorting everything. */
+      let budget = MAX_SUBSTITUTIONS_PER_PAINT
+      let worstIndex = shown.length - 1
+      for (const job of state.downloads.values()) {
+        if (budget <= 0) break
+        if (seen.has(job.jobId)) continue
+        const incoming = rankOf(job.status)
+        // Only genuinely urgent states may displace an existing row.
+        if (incoming > rankOf('paused')) continue
+        // Find the least interesting row still on screen.
+        let victim = -1
+        let victimRank = incoming
+        for (let index = worstIndex; index >= 0; index--) {
+          const current = state.downloads.get(shown[index])
+          const rank = current ? rankOf(current.status) : 7
+          if (rank > victimRank) { victimRank = rank; victim = index }
+        }
+        if (victim < 0) break
+        seen.delete(shown[victim])
+        shown[victim] = job.jobId
+        seen.add(job.jobId)
+        worstIndex = victim - 1
+        budget--
+      }
+    }
+
+    displayOrder.length = 0
+    for (const jobId of shown) displayOrder.push(jobId)
+    return shown
   }
 
   function renderDownloadsNow () {
@@ -589,7 +706,28 @@
     const stats = document.querySelector('#download-stats')
     if (!list || !stats) return
     const now = Date.now()
+    const queue = state.queueStats
+    const wantedIds = chooseDisplayIds()
+
+    /* Speed is sampled only for the rows actually on screen. Byte and status
+     * totals come from the server aggregate, which already covers the whole queue -
+     * walking every job here to re-derive them was pure duplication, and it also
+     * meant a Map delete per job per paint. */
     let totalSpeed = 0
+    const wanted = []
+    for (const jobId of wantedIds) {
+      const job = state.downloads.get(jobId)
+      if (!job) continue
+      let speed = 0
+      if (job.status === 'downloading') {
+        speed = sampleSpeed(job, now, Math.max(0, Number(job.downloaded || 0)))
+        totalSpeed += speed
+      } else if (state.samples.has(jobId)) {
+        state.samples.delete(jobId)
+      }
+      wanted.push({ job, speed })
+    }
+
     let active = 0
     let queued = 0
     let paused = 0
@@ -598,37 +736,60 @@
     let cancelled = 0
     let downloadedBytes = 0
     let expectedBytes = 0
-    const display = []
-    for (const job of state.downloads.values()) {
-      const downloaded = Math.max(0, Number(job.downloaded || 0))
-      const fileSize = Math.max(0, Number(job.fileSize || 0))
-      downloadedBytes += downloaded
-      expectedBytes += fileSize
-      let speed = 0
-      if (job.status === 'downloading') {
-        speed = sampleSpeed(job, now, downloaded)
-        active++
-        totalSpeed += speed
-      } else {
-        state.samples.delete(job.jobId)
-        if (job.status === 'queued') queued++
+    if (queue) {
+      active = Number(queue.downloading || 0)
+      queued = Number(queue.queued || 0)
+      paused = Number(queue.paused || 0)
+      done = Number(queue.done || 0)
+      failed = Number(queue.error || 0)
+      cancelled = Number(queue.cancelled || 0)
+      downloadedBytes = Number(queue.downloadedBytes || 0)
+      expectedBytes = Number(queue.expectedBytes || 0)
+    } else {
+      // No aggregate yet (first paint after boot): fall back to the projection.
+      for (const job of state.downloads.values()) {
+        downloadedBytes += Math.max(0, Number(job.downloaded || 0))
+        expectedBytes += Math.max(0, Number(job.fileSize || 0))
+        if (job.status === 'downloading') active++
+        else if (job.status === 'queued') queued++
         else if (job.status === 'paused') paused++
         else if (job.status === 'done') done++
         else if (job.status === 'error') failed++
         else if (job.status === 'cancelled' || job.status === 'cancelling') cancelled++
       }
-      if (display.length < DOWNLOAD_LIST_LIMIT || ['downloading', 'paused', 'error', 'cancelling'].includes(job.status)) display.push({ job, speed })
     }
-    display.sort((a, b) => {
-      const rank = status => ({ downloading: 0, cancelling: 1, paused: 2, queued: 3, error: 4, done: 5, cancelled: 6 })[status] ?? 7
-      return rank(a.job.status) - rank(b.job.status)
-    })
-    const fragment = document.createDocumentFragment()
-    for (const row of display.slice(0, DOWNLOAD_LIST_LIMIT)) fragment.appendChild(renderDownloadJob(row.job, row.speed))
-    if (state.downloads.size > DOWNLOAD_LIST_LIMIT) fragment.appendChild(h('div', 'tele-ui-download-list-note', `Showing ${DOWNLOAD_LIST_LIMIT.toLocaleString()} priority jobs of ${state.downloads.size.toLocaleString()}. Controls and stats apply to all.`))
-    list.replaceChildren(fragment)
-    const total = state.downloads.size
-    const remaining = active + queued + paused
+
+    /* Keyed, in-place reconciliation. Rows are reused by job id, patched, then
+     * moved only when they are genuinely out of order, and leftovers are removed.
+     * Nothing clears the container, so the scroll position survives. */
+    const existing = new Map()
+    for (const node of list.children) {
+      if (node.dataset && node.dataset.jobId) existing.set(node.dataset.jobId, node)
+    }
+    const ordered = []
+    for (const row of wanted) {
+      const node = renderDownloadJob(row.job, row.speed, existing.get(row.job.jobId))
+      existing.delete(row.job.jobId)
+      ordered.push(node)
+    }
+    // Drop rows that are no longer displayed, plus the previous overflow note.
+    for (const node of existing.values()) node.remove()
+    const staleNote = list.querySelector('.tele-ui-download-list-note')
+    if (staleNote) staleNote.remove()
+    // Minimal moves: only touch the DOM where the order actually differs.
+    for (let index = 0; index < ordered.length; index++) {
+      const node = ordered[index]
+      if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null)
+    }
+    /* Totals are the server's aggregate over the FULL queue. state.downloads is
+     * only the projection this browser has been told about, so counting it made
+     * Total read 8 for a 20,000-file queue. Live speed stays local because it is
+     * sampled per visible row. */
+    const total = queue ? Number(queue.total || 0) : state.downloads.size
+    const remaining = queue ? Number(queue.remaining || 0) : active + queued + paused
+    if (total > ordered.length) {
+      list.appendChild(h('div', 'tele-ui-download-list-note', `Showing ${ordered.length.toLocaleString()} of ${total.toLocaleString()} jobs. Controls and stats apply to the whole queue.`))
+    }
     const pct = expectedBytes > 0 ? Math.min(100, downloadedBytes / expectedBytes * 100) : 0
     const eta = totalSpeed > 0 && expectedBytes > downloadedBytes ? fmtEta((expectedBytes - downloadedBytes) / totalSpeed) : ''
     const parts = []
@@ -644,18 +805,49 @@
     stats.textContent = parts.join(' · ')
     updateSummary({ speed: totalSpeed > 0 ? fmtSpeed(totalSpeed) : '0 B/s', current: active.toLocaleString(), remaining: remaining.toLocaleString(), total: total.toLocaleString() })
   }
-  renderDownloads = renderDownloadsNow
+  /* The global entry point is THROTTLED.
+   *
+   * app.js handles the 200ms `download-stats` broadcast by calling renderDownloads()
+   * directly, which bypassed the 220ms coalescer entirely and, together with the
+   * per-job updates, drove roughly ten full repaints a second. */
+  renderDownloads = function teleUiRenderDownloads () { scheduleDownloads(false) }
 
-  async function runRequestQueue (jobs, action, concurrency = 6) {
-    let cursor = 0
-    const workers = Array.from({ length: Math.min(concurrency, jobs.length) }, async () => {
-      while (cursor < jobs.length) {
-        const job = jobs[cursor++]
-        try { await request(action, { jobId: job.jobId }) } catch {}
-        if (cursor % 24 === 0) await new Promise(resolve => setTimeout(resolve, 0))
-      }
-    })
-    await Promise.all(workers)
+  /* Bulk operations are ONE server-wide request each.
+   *
+   * They used to fan out per-job requests over state.downloads, which is only
+   * the set of jobs the server has emitted — a job is first emitted when it
+   * starts, so with concurrency 8 a 20,000-file queue looked like 8 jobs and
+   * "Cancel all" cancelled 8. The server owns the queue and already exposes
+   * whole-queue endpoints, so the correct client behaviour is to call one and
+   * then re-sync from the authoritative snapshot. */
+  async function applyQueueAction (type, payload = {}) {
+    let response = null
+    try {
+      response = await request(type, payload)
+    } catch {
+      /* fall through to the resync below so the UI cannot be left optimistic */
+    }
+    if (response && response.stats) state.queueStats = response.stats
+    try {
+      const snapshot = await request('get-downloads', {})
+      state.downloads.clear()
+      state.samples.clear()
+      for (const job of snapshot.jobs || []) state.downloads.set(job.jobId, job)
+      if (snapshot.stats) state.queueStats = snapshot.stats
+    } catch {}
+    scheduleDownloads(true)
+    return response
+  }
+
+  function queueCount (field) {
+    if (state.queueStats) return Number(state.queueStats[field] || 0)
+    let count = 0
+    for (const job of state.downloads.values()) {
+      if (field === 'remaining' && ['queued', 'downloading', 'paused'].includes(job.status)) count++
+      else if (field === 'total') count++
+      else if (job.status === field) count++
+    }
+    return count
   }
 
   function replaceButton (selector, handler) {
@@ -668,33 +860,38 @@
   }
 
   replaceButton('#pause-all', () => {
-    const jobs = [...state.downloads.values()].filter(job => job.status === 'queued' || job.status === 'downloading')
-    for (const job of jobs) setJobOptimistic(job, 'paused')
-    scheduleDownloads(true)
-    runRequestQueue(jobs, 'pause-job').catch(() => {})
-  })
-  replaceButton('#resume-all', () => {
-    const jobs = [...state.downloads.values()].filter(job => job.status === 'paused')
-    for (const job of jobs) setJobOptimistic(job, 'queued')
-    scheduleDownloads(true)
-    runRequestQueue(jobs, 'resume-job').catch(() => {})
-  })
-  replaceButton('#cancel-all', () => {
-    const jobs = [...state.downloads.values()].filter(job => ['queued', 'downloading', 'paused'].includes(job.status))
-    if (!jobs.length) return
-    if (!confirm(`Cancel ${jobs.length.toLocaleString()} active download(s)?`)) return
-    for (const job of jobs) setJobOptimistic(job, 'cancelling')
-    scheduleDownloads(true)
-    runRequestQueue(jobs, 'cancel-download').catch(() => {})
-  })
-  replaceButton('#clear-done', () => {
-    const jobs = [...state.downloads.values()].filter(job => ['done', 'error', 'cancelled'].includes(job.status))
-    for (const job of jobs) {
-      state.downloads.delete(job.jobId)
-      state.samples.delete(job.jobId)
+    for (const job of state.downloads.values()) {
+      if (job.status === 'queued' || job.status === 'downloading') setJobOptimistic(job, 'paused')
     }
     scheduleDownloads(true)
-    runRequestQueue(jobs, 'remove-download').catch(() => {})
+    applyQueueAction('pause-all').catch(() => {})
+  })
+  replaceButton('#resume-all', () => {
+    for (const job of state.downloads.values()) {
+      if (job.status === 'paused') setJobOptimistic(job, 'queued')
+    }
+    scheduleDownloads(true)
+    applyQueueAction('resume-all').catch(() => {})
+  })
+  replaceButton('#cancel-all', () => {
+    const remaining = queueCount('remaining')
+    if (!remaining) return
+    if (!confirm(`Cancel all ${remaining.toLocaleString()} unfinished download(s)?`)) return
+    for (const job of state.downloads.values()) {
+      if (['queued', 'downloading', 'paused'].includes(job.status)) setJobOptimistic(job, 'cancelling')
+    }
+    scheduleDownloads(true)
+    applyQueueAction('cancel-all').catch(() => {})
+  })
+  replaceButton('#clear-done', () => {
+    for (const job of [...state.downloads.values()]) {
+      if (['done', 'error', 'cancelled'].includes(job.status)) {
+        state.downloads.delete(job.jobId)
+        state.samples.delete(job.jobId)
+      }
+    }
+    scheduleDownloads(true)
+    applyQueueAction('clear-done').catch(() => {})
   })
 
   function installClearAll () {
@@ -707,17 +904,17 @@
     clearAll.textContent = 'Clear all'
     clearDone.insertAdjacentElement('afterend', clearAll)
     clearAll.addEventListener('click', () => {
-      const jobs = [...state.downloads.values()]
-      if (!jobs.length) return
-      const activeJobs = jobs.filter(job => ['queued', 'downloading', 'paused', 'cancelling'].includes(job.status))
-      if (activeJobs.length && !confirm(`Cancel and clear all ${jobs.length.toLocaleString()} download entries?`)) return
+      const total = queueCount('total')
+      if (!total) return
+      // Unfinished work is cancelled before the history is emptied, so confirm
+      // whenever anything is still live.
+      const remaining = queueCount('remaining')
+      if (remaining && !confirm(`Cancel ${remaining.toLocaleString()} unfinished download(s) and clear all ${total.toLocaleString()} entries?`)) return
       state.downloads.clear()
       state.samples.clear()
+      state.queueStats = null
       scheduleDownloads(true)
-      ;(async () => {
-        if (activeJobs.length) await runRequestQueue(activeJobs, 'cancel-download')
-        await runRequestQueue(jobs, 'remove-download')
-      })().catch(() => {})
+      applyQueueAction('clear-all').catch(() => {})
     })
   }
 
@@ -731,10 +928,10 @@
   normalizeSearchIcon()
   installClearAll()
   ensureDownloadSummary()
-  teleUiRenderChats()
+  repaintChats()
   restoreCanonical(state.activeChatId).then(() => {
     updateCanonicalCount()
-    renderFilesVirtual(true)
+    try { renderFiles() } catch {}
   }).catch(() => {})
   renderDownloadsNow()
 })()

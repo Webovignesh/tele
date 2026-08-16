@@ -30,6 +30,54 @@
   const RECONCILE_PAGE_LIMIT = 100
   const RECONCILE_MAX_PAGES = 2500
 
+  /* Durable per-chat floor for the AUTHORITATIVE TOTAL.
+   *
+   * Same storage the scan guard already maintains, deliberately: one record, no
+   * second source of truth. It exists because a short or partial scan can be
+   * stamped done and land in the shared cache, and the header would then print a
+   * number below one we have already proven (the 22,479 -> 17,484 -> 22,479
+   * shrink). The floor is a total-only concept: FILTERED, CURRENT PAGE, SELECTED
+   * and DOWNLOAD QUEUE counts are never compared against it.
+   *
+   * It expires like the guard's copy so a channel that genuinely loses files is
+   * not pinned high forever, and a hard refresh clears it outright. */
+  const HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
+  const HIGH_WATER_TTL = 14 * 24 * 60 * 60 * 1000
+
+  function readHighWater () {
+    try { return JSON.parse(localStorage.getItem(HIGH_WATER_KEY) || '{}') || {} } catch { return {} }
+  }
+
+  function writeHighWater (map) {
+    try { localStorage.setItem(HIGH_WATER_KEY, JSON.stringify(map)) } catch {}
+  }
+
+  function totalFloor (chatId) {
+    const entry = readHighWater()[idOf(chatId)]
+    if (!entry) return 0
+    if (Date.now() - Number(entry.at || 0) > HIGH_WATER_TTL) return 0
+    return Math.max(0, Number(entry.count || 0))
+  }
+
+  /* Records a PROVEN-COMPLETE count. Callers must not pass partial scan counts:
+   * the floor gates completeness checks and index repair, so a partial value would
+   * both mask a real regression and trigger phantom rescans. */
+  function rememberTotalFloor (chatId, count) {
+    const value = Math.max(0, Number(count || 0))
+    if (!value) return
+    const map = readHighWater()
+    const key = idOf(chatId)
+    if (map[key] && Number(map[key].count || 0) >= value) return
+    map[key] = { count: value, at: Date.now() }
+    writeHighWater(map)
+  }
+
+  function clearTotalFloor (chatId) {
+    const map = readHighWater()
+    delete map[idOf(chatId)]
+    writeHighWater(map)
+  }
+
   function idOf (value) { return String(value) }
 
   function compareIds (a, b) {
@@ -45,8 +93,15 @@
     return snapshot.items.every(item => item && idOf(item.chatId) === id)
   }
 
+  /* Completeness is a size question as well as a flag question. `done` is set by
+   * whichever layer produced the snapshot, and a partial batch stamped done:true
+   * used to satisfy this check - restore() then adopted it as the committed index
+   * and the header shrank. A snapshot below the proven floor is treated as
+   * incomplete, so restore() falls through to the persistent read and union, and
+   * mergeProgress is allowed to rebuild it upward. */
   function isCompleteSnapshot (chatId, snapshot) {
-    return belongsToChat(chatId, snapshot) && snapshot.done !== false && Array.isArray(snapshot.items)
+    if (!belongsToChat(chatId, snapshot) || snapshot.done === false || !Array.isArray(snapshot.items)) return false
+    return snapshot.items.length >= totalFloor(chatId)
   }
 
   function newestItemId (items) {
@@ -90,18 +145,32 @@
     }
   }
 
+  /* Union of item sets. `done` means "this set is known to cover the chat's whole
+   * history", so it is OR across the inputs, not AND.
+   *
+   * It used to be AND, which made incompleteness permanent and was the mechanism
+   * behind every count fluctuation. flushProgress commits progress candidates that
+   * carry done:false, so the first partial flush set the committed index to
+   * done:false; from then on every union ANDed against that false, including the
+   * union with the finished scan-media-v3 result (done:true). The index therefore
+   * stayed flagged incomplete forever, which silently disabled the guard in
+   * mergeProgress that ignores obsolete partial scans, stopped restore() from
+   * fast-pathing, and pinned the status line to "Indexing files...".
+   *
+   * OR is the correct semantic: a complete set plus newer items is still complete,
+   * while two partials remain partial. */
   function union (chatId, ...snapshots) {
     const id = idOf(chatId)
     const byMessage = new Map()
     let scanned = 0
     let savedAt = 0
     let latestSeenMessageId = 0
-    let done = true
+    let done = false
     for (const snapshot of snapshots) {
       if (!belongsToChat(chatId, snapshot)) continue
       scanned = Math.max(scanned, Number(snapshot.scanned || 0))
       savedAt = Math.max(savedAt, Number(snapshot.savedAt || 0))
-      done = done && snapshot.done !== false
+      done = done || snapshot.done !== false
       if (snapshot.latestSeenMessageId && compareIds(snapshot.latestSeenMessageId, latestSeenMessageId) > 0) latestSeenMessageId = snapshot.latestSeenMessageId
       for (const item of snapshot.items) {
         if (!item || idOf(item.chatId) !== id || item.messageId == null) continue
@@ -127,11 +196,42 @@
     } catch {}
   }
 
+  /* THE authoritative total writer. Only the committed persistent index feeds it,
+   * raised to the durable floor so a partial snapshot can never lower it.
+   *
+   * Never write a FILTERED, CURRENT PAGE, SEARCH RESULT or DOWNLOAD QUEUE count
+   * here. Those belong to the pager (files-view.js), the Select all button and
+   * the downloads panel respectively. */
+  /* If the committed index is smaller than a count we have already PROVEN complete,
+   * the index regressed. Rebuild it instead of printing a number the list cannot
+   * back up: the header used to display max(measured, floor), which is how the
+   * header could read 22,479 while Select all and the pager read 21,045. One
+   * attempt per chat per session, so a channel that genuinely lost files does not
+   * rescan in a loop. */
+  const repairAttempts = new Set()
+
+  function maybeRepairIndex (chatId, snapshot) {
+    const id = idOf(chatId)
+    if (repairAttempts.has(id)) return
+    if (snapshot.done === false) return // a scan is still streaming; it is growing
+    const floor = totalFloor(chatId)
+    if (!floor || snapshot.items.length >= floor) return
+    repairAttempts.add(id)
+    try { setLoadState(`Repairing index (${snapshot.items.length.toLocaleString()} of ${floor.toLocaleString()} known files)`) } catch {}
+    Promise.resolve(ensure(chatId, { hardRefresh: true })).catch(() => {})
+  }
+
   function updateCountUi (chatId) {
     if (state.activeChatId == null || idOf(state.activeChatId) !== idOf(chatId)) return
     const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
     if (!snapshot) return
+    // The REAL committed count. Never a remembered high-water and never a filtered,
+    // page, search or download-queue figure.
     const total = snapshot.items.length
+    // Only a snapshot covering the whole history may raise the durable floor, so a
+    // partial scan cannot inflate it and then trigger a phantom repair.
+    if (snapshot.done !== false) rememberTotalFloor(chatId, total)
+    maybeRepairIndex(chatId, snapshot)
     state.mediaCount = total
     state.typeCounts = snapshot.typeCounts
     const count = document.querySelector('#chat-media-count')
@@ -141,6 +241,36 @@
       all.textContent = `Download all media (${total.toLocaleString()})`
       all.disabled = total === 0
     }
+  }
+
+  /* This layer takes ownership of the legacy label symbols.
+   *
+   * They were last assigned by daily-driver-final-guard.js (guardUpdateMediaLabel),
+   * which reads the shared, partial-writable rescueFileCache and applies no floor -
+   * it records a high-water mark and then never consults it when painting. Every
+   * legacy caller (openChat, the P0/P1 layers, the scan handlers) went through
+   * that symbol, so the authoritative index owner was bypassed entirely. */
+  function ownCountLabel () {
+    const paint = function fileGramStableUpdateMediaLabel () {
+      const chatId = state.activeChatId
+      const label = document.querySelector('#chat-media-count')
+      const all = document.querySelector('#download-all-media')
+      if (chatId == null) {
+        if (label) label.textContent = ''
+        if (all) { all.textContent = 'Download all media'; all.disabled = true }
+        return
+      }
+      const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
+      if (!snapshot) {
+        // No index yet. Say so rather than printing a number we cannot defend.
+        if (label) label.textContent = state.view === 'files' ? 'Indexing files\u2026' : ''
+        if (all) { all.textContent = 'Download all media'; all.disabled = true }
+        return
+      }
+      updateCountUi(chatId)
+    }
+    try { updateMediaCountLabel = paint } catch {}
+    try { rescueUpdateMediaLabel = paint } catch {}
   }
 
   function schedulePaint (chatId) {
@@ -416,6 +546,7 @@
   }
 
   installPersistentReadDedupe()
+  ownCountLabel()
   rescueEnsureAllFiles = ensure
 
   // The committed index is already newest-first. Avoid cloning+sorting 40k rows
@@ -473,6 +604,23 @@
       const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
       return snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0
     },
-    hardRefresh: chatId => ensure(chatId, { hardRefresh: true })
+    /* THE source of truth for the Files list.
+     *
+     * Everything that shows a total must read this, so the header, Download all,
+     * Select all and the pager cannot disagree. Reading rescueFileCache directly
+     * is what let them diverge: legacy layers still write that cache, so the list
+     * could show 21,045 while the header showed 22,479. */
+    snapshot: chatId => committed.get(idOf(chatId)) || sharedSnapshot(chatId) || null,
+    // Alias kept for callers that only want the number.
+    total: chatId => {
+      const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
+      return snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0
+    },
+    // An explicit hard refresh is the one operation allowed to lower the total,
+    // so it drops the floor first and rebuilds from the scan.
+    hardRefresh: chatId => {
+      clearTotalFloor(chatId)
+      return ensure(chatId, { hardRefresh: true })
+    }
   }
 })()

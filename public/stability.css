@@ -98,11 +98,6 @@
   contain: layout paint style;
 }
 
-.tele-ui-virtual-spacer {
-  width: 100%;
-  pointer-events: none;
-}
-
 @media (max-width: 1180px) {
   .tele-ui-download-summary {
     grid-template-columns: 1fr 1fr;

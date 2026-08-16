@@ -181,15 +181,6 @@
 }
 .file-status.downloaded { color: #69d98e; background: rgba(75,196,119,.12); border: 1px solid rgba(75,196,119,.2); }
 .file-status.forwarded { color: #73baff; background: rgba(88,170,255,.12); border: 1px solid rgba(88,170,255,.2); }
-.file-render-more {
-  min-height: 38px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #71879c;
-  font-size: 10px;
-}
-
 /* Preview lightbox. */
 .tele-preview-modal {
   position: fixed;
