@@ -12,8 +12,8 @@
   function loadConsistency () {
     if (document.querySelector('script[data-filegram-file-consistency]')) return
     const script = document.createElement('script')
-    script.src = 'file-consistency-fix.js?v=1'
-    script.dataset.filegramFileConsistency = '1'
+    script.src = 'file-consistency-fix.js?v=2'
+    script.dataset.filegramFileConsistency = '2'
     script.async = false
     document.body.appendChild(script)
   }
@@ -26,8 +26,8 @@
       return
     }
     const hardening = document.createElement('script')
-    hardening.src = 'uploads-hardening.js?v=1'
-    hardening.dataset.filegramUploadHardening = '1'
+    hardening.src = 'uploads-hardening.js?v=2'
+    hardening.dataset.filegramUploadHardening = '2'
     hardening.async = false
     hardening.addEventListener('load', loadConsistency, { once: true })
     document.body.appendChild(hardening)
@@ -46,8 +46,8 @@
   }
 
   const script = document.createElement('script')
-  script.src = 'bulk-uploads.js?v=1'
-  script.dataset.filegramBulkUploads = '1'
+  script.src = 'bulk-uploads.js?v=2'
+  script.dataset.filegramBulkUploads = '2'
   script.async = false
   script.addEventListener('load', loadHardening, { once: true })
   document.body.appendChild(script)
