@@ -1,5 +1,10 @@
 /* FileGram bulk uploads. Isolated to .fg-up-* so it cannot disturb Files/Messages. */
 #mg-uploads-pane{min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 14px 18px}
+/* The drawer is a three-tab surface now: Downloads | Uploads | Chat Info. Keep
+   all three in one row at every supported desktop width instead of inheriting
+   the old two-column management grid and wrapping Chat Info onto a second line. */
+.mg-drawer-tabs{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:0!important;padding:0 12px!important}
+.mg-drawer-tabs .mg-drawer-tab{min-width:0!important;width:auto!important;white-space:nowrap!important}
 .mg-drawer-tabs .fg-up-tab{gap:7px}
 .fg-up-tab-icon{display:inline-flex;width:16px;height:16px;align-items:center;justify-content:center}
 .fg-up-tab-icon svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
@@ -10,20 +15,22 @@
 .fg-up-section-head small{font-size:10px;font-weight:600;letter-spacing:0;text-transform:none;color:var(--fg-success,#35d07f)}
 #fg-upload-channel{width:100%;height:40px;background:var(--fg-surface-2,#111d2b);border:1px solid var(--fg-border,#203147);color:var(--fg-text,#eef5ff);border-radius:8px;padding:0 10px}
 .fg-up-note{margin-top:7px;color:var(--fg-text-muted,#8298b1);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.fg-up-caption{display:grid;gap:6px;margin-top:13px;color:var(--fg-text-muted,#8ea2ba);font-size:11px;font-weight:600}
-.fg-up-caption small{font-weight:400;color:var(--fg-text-faint,#63778f)}
-.fg-up-caption input{height:38px;border:1px solid var(--fg-border,#203147);background:var(--fg-surface-2,#111d2b);border-radius:8px;color:var(--fg-text,#eef5ff);padding:0 10px;min-width:0}
+/* Captioning was removed from the product. This rule also hides the element for
+   a single paint on cached markup until uploads-hardening removes it from DOM. */
+.fg-up-caption{display:none!important}
 .fg-up-add-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
 .fg-up-add-row button{height:38px}
-.fg-up-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin:14px 0 0;border:1px solid var(--fg-border,#203147);border-radius:10px;background:var(--fg-surface-1,#0e1824);overflow:hidden}
-.fg-up-stat{display:grid;gap:5px;padding:13px 10px;min-width:0}
+/* Explicit rows/min-heights prevent legacy section/card rules from collapsing
+   the aggregate stats to the label strip during queue updates. */
+.fg-up-stats{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;grid-template-rows:minmax(58px,auto) minmax(46px,auto)!important;grid-auto-rows:auto!important;min-height:106px!important;height:auto!important;margin:14px 0 0;border:1px solid var(--fg-border,#203147);border-radius:10px;background:var(--fg-surface-1,#0e1824);overflow:hidden}
+.fg-up-stat{display:grid!important;grid-template-rows:auto auto;align-content:center;gap:5px;padding:11px 10px;min-width:0;min-height:58px!important;height:auto!important}
 .fg-up-stat:not(:nth-child(3)){border-right:1px solid var(--fg-border,#203147)}
-.fg-up-stat span{font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-text-muted,#8298b1)}
-.fg-up-stat strong{font-size:15px;color:var(--fg-text,#eef5ff);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fg-up-stat span{display:block!important;font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-text-muted,#8298b1)}
+.fg-up-stat strong{display:block!important;font-size:15px;color:var(--fg-text,#eef5ff);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #fg-upload-speed{color:var(--fg-accent,#4fa8ff)}
 #fg-upload-completed{color:var(--fg-success,#35d07f)}
 #fg-upload-remaining{color:#bd72ff}
-.fg-up-total{grid-column:1/-1;border-top:1px solid var(--fg-border,#203147);border-right:0!important;padding-top:10px;padding-bottom:11px}
+.fg-up-total{display:grid!important;grid-column:1/-1!important;min-height:46px!important;height:auto!important;border-top:1px solid var(--fg-border,#203147);border-right:0!important;padding-top:9px;padding-bottom:10px}
 .fg-up-total strong{font-size:13px}
 .fg-up-range{width:100%;height:20px;margin:0;accent-color:var(--fg-accent,#4fa8ff)}
 .fg-up-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:16px 0;border-bottom:1px solid var(--fg-border,#203147)}
