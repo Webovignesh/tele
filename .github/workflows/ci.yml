@@ -25,6 +25,7 @@ jobs:
         run: |
           node --check server.js
           node --check bulk-upload-server.js
+          node --check bulk-upload-ledger.js
           node --check bulk-upload-preload.js
           node --check public/app.js
           node --check public/rescue-runtime.js
@@ -48,6 +49,10 @@ jobs:
           grep -q 'upload-queue-core.js' public/index.html
           grep -q 'uploads.js' public/index.html
           grep -q 'uploads.css' public/index.html
+          grep -q 'bulk-uploads.js' public/uploads.js
+          grep -q 'uploads-hardening.js' public/uploads.js
           grep -q 'bulk-upload-preload.js' package.json
+          grep -q 'bulk-upload-ledger.js' package.json
           grep -q 'bulk-upload-server.test.cjs' package.json
+          grep -q 'bulk-upload-ledger.test.cjs' package.json
           grep -q 'photoFileId' server.js
