@@ -29,10 +29,19 @@ jobs:
           node --check public/daily-driver-final.js
           node --check public/daily-driver-final-guard.js
           node --check public/daily-driver-final-ui-fix.js
+          node --check public/upload-queue-core.js
+          node --check public/uploads.js
       - run: npm run verify
+      - name: Install Chromium for upload behavior tests
+        run: npx playwright install --with-deps chromium
+      - name: Upload user-behavior tests
+        run: npm run test:uploads-ui
       - name: Runtime wiring
         shell: bash
         run: |
           grep -q 'rescue-runtime.js' public/index.html
           grep -q 'daily-driver-final-ui-fix.js' public/index.html
+          grep -q 'upload-queue-core.js' public/index.html
+          grep -q 'uploads.js' public/index.html
+          grep -q 'uploads.css' public/index.html
           grep -q 'photoFileId' server.js
