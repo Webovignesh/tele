@@ -1380,3 +1380,136 @@ test('the painted fill reaches the thumb and stops there', async ({ page }) => {
   await page.evaluate(value => { document.querySelector('#concurrency').value = value }, original)
   expect(failures, failures.join('; ')).toEqual([])
 })
+
+/* REGRESSION: the selection dock is absolutely positioned inside .chat, so it
+ * painted on top of the relocated pager. The page nav was not merely obscured but
+ * unreachable - a hit test at the centre of Next returned #mark-completed - so
+ * paging was impossible whenever anything was selected.
+ *
+ * The pager was also rendering as two rows, putting the nav directly under the
+ * dock: its DOM order is summary, page-size, nav but the assigned columns are
+ * 1, 3, 2, and grid's sparse placement cursor never moves backwards. */
+test('the selection dock never covers the page controls', async ({ page }) => {
+  if (!await boot(page)) return
+
+  const opened = await page.evaluate(async () => {
+    const chats = (state.chats || []).filter(Boolean)
+    if (!chats.length) return false
+    // Multi-page paging is what this exercises, so take the fullest chat available.
+    const chat = [...chats].sort((a, b) => Number(b.fileCount || 0) - Number(a.fileCount || 0))[0]
+    await openChat(chat.id)
+    setView('files')
+    return true
+  })
+  if (!opened) {
+    test.info().annotations.push({ type: 'note', description: 'no chat available; skipped' })
+    return
+  }
+  await page.waitForTimeout(9000)
+
+  const pagerPresent = await page.evaluate(() => {
+    const pager = document.querySelector('#filegram-file-pager')
+    return !!(pager && !pager.classList.contains('hidden'))
+  })
+  if (!pagerPresent) {
+    test.info().annotations.push({ type: 'note', description: 'pager not shown for this chat; skipped' })
+    return
+  }
+
+  // The pager must be a single row: summary, nav and page size all in row 1.
+  const rows = await page.evaluate(() => {
+    const pager = document.querySelector('#filegram-file-pager')
+    const cell = selector => {
+      const node = pager.querySelector(selector)
+      return node ? getComputedStyle(node).gridRowStart : null
+    }
+    return {
+      height: Math.round(pager.getBoundingClientRect().height),
+      summary: cell('.filegram-page-summary'),
+      nav: cell('.filegram-page-nav'),
+      size: cell('.filegram-page-size')
+    }
+  })
+  expect(rows.summary, 'the summary must sit in row 1').toBe('1')
+  expect(rows.nav, 'the nav must share row 1, not wrap below').toBe('1')
+  expect(rows.size, 'the page size must share row 1').toBe('1')
+
+  const select = await page.evaluate(() => {
+    const button = document.querySelector('#select-all-media')
+    if (!button) return false
+    button.click()
+    return true
+  })
+  if (!select) {
+    test.info().annotations.push({ type: 'note', description: 'no select-all control; skipped' })
+    return
+  }
+  await page.waitForTimeout(2500)
+
+  const geometry = await page.evaluate(() => {
+    const dock = document.querySelector('#selection-bar')
+    const nav = document.querySelector('#filegram-file-pager .filegram-page-nav')
+    if (!dock || !nav || dock.classList.contains('hidden')) return null
+    const dockRect = dock.getBoundingClientRect()
+    const navRect = nav.getBoundingClientRect()
+    return {
+      overlapY: Math.min(navRect.bottom, dockRect.bottom) - Math.max(navRect.top, dockRect.top),
+      overlapX: Math.min(navRect.right, dockRect.right) - Math.max(navRect.left, dockRect.left),
+      chatReserved: getComputedStyle(document.querySelector('.chat')).paddingBottom,
+      dockOpenClass: document.querySelector('.chat').classList.contains('fg-dock-open')
+    }
+  })
+  if (!geometry) {
+    test.info().annotations.push({ type: 'note', description: 'dock did not open; skipped' })
+    return
+  }
+
+  expect(geometry.dockOpenClass, 'the chat column must reserve space for the dock').toBeTruthy()
+  expect(parseFloat(geometry.chatReserved), 'the reserve must be a real amount').toBeGreaterThan(20)
+  expect(geometry.overlapY <= 0 || geometry.overlapX <= 0,
+    `dock overlaps the nav by ${geometry.overlapY}x${geometry.overlapX}px`).toBeTruthy()
+
+  /* The decisive check: the nav buttons must be the topmost element at their own
+   * centre. Geometry alone would not catch a transparent overlay. */
+  const hits = await page.evaluate(() => {
+    const out = {}
+    for (const action of ['prev', 'next']) {
+      const button = document.querySelector(`#filegram-file-pager [data-page-action="${action}"]`)
+      if (!button) { out[action] = 'missing'; continue }
+      const rect = button.getBoundingClientRect()
+      const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+      out[action] = !top ? 'nothing' : (button === top || button.contains(top) ? 'clickable' : `covered by #${top.id || top.className}`)
+    }
+    return out
+  })
+  expect(hits.next, `Next: ${hits.next}`).toBe('clickable')
+  expect(hits.prev, `Previous: ${hits.prev}`).toBe('clickable')
+
+  /* Paging must actually work with a selection active - but only assert it when
+   * there is somewhere to page to. A single-page chat legitimately leaves Next
+   * disabled, and the checks above are the point of this test. */
+  const pages = await page.evaluate(() => {
+    const total = document.querySelector('#filegram-file-pager .filegram-page-of')
+    const match = /(\d[\d,]*)/.exec((total && total.textContent) || '')
+    return match ? Number(match[1].replace(/,/g, '')) : 1
+  })
+  if (pages <= 1) {
+    test.info().annotations.push({ type: 'note', description: `only ${pages} page; paging assertion skipped` })
+    await page.evaluate(() => document.querySelector('#clear-selection')?.click())
+    return
+  }
+
+  const paged = await page.evaluate(async () => {
+    const input = document.querySelector('#filegram-file-pager input')
+    const before = input ? input.value : null
+    const next = document.querySelector('#filegram-file-pager [data-page-action="next"]')
+    const disabled = next.disabled
+    next.click()
+    await new Promise(resolve => setTimeout(resolve, 3500))
+    return { before, disabled, after: input ? input.value : null }
+  })
+  expect(paged.disabled, `Next is disabled despite ${pages} pages`).toBeFalsy()
+  expect(paged.after, `paging did not advance from ${paged.before} (of ${pages} pages)`).not.toBe(paged.before)
+
+  await page.evaluate(() => document.querySelector('#clear-selection')?.click())
+})

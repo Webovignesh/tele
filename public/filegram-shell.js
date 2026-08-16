@@ -636,6 +636,41 @@
     }
   }
 
+  /* Keeps the page controls clear of the selection dock.
+   *
+   * rescue-runtime.js moves #selection-bar inside .chat and app.js toggles its
+   * .hidden class from the selection count. The dock is absolutely positioned, so
+   * it painted over the relocated pager: the nav was not merely obscured but
+   * unclickable - a hit test at the centre of Next returned #mark-completed, so
+   * paging was impossible whenever anything was selected.
+   *
+   * Publishing the dock's measured height lets the stylesheet reserve exactly that
+   * much space at the bottom of the chat column. Measured rather than hard-coded
+   * because the dock's buttons wrap when the workspace is narrow, and the dock owns
+   * its own visibility - this only observes it. */
+  function installDockClearance () {
+    const dock = $('#selection-bar')
+    const chat = document.querySelector('.chat')
+    if (!dock || !chat || dock.dataset.fgClearance === '1') return
+    dock.dataset.fgClearance = '1'
+
+    const sync = () => {
+      const open = !dock.classList.contains('hidden')
+      const height = open ? Math.ceil(dock.getBoundingClientRect().height) : 0
+      const next = `${height}px`
+      // Guarded so the ResizeObserver below cannot feed itself.
+      if (chat.style.getPropertyValue('--fg-dock-h') !== next) {
+        chat.style.setProperty('--fg-dock-h', next)
+      }
+      chat.classList.toggle('fg-dock-open', open)
+    }
+
+    new MutationObserver(sync).observe(dock, { attributes: true, attributeFilter: ['class'] })
+    // Catches the buttons wrapping to a second line as the workspace narrows.
+    if (typeof ResizeObserver === 'function') new ResizeObserver(sync).observe(dock)
+    sync()
+  }
+
   /* ============================== downloads panel ========================= */
 
   function installDownloadIcons () {
@@ -845,6 +880,7 @@
     installToolbarLabels()
     installRangeDefaults()
     installPagerLabels()
+    installDockClearance()
     installDownloadIcons()
     installStatsCard()
     installRangeFill()
