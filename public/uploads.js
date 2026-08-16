@@ -9,12 +9,27 @@
   if (window.__fileGramBulkUploadsLoaderInstalled) return
   window.__fileGramBulkUploadsLoaderInstalled = true
 
+  function loadConsistency () {
+    if (document.querySelector('script[data-filegram-file-consistency]')) return
+    const script = document.createElement('script')
+    script.src = 'file-consistency-fix.js?v=1'
+    script.dataset.filegramFileConsistency = '1'
+    script.async = false
+    document.body.appendChild(script)
+  }
+
   function loadHardening () {
-    if (document.querySelector('script[data-filegram-upload-hardening]')) return
+    const existing = document.querySelector('script[data-filegram-upload-hardening]')
+    if (existing) {
+      if (window.__fileGramUploadsHardeningInstalled) loadConsistency()
+      else existing.addEventListener('load', loadConsistency, { once: true })
+      return
+    }
     const hardening = document.createElement('script')
     hardening.src = 'uploads-hardening.js?v=1'
     hardening.dataset.filegramUploadHardening = '1'
     hardening.async = false
+    hardening.addEventListener('load', loadConsistency, { once: true })
     document.body.appendChild(hardening)
   }
 
