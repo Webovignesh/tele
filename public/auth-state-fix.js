@@ -134,10 +134,6 @@
     button.title = 'Log out of Telegram on this FileGram installation'
     button.addEventListener('click', async () => {
       if (button.disabled) return
-      // The shell presents an in-app confirmation dialog and sets this flag
-      // before invoking the button, so the native prompt is skipped. Any other
-      // caller still gets the confirmation. The logout pipeline below is
-      // unchanged.
       const preconfirmed = button.dataset.fgPreconfirmed === '1'
       delete button.dataset.fgPreconfirmed
       if (!preconfirmed && !confirm('Log out of Telegram on this FileGram installation?')) return
@@ -181,6 +177,14 @@
     }
   }
 
+  function loadMediaPolicy () {
+    if (document.querySelector('script[data-filegram-media-policy]')) return
+    const policy = document.createElement('script')
+    policy.src = 'filegram-media-policy.js?v=1'
+    policy.dataset.filegramMediaPolicy = '1'
+    document.body.appendChild(policy)
+  }
+
   function loadFinalStabilityLayer () {
     if (!document.querySelector('link[data-tele-stability]')) {
       const link = document.createElement('link')
@@ -202,6 +206,7 @@
       view.addEventListener('load', () => setTimeout(installMessageTabRefreshGuard, 0), { once: true })
       document.body.appendChild(view)
     }
+    loadMediaPolicy()
   }
 
   function scheduleFinalStabilityLayer () {
@@ -310,6 +315,7 @@
     installLogout()
     restoreDownloadDirHint()
     rebindLoginSubmit()
+    loadMediaPolicy()
     if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) request('get-status').then(applyStatus).catch(() => {})
   })
 })()
