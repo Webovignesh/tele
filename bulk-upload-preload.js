@@ -18,7 +18,8 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
 
   const path = require('node:path')
   const tdl = require('tdl')
-  const { createBulkUploadHandler, UploadLedger } = require('./bulk-upload-server')
+  const { createBulkUploadHandler } = require('./bulk-upload-server')
+  const { ScalableUploadLedger } = require('./bulk-upload-ledger')
 
   let activeClient = null
   const priorCreateClient = tdl.createClient.bind(tdl)
@@ -34,7 +35,7 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
   function wrappedExpress (...args) {
     const app = originalExpress(...args)
     const root = __dirname
-    const ledger = new UploadLedger(root)
+    const ledger = new ScalableUploadLedger(root)
     const active = new Set()
     const handler = createBulkUploadHandler({ root, getClient: () => activeClient, ledger, active })
 
