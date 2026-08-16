@@ -14,6 +14,7 @@
   const TRANSIENT_HTTP = new Set([408, 425, 429, 500, 502, 503, 504])
   const HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
   const refreshTimers = new Map()
+  let captionObserver = null
 
   function isTemporaryId (value) {
     return String(value == null ? '' : value).trim().startsWith('-')
@@ -56,8 +57,6 @@
       xhr.setRequestHeader('x-file-name', encodeURIComponent(file.name || job.name || 'file'))
       xhr.setRequestHeader('x-mime-type', encodeURIComponent(file.type || job.type || 'application/octet-stream'))
       xhr.setRequestHeader('x-filegram-upload-id', String(job.id))
-      // Bulk uploads are documents by default. Exact filename/bytes make crash
-      // recovery and duplicate verification deterministic.
       xhr.setRequestHeader('x-upload-mode', 'document')
       xhr.upload.onprogress = event => {
         context.onProgress(event.loaded, event.lengthComputable ? event.total : (file.size || job.size || 0))
@@ -96,11 +95,6 @@
     return aa === bb ? 0 : (aa < bb ? -1 : 1)
   }
 
-  /* Older builds persisted TDLib's temporary outgoing message ids as if they
-   * were real media rows. Scrub those records in-place through the public index
-   * snapshot reference and persist the corrected snapshot. This intentionally
-   * lowers the high-water floor only when the removed rows are provably TDLib
-   * temporary ids; real Telegram message ids are never discarded here. */
   function scrubTemporaryIndex (chatId) {
     if (chatId == null || !window.teleFilesIndex || typeof window.teleFilesIndex.snapshot !== 'function') return 0
     let snapshot = null
@@ -171,10 +165,6 @@
       if (event && event.name === 'message-upsert') {
         const message = event.message || event.payload && event.payload.message
         const chatId = event.chatId != null ? event.chatId : event.payload && event.payload.chatId
-        // Do not render/index TDLib's temporary outgoing media message. The final
-        // positive Telegram id arrives immediately through sendSucceeded. Showing
-        // both was the source of 11 -> 22 file counts and the visible shrink when
-        // the temporary rows were deleted before their replacements rendered.
         if (message && message.media && message.outgoing && isTemporaryId(message.id)) return
         const result = baseHandleEvent(event)
         if (message && message.media && !isTemporaryId(message.id)) {
@@ -199,8 +189,22 @@
   }
 
   function removeCaptionUi () {
-    const caption = document.querySelector('.fg-up-caption')
-    if (caption) caption.remove()
+    document.querySelectorAll('.fg-up-caption').forEach(node => node.remove())
+  }
+
+  /* bulk-uploads exports its queue before its UI finishes mounting. A one-shot
+   * removal therefore races createUi(). Observe only during bootstrap and remove
+   * the caption the moment cached/new markup inserts it. */
+  function installCaptionRemoval () {
+    removeCaptionUi()
+    if (captionObserver || !document.body) return
+    captionObserver = new MutationObserver(() => removeCaptionUi())
+    captionObserver.observe(document.body, { childList: true, subtree: true })
+    setTimeout(() => {
+      if (captionObserver) captionObserver.disconnect()
+      captionObserver = null
+      removeCaptionUi()
+    }, 10000)
   }
 
   function installQueueHardening () {
@@ -235,9 +239,6 @@
       return file
     }
 
-    // Captioning is intentionally not part of bulk upload. Strip stale persisted
-    // values as well so an older queue cannot silently send captions after the UI
-    // has been removed.
     for (const job of queue.jobs.values()) job.caption = ''
     const baseAdd = queue.add.bind(queue)
     queue.add = function fileGramCaptionlessAdd (descriptors) {
@@ -246,12 +247,6 @@
 
     queue.transport = transport
 
-    /* UploadQueue.clearAll() normally calls cancelAll() and then emits clear-all.
-     * In the persisted browser queue that produces two async writes: one writes
-     * every job as cancelled and the next clears the store. Under a slow IndexedDB
-     * transaction the cancelled write can land last and resurrect a supposedly
-     * cleared 10k-file queue after restart. Clear directly instead: abort active
-     * requests, discard all scheduler state, and emit exactly one clear-all event. */
     queue.clearAll = function fileGramAtomicClearAll () {
       this.globalPaused = false
       this.cancelWake()
@@ -270,10 +265,12 @@
     return true
   }
 
+  installCaptionRemoval()
   installRealtimeHardening()
   let tries = 0
   const timer = setInterval(() => {
     installRealtimeHardening()
+    installCaptionRemoval()
     if (installQueueHardening() || ++tries > 240) clearInterval(timer)
   }, 25)
 })()
