@@ -31,16 +31,21 @@ async function fixture (page, options = {}) {
     window.state = {
       status: 'ready',
       activeChatId: 777,
+      view: 'messages',
+      messages: [],
       chats: [
         { id: 777, title: 'TEST', kind: 'channel', unread: 0 },
         { id: 888, title: 'NOT OWNED', kind: 'channel', unread: 0 }
       ]
     }
+    window.__handledEvents = []
+    window.handleEvent = event => window.__handledEvents.push(event)
     window.toast = (message, kind) => { window.__lastToast = { message, kind } }
     window.confirm = () => true
+    window.__remoteSnapshot = { items: remoteItems.map(item => ({ ...item })), done: true }
     window.teleFilesIndex = {
-      ensure: async () => ({ items: remoteItems, done: true }),
-      snapshot: () => ({ items: remoteItems, done: true })
+      ensure: async () => window.__remoteSnapshot,
+      snapshot: () => window.__remoteSnapshot
     }
     window.request = async (type, payload) => {
       if (type === 'get-chat-management') {
@@ -51,6 +56,7 @@ async function fixture (page, options = {}) {
         }
       }
       if (type === 'search-media') return { items: [], totalCount: 0, hasMore: false }
+      if (type === 'get-messages') return { messages: [], hasMore: false }
       if (type === 'delete-chat-message') return { ok: true }
       throw new Error(`Unexpected request ${type}`)
     }
@@ -124,6 +130,39 @@ async function persistedUploadCount (page) {
     }
   }))
 }
+
+test('upload drawer keeps three tabs, full stats card, no caption, and ignores temporary outgoing media ids', async ({ page }) => {
+  await fixture(page, {
+    remoteItems: [
+      { name: 'temporary.jpg', fileSize: 10, chatId: 777, messageId: -99, type: 'document' },
+      { name: 'real.jpg', fileSize: 10, chatId: 777, messageId: 99, type: 'document' }
+    ]
+  })
+
+  await expect(page.locator('.fg-up-caption')).toHaveCount(0)
+  await expect(page.locator('#fg-upload-total')).toBeVisible()
+  const geometry = await page.evaluate(() => {
+    const tabs = ['mg-tab-downloads', 'mg-tab-uploads', 'mg-tab-info'].map(id => document.getElementById(id).getBoundingClientRect())
+    const stats = document.querySelector('.fg-up-stats').getBoundingClientRect()
+    return { tabTops: tabs.map(box => Math.round(box.top)), statsHeight: stats.height }
+  })
+  expect(new Set(geometry.tabTops).size).toBe(1)
+  expect(geometry.statsHeight).toBeGreaterThanOrEqual(100)
+  await expect.poll(async () => page.evaluate(() => window.__remoteSnapshot.items.map(item => String(item.messageId)))).toEqual(['99'])
+
+  await page.evaluate(() => {
+    window.handleEvent({
+      name: 'message-upsert', chatId: 777,
+      message: { id: -123, outgoing: true, media: { type: 'document', fileSize: 5, messageId: -123, chatId: 777 } }
+    })
+    window.handleEvent({
+      name: 'message-upsert', chatId: 777,
+      message: { id: 123, outgoing: true, media: { type: 'document', fileSize: 5, messageId: 123, chatId: 777 } }
+    })
+  })
+  const handled = await page.evaluate(() => window.__handledEvents.map(event => String(event.message && event.message.id)))
+  expect(handled).toEqual(['123'])
+})
 
 test('owned TEST channel is selectable and duplicate review explains evidence', async ({ page }) => {
   await fixture(page, {
