@@ -6,7 +6,8 @@ const os = require('node:os')
 const path = require('node:path')
 const { EventEmitter } = require('node:events')
 const { PassThrough } = require('node:stream')
-const { createBulkUploadHandler, UploadLedger } = require('../bulk-upload-server')
+const { createBulkUploadHandler } = require('../bulk-upload-server')
+const { ScalableUploadLedger } = require('../bulk-upload-ledger')
 
 class FakeClient extends EventEmitter {
   constructor (options = {}) {
@@ -116,7 +117,7 @@ async function runRequest (handler, options = {}) {
 async function withHarness (client, fn) {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'filegram-bulk-upload-'))
   try {
-    const ledger = new UploadLedger(root)
+    const ledger = new ScalableUploadLedger(root)
     const handler = createBulkUploadHandler({ root, getClient: () => client, ledger, active: new Set() })
     await fn({ root, ledger, handler })
   } finally {
@@ -185,12 +186,36 @@ async function floodWaitReturnsRetryAfter () {
   })
 }
 
+async function completedLedgerSurvivesNewProcessInstance () {
+  const client = new FakeClient()
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'filegram-bulk-restart-'))
+  try {
+    const firstLedger = new ScalableUploadLedger(root)
+    const firstHandler = createBulkUploadHandler({ root, getClient: () => client, ledger: firstLedger, active: new Set() })
+    const first = await runRequest(firstHandler, { uploadId: 'restart-ledger', fileName: 'persist.txt', body: 'persist' })
+    assert.equal(first.statusCode, 200)
+    assert.equal(client.sendCount, 1)
+    await firstLedger.flush()
+
+    const secondLedger = new ScalableUploadLedger(root)
+    const secondHandler = createBulkUploadHandler({ root, getClient: () => client, ledger: secondLedger, active: new Set() })
+    const second = await runRequest(secondHandler, { uploadId: 'restart-ledger', fileName: 'persist.txt', body: 'persist' })
+    assert.equal(second.statusCode, 200)
+    assert.equal(second.body.recovered, true)
+    assert.equal(second.body.messageId, first.body.messageId)
+    assert.equal(client.sendCount, 1, 'restart recovery must not send the Telegram message twice')
+  } finally {
+    await fs.promises.rm(root, { recursive: true, force: true })
+  }
+}
+
 ;(async () => {
   await sendsAndPersistsFinalMessage()
   await retryIsIdempotentAfterResponseLoss()
   await reusedIdWithDifferentFileIsRejected()
   await nonOwnerCannotUpload()
   await floodWaitReturnsRetryAfter()
+  await completedLedgerSurvivesNewProcessInstance()
   console.log('bulk upload server checks passed')
 })().catch(error => {
   console.error(error)
