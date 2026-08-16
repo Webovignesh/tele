@@ -7,13 +7,15 @@
  *
  * The legacy index intentionally unions snapshots so partial scans can never
  * destroy a 20k channel. That rule is correct for discovery but wrong for
- * deletion. This layer performs a positive existence check against TDLib for the
- * active chat, tombstones missing message ids for the browser session, mutates the
- * committed snapshot in place, and persists the exact reduced snapshot.
+ * deletion. For small persisted indexes this layer now verifies the IDs against
+ * an end-to-end TDLib chat-history walk, which is stronger than getMessage()
+ * because getMessage may still return a locally cached object after an offline
+ * deletion. Large indexes retain the existing conservative per-ID verifier.
  */
 ;(function fileGramConsistencyFix () {
   if (window.__fileGramConsistencyFixInstalled) return
   window.__fileGramConsistencyFixInstalled = true
+  window.__fileGramConsistencyFixVersion = 2
 
   const HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
   const tombstones = new Map()
@@ -104,6 +106,31 @@
     return before - snapshot.items.length
   }
 
+  async function reconcileFromCompleteHistory (chatId, ids) {
+    if (!ids.length || ids.length > 1000) return null
+    try {
+      const response = await fetch(`/api/filegram/reconcile-small-chat-history/${encodeURIComponent(key(chatId))}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ messageIds: ids })
+      })
+      let payload = {}
+      try { payload = await response.json() } catch {}
+      if (!response.ok || !payload.ok || !payload.complete) return null
+      const missing = Array.isArray(payload.missing) ? payload.missing : []
+      if (missing.length) prune(chatId, missing)
+      prune(chatId, [])
+      return {
+        existing: Array.isArray(payload.existing) ? payload.existing.length : Math.max(0, ids.length - missing.length),
+        missing: missing.length,
+        unknown: 0,
+        source: 'complete-history'
+      }
+    } catch {
+      return null
+    }
+  }
+
   async function reconcile (chatId, force = false) {
     const chat = key(chatId)
     if (!chat) return null
@@ -113,7 +140,6 @@
     const job = (async () => {
       const snapshot = snapshotFor(chatId)
       if (!snapshot || !Array.isArray(snapshot.items)) return null
-      // Temporary outgoing ids are never valid persistent Files rows.
       const temporary = snapshot.items.filter(item => item && tempId(item.messageId)).map(item => item.messageId)
       if (temporary.length) prune(chatId, temporary)
 
@@ -125,6 +151,17 @@
         verified.add(chat)
         prune(chatId, [])
         return { existing: 0, missing: 0, unknown: 0 }
+      }
+
+      // Small chats/indexes can be repaired exactly. This is the path that fixes
+      // stale rows left behind when messages were deleted while FileGram was not
+      // running. We only trust absence if the server confirms it reached the real
+      // end of Telegram history.
+      const historyResult = await reconcileFromCompleteHistory(chatId, ids)
+      if (historyResult) {
+        verified.add(chat)
+        retryCount.delete(chat)
+        return historyResult
       }
 
       let existing = 0
@@ -225,17 +262,21 @@
   }
 
   function injectFolderStyle () {
-    if (document.querySelector('#fg-native-folder-style')) return
+    if (document.querySelector('#fg-native-folder-style-v2')) return
+    const old = document.querySelector('#fg-native-folder-style')
+    if (old) old.remove()
     const style = document.createElement('style')
-    style.id = 'fg-native-folder-style'
+    style.id = 'fg-native-folder-style-v2'
     style.textContent = `
-      .fg-download-folder-picker{width:100%!important;min-width:0!important;height:52px!important;padding:0 14px!important;display:flex!important;align-items:center!important;gap:10px!important;border:1px solid var(--fg-border,#24364a)!important;border-radius:10px!important;background:var(--fg-surface-2,#111c2a)!important;color:inherit!important;text-align:left!important;overflow:hidden!important}
+      .fg-save-to-host{display:block!important;width:100%!important;min-width:0!important;max-width:none!important;grid-column:1/-1!important;margin:0 0 16px!important;padding:0!important}
+      .fg-save-to-host>span:first-child{display:none!important}
+      .fg-save-to-row{display:block!important;width:100%!important;min-width:0!important;max-width:none!important}
+      .fg-download-folder-picker{box-sizing:border-box!important;width:100%!important;min-width:0!important;max-width:none!important;height:58px!important;padding:0 14px!important;display:flex!important;align-items:center!important;justify-content:flex-start!important;gap:11px!important;border:1px solid var(--fg-border,#24364a)!important;border-radius:10px!important;background:var(--fg-surface-2,#111c2a)!important;color:inherit!important;text-align:left!important;overflow:hidden!important;opacity:1!important}
       .fg-download-folder-picker:hover{border-color:#3c6f9d!important;background:var(--fg-surface-3,#162437)!important}
+      .fg-download-folder-picker:disabled{opacity:.65!important;cursor:wait!important}
       .fg-native-folder-icon{font-size:20px;flex:0 0 auto}.fg-native-folder-copy{display:flex;flex-direction:column;min-width:0;line-height:1.15;flex:1}.fg-native-folder-copy small{font-size:10px;letter-spacing:.08em;text-transform:uppercase;opacity:.62;margin-bottom:4px}.fg-native-folder-copy strong{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.fg-native-folder-chevron{font-size:22px;opacity:.7;flex:0 0 auto}
       #dl-dir.fg-download-path-hidden,#dl-dir-current.fg-download-path-hidden{display:none!important}
-      #mg-downloads-pane .dl-controls>label.conc:first-of-type{display:block!important;margin:0 0 16px!important}
-      #mg-downloads-pane .dl-controls>label.conc:first-of-type>span:first-child{display:none!important}
-      #mg-downloads-pane .dl-controls>label.conc:first-of-type .row{display:block!important;width:100%!important}
+      #mg-downloads-pane .dl-controls,#mg-downloads-pane .downloads-controls{min-width:0!important}
     `
     document.head.appendChild(style)
   }
@@ -247,11 +288,16 @@
     if (folderInstalled && old.classList.contains('fg-download-folder-picker')) return true
 
     injectFolderStyle()
+    const host = old.closest('label.conc') || old.parentElement
+    const row = old.closest('.row') || old.parentElement
+    if (host) host.classList.add('fg-save-to-host')
+    if (row) row.classList.add('fg-save-to-row')
+
     const button = old.cloneNode(false)
     button.id = 'set-dir'
     button.type = 'button'
     button.className = 'fg-download-folder-picker'
-    button.dataset.fgNativeFolderOwner = '1'
+    button.dataset.fgNativeFolderOwner = '2'
     const current = String(input.value || '').trim()
     button.innerHTML = folderMarkup(current)
     button.title = current || 'Choose download folder'
@@ -308,9 +354,6 @@
   })
   if (document.body) observer.observe(document.body, { childList: true, subtree: true })
 
-  // Active-chat watcher is intentional: several legacy layers replace openChat,
-  // so wrapping one function is not reliable. Reconciliation runs only once per
-  // chat per browser session unless Telegram returns an uncertain result.
   setInterval(() => {
     install()
     try {
