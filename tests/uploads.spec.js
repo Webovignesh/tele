@@ -86,6 +86,13 @@ async function fixture (page, options = {}) {
   await page.locator('#fg-upload-channel').selectOption({ label: 'TEST' })
 }
 
+async function setConcurrency (page, value) {
+  await page.locator('#fg-upload-concurrency').evaluate((el, next) => {
+    el.value = String(next)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  }, value)
+}
+
 async function addFilesThroughPicker (page, files) {
   const chooserPromise = page.waitForEvent('filechooser')
   await page.locator('#fg-upload-add-files').click()
@@ -114,9 +121,27 @@ test('Uploads tab reviews duplicates then uploads unique files', async ({ page }
   expect(snapshot.jobs.every(job => job.chatTitle === 'TEST')).toBeTruthy()
 })
 
+test('Pause all and Resume all apply to the whole queue', async ({ page }) => {
+  await fixture(page, { slow: true })
+  await setConcurrency(page, 2)
+  const files = Array.from({ length: 8 }, (_, index) => ({
+    name: `pause-${index}.txt`,
+    mimeType: 'text/plain',
+    buffer: Buffer.from(`payload-${index}`)
+  }))
+  await addFilesThroughPicker(page, files)
+  await page.locator('#fg-upload-review-unique').click()
+  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.uploading)).toBe(2)
+  await page.locator('#fg-upload-pause-all').click()
+  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.paused)).toBe(8)
+  expect(await page.evaluate(() => window.FileGramUploads.snapshot().stats.uploading)).toBe(0)
+  await page.locator('#fg-upload-resume-all').click()
+  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.completed), { timeout: 10000 }).toBe(8)
+})
+
 test('Cancel all covers the entire queue, not only parallel workers', async ({ page }) => {
   await fixture(page, { slow: true })
-  await page.locator('#fg-upload-concurrency').fill('2')
+  await setConcurrency(page, 2)
   const files = Array.from({ length: 20 }, (_, index) => ({
     name: `bulk-${index}.txt`,
     mimeType: 'text/plain',
@@ -130,6 +155,27 @@ test('Cancel all covers the entire queue, not only parallel workers', async ({ p
   const stats = await page.evaluate(() => window.FileGramUploads.snapshot().stats)
   expect(stats.cancelled).toBe(20)
   expect(stats.total).toBe(20)
+})
+
+test('Clear done and Clear all have full-queue semantics', async ({ page }) => {
+  await fixture(page)
+  await addFilesThroughPicker(page, [
+    { name: 'done-1.txt', mimeType: 'text/plain', buffer: Buffer.from('1') },
+    { name: 'done-2.txt', mimeType: 'text/plain', buffer: Buffer.from('2') }
+  ])
+  await page.locator('#fg-upload-review-unique').click()
+  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.completed)).toBe(2)
+  await page.locator('#fg-upload-clear-done').click()
+  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(0)
+
+  await addFilesThroughPicker(page, Array.from({ length: 6 }, (_, index) => ({
+    name: `clear-${index}.txt`, mimeType: 'text/plain', buffer: Buffer.from(String(index))
+  })))
+  await page.locator('#fg-upload-review-unique').click()
+  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(6)
+  await page.locator('#fg-upload-clear-all').click()
+  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(0)
+  expect(await page.locator('#fg-upload-list .fg-up-job').count()).toBe(0)
 })
 
 test('server interruption automatically retries without losing the queue', async ({ page }) => {
