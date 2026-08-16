@@ -102,8 +102,16 @@ function fmtSize (n) {
 
 function fmtSpeed (n) { return `${fmtSize(n)}/s` }
 
+/* Upper bound matters as much as the lower one. With only the isFinite/<=0 guards
+ * a near-zero speed produced "ETA 13772h 50m", "ETA 560780h 25m" and, once the
+ * value passed 1e21 and JS switched to exponential notation,
+ * "ETA 4.997042705591493e+33h 21m". Anything beyond a day is not a useful
+ * estimate, so it is reported as an unknown rather than a fabricated number. */
+const ETA_MAX_SECONDS = 24 * 3600
+
 function fmtEta (sec) {
   if (!isFinite(sec) || sec <= 0) return ''
+  if (sec > ETA_MAX_SECONDS) return ''
   sec = Math.round(sec)
   if (sec < 60) return `${sec}s`
   if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`

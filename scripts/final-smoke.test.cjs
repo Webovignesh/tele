@@ -52,12 +52,34 @@ assert.doesNotMatch(uiFix, /tele-ui-virtual-spacer/)
 assert.doesNotMatch(uiFix, /addEventListener\('scroll'/)
 assert.match(uiFix, /teleP1RenderDedupeReport = function teleUiRenderDedupeReport/)
 assert.match(uiFix, /upsertDownload = function teleUiUpsertDownload/)
-assert.match(uiFix, /renderDownloads = renderDownloadsNow/)
+/* The global entry point must be the THROTTLED wrapper, not renderDownloadsNow.
+ * app.js answers the 200ms download-stats broadcast by calling renderDownloads()
+ * directly, so binding it to the immediate painter bypassed the coalescer and
+ * drove ~10 full repaints a second. */
+assert.match(uiFix, /renderDownloads = function teleUiRenderDownloads/)
+assert.match(uiFix, /teleUiRenderDownloads \(\) \{ scheduleDownloads\(false\) \}/)
 // The rAF that used to be asserted here drove the virtual files scroll handler,
 // which is gone. Download painting is still throttled, which is the property
 // worth pinning.
 assert.match(uiFix, /DOWNLOAD_PAINT_MS/)
 assert.match(uiFix, /function scheduleDownloads/)
+
+/* The download list must be reconciled in place, never cleared. #download-list is
+ * the scroll container, so replaceChildren collapsed scrollHeight and the browser
+ * clamped scrollTop to 0 on every paint, making the list unscrollable while
+ * anything was downloading. */
+assert.doesNotMatch(uiFix, /list\.replaceChildren/)
+assert.match(uiFix, /node\.dataset\.jobId/)
+assert.match(uiFix, /list\.insertBefore\(node/)
+assert.match(uiFix, /function actionsSignature/)
+
+/* Speed must snap to a hard zero when a transfer stops. The EMA decays
+ * geometrically and never reaches zero, so a stalled job kept a denormal speed
+ * alive, every `speed > 0` guard stayed true and remaining/speed exploded into
+ * "ETA 4.99e+33h". */
+assert.match(uiFix, /SPEED_FLOOR/)
+assert.match(uiFix, /STALL_AFTER_MS/)
+assert.match(uiFix, /sample\.speed = 0/)
 assert.match(uiFix, /tele-ui-kind-icon/)
 assert.doesNotMatch(uiFix, /MutationObserver/)
 

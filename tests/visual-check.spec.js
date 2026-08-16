@@ -586,7 +586,7 @@ test('concurrency slider thumb is centred and the track shows the value', async 
     return {
       height: parseFloat(cs.height),
       background: cs.backgroundColor,
-      fill: cs.getPropertyValue('--fg-range-ratio').trim(),
+      fill: cs.getPropertyValue('--fg-track-bg').trim(),
       expected: ((value - min) / (max - min)).toFixed(5),
       value
     }
@@ -594,7 +594,9 @@ test('concurrency slider thumb is centred and the track shows the value', async 
   expect(slider, 'the slider must exist').not.toBeNull()
   // The box must be at least as tall as the 14px thumb or the head sits off-track.
   expect(slider.height, 'the input must be tall enough for the thumb').toBeGreaterThanOrEqual(14)
-  expect(slider.fill, 'the filled portion must track the value').toBe(slider.expected)
+  // The complete gradient is written inline; it must carry the current ratio.
+  expect(slider.fill, 'the track must be painted with a gradient').toContain('linear-gradient')
+  expect(slider.fill, 'the filled portion must track the value').toContain(slider.expected)
 
   // Moving the slider must repaint the fill.
   await page.locator('#concurrency').focus()
@@ -605,11 +607,11 @@ test('concurrency slider thumb is centred and the track shows the value', async 
     const min = Number(input.min || 1)
     const max = Number(input.max || 64)
     return {
-      fill: getComputedStyle(input).getPropertyValue('--fg-range-ratio').trim(),
+      fill: getComputedStyle(input).getPropertyValue('--fg-track-bg').trim(),
       expected: ((Number(input.value) - min) / (max - min)).toFixed(5)
     }
   })
-  expect(after.fill, 'the fill must follow the slider').toBe(after.expected)
+  expect(after.fill, 'the fill must follow the slider').toContain(after.expected)
   await page.keyboard.press('ArrowLeft')
   await page.waitForTimeout(400)
 })
@@ -935,25 +937,25 @@ test('slider fill boundary is computed at the thumb centre', async ({ page }) =>
   const geometry = await page.evaluate(() => {
     const input = document.querySelector('#concurrency')
     if (!input) return null
-    const cs = getComputedStyle(input)
     const min = Number(input.min || 1)
     const max = Number(input.max || 64)
     const ratio = (Number(input.value) - min) / (max - min)
+    const track = getComputedStyle(input).getPropertyValue('--fg-track-bg').trim()
     return {
-      ratioVar: cs.getPropertyValue('--fg-range-ratio').trim(),
+      track,
       expected: ratio.toFixed(5),
-      stop: cs.getPropertyValue('--fg-range-stop').trim(),
-      thumb: cs.getPropertyValue('--fg-range-thumb').trim()
+      // The stop expression embedded in the gradient.
+      stop: (track.match(/calc\([^)]*\([^)]*\)[^)]*\)/) || [''])[0]
     }
   })
   expect(geometry, 'the slider must exist').not.toBeNull()
-  expect(geometry.ratioVar, 'the ratio must track the value').toBe(geometry.expected)
-  expect(geometry.thumb, 'the thumb width must be declared for the inset maths').toBe('14px')
-  // The stop must subtract a thumb width and re-centre by half of one, otherwise
-  // the painted fill overshoots the head.
-  expect(geometry.stop).toContain('100%')
-  expect(geometry.stop, `stop expression was "${geometry.stop}"`).toMatch(/100%\s*-\s*(var\(--fg-range-thumb\)|14px)/)
-  expect(geometry.stop).toMatch(/\/\s*2/)
+  expect(geometry.track, 'the gradient must be pre-built inline').toContain('linear-gradient')
+  expect(geometry.track, 'the gradient must carry the current ratio').toContain(geometry.expected)
+  /* The stop must subtract a whole thumb width and re-centre by half of one.
+   * A plain percentage of the track runs ahead of the head, which is what painted
+   * blue past the thumb. */
+  expect(geometry.stop, `stop expression was "${geometry.stop}"`).toContain('100% - 14px')
+  expect(geometry.stop).toMatch(/14px\s*\/\s*2/)
 
   await page.locator('#concurrency').focus()
   await page.keyboard.press('ArrowRight')
@@ -963,11 +965,11 @@ test('slider fill boundary is computed at the thumb centre', async ({ page }) =>
     const min = Number(input.min || 1)
     const max = Number(input.max || 64)
     return {
-      ratioVar: getComputedStyle(input).getPropertyValue('--fg-range-ratio').trim(),
+      track: getComputedStyle(input).getPropertyValue('--fg-track-bg').trim(),
       expected: ((Number(input.value) - min) / (max - min)).toFixed(5)
     }
   })
-  expect(moved.ratioVar).toBe(moved.expected)
+  expect(moved.track).toContain(moved.expected)
   await page.keyboard.press('ArrowLeft')
   await page.waitForTimeout(400)
 })
@@ -1064,4 +1066,204 @@ test('mark-read is issued by the Messages tab, once', async ({ page }) => {
   // Exactly one: openChat restores the view through setView, so both hooks can fire
   // for one action and the in-flight guard must collapse them.
   expect(result.onMessages, `Messages tab issued ${result.onMessages} mark-read requests`).toBe(1)
+})
+
+/* ==========================================================================
+ * Shell lifecycle, profile identity, download list behaviour
+ * ========================================================================== */
+
+/* REGRESSION: the shell's final line was
+ *   setTimeout(() => { fileGramShell(); ... }, 0)
+ * inside the IIFE named fileGramShell, so the whole file re-entered itself once
+ * per macrotask for ever. Each pass rebuilt `account` as empty (repainting the
+ * placeholder over the real name), started another identity interval and settle()
+ * chain, and grew the handleEvent/applyStatus/renderChats wrapper chains. */
+test('the shell installs once and keeps identity outside its closure', async ({ page }) => {
+  if (!await boot(page)) return
+  const shell = await page.evaluate(() => ({
+    installed: window.__fileGramShellInstalled === true,
+    identityOnWindow: !!window.__fileGramAccount
+  }))
+  expect(shell.installed, 'the shell must record that it installed').toBeTruthy()
+  expect(shell.identityOnWindow, 'identity must survive a re-execution of the file').toBeTruthy()
+
+  // Wrapper chains must be stable. Unbounded re-entry re-wrapped these globals on
+  // every tick, so their source text kept growing in nesting depth.
+  const first = await page.evaluate(() => String(renderChats))
+  await page.waitForTimeout(2500)
+  const second = await page.evaluate(() => String(renderChats))
+  expect(second, 'renderChats must not be re-wrapped over time').toBe(first)
+})
+
+test('the profile never falls back to the placeholder once identity is known', async ({ page }) => {
+  if (!await boot(page)) return
+  await page.waitForTimeout(4000)
+  const known = await page.evaluate(() => {
+    const account = window.__fileGramAccount
+    return !!(account && (account.name || account.username))
+  })
+  if (!known) {
+    test.info().annotations.push({ type: 'note', description: 'no identity payload available; placeholder check skipped' })
+    return
+  }
+  const seen = new Set()
+  for (let sample = 0; sample < 6; sample++) {
+    seen.add(await page.evaluate(() => ((document.querySelector('#fg-account-name') || {}).textContent || '').trim()))
+    await page.waitForTimeout(700)
+  }
+  expect([...seen], 'the neutral placeholder must never be painted over a real name')
+    .not.toContain('Telegram account')
+  expect([...seen], 'the name must not flicker between values').toHaveLength(1)
+
+  const avatar = await page.evaluate(() => {
+    const host = document.querySelector('#fg-account-avatar')
+    const img = host && host.querySelector('img')
+    const initials = host && host.querySelector('.fg-account-initials')
+    return {
+      photoShown: !!(img && img.complete && img.naturalWidth > 0),
+      initials: (initials && initials.textContent || '').trim(),
+      background: host ? getComputedStyle(host).backgroundColor : ''
+    }
+  })
+  // Either a real photo, or a coloured disc with a glyph. The old bug produced
+  // neither: an empty circle on the neutral surface colour.
+  if (!avatar.photoShown) {
+    expect(avatar.initials.length, 'a photo-less account must still show a glyph').toBeGreaterThan(0)
+  }
+})
+
+/* REGRESSION: renderDownloadsNow rebuilt every row and swapped the list with
+ * replaceChildren on each paint. #download-list is the scroll container, so
+ * scrollHeight collapsed and the browser clamped scrollTop to 0 about ten times a
+ * second, making the list impossible to scroll while anything was downloading. */
+test('download list keeps scroll position and reuses rows across repaints', async ({ page }) => {
+  if (!await boot(page)) return
+
+  // Synthetic jobs: enough rows to scroll, and no real downloads triggered.
+  await page.evaluate(() => {
+    for (let index = 0; index < 40; index++) {
+      state.downloads.set(`fg-test-${index}`, {
+        jobId: `fg-test-${index}`,
+        chatId: -1,
+        chatTitle: 'Test',
+        messageId: index,
+        fileId: 90000 + index,
+        fileName: `probe_${index}.mp4`,
+        fileSize: 1000000,
+        downloaded: 500000,
+        status: 'downloading',
+        error: null,
+        destPath: null
+      })
+    }
+    state.queueStats = {
+      total: 40, queued: 0, downloading: 40, paused: 0, done: 0, error: 0, cancelled: 0,
+      remaining: 40, speed: 0, downloadedBytes: 20000000, expectedBytes: 40000000, concurrency: 8
+    }
+    renderDownloads()
+  })
+  await page.waitForTimeout(700)
+
+  const geometry = await page.evaluate(() => {
+    const list = document.querySelector('#download-list')
+    if (!list) return null
+    return { rows: list.querySelectorAll('.djob').length, scrollHeight: list.scrollHeight, clientHeight: list.clientHeight }
+  })
+  expect(geometry, 'the download list must exist').not.toBeNull()
+  expect(geometry.rows, 'the synthetic rows must render').toBeGreaterThan(10)
+
+  if (geometry.scrollHeight <= geometry.clientHeight) {
+    test.info().annotations.push({ type: 'note', description: 'list not scrollable at this viewport; scroll retention skipped' })
+  } else {
+    const result = await page.evaluate(async () => {
+      const list = document.querySelector('#download-list')
+      const first = list.querySelector('.djob')
+      first.dataset.probeMark = 'kept'
+      list.scrollTop = 120
+      const readings = []
+      // Force repaints while watching the scroll offset.
+      for (let index = 0; index < 8; index++) {
+        renderDownloads()
+        await new Promise(resolve => setTimeout(resolve, 260))
+        readings.push(list.scrollTop)
+      }
+      return {
+        readings,
+        rowSurvived: !!list.querySelector('[data-probe-mark="kept"]')
+      }
+    })
+    expect(result.readings.every(value => value > 0),
+      `scroll position was reset: ${result.readings.join(', ')}`).toBeTruthy()
+    expect(result.rowSurvived, 'rows must be patched in place, not rebuilt').toBeTruthy()
+  }
+
+  await page.evaluate(() => {
+    for (const key of [...state.downloads.keys()]) if (String(key).startsWith('fg-test-')) state.downloads.delete(key)
+    state.queueStats = null
+    renderDownloads()
+  })
+})
+
+/* REGRESSION: "ETA 13772h 50m", "ETA 560780h 25m", "ETA 4.997042705591493e+33h 21m".
+ * The speed EMA decayed geometrically without ever reaching zero, so `speed > 0`
+ * stayed true and remaining/speed exploded; fmtEta had no upper clamp. */
+test('ETA is clamped and never printed for a stalled transfer', async ({ page }) => {
+  if (!await boot(page)) return
+
+  const clamp = await page.evaluate(() => ({
+    normal: fmtEta(90),
+    hour: fmtEta(3700),
+    absurd: fmtEta(4.9e37),
+    huge: fmtEta(49570000),
+    negative: fmtEta(-5),
+    infinite: fmtEta(Infinity)
+  }))
+  expect(clamp.normal, 'a real estimate must still format').toBe('1m 30s')
+  expect(clamp.hour).toMatch(/^1h/)
+  expect(clamp.absurd, 'exponential notation must never reach the UI').toBe('')
+  expect(clamp.huge, 'an implausible estimate must be withheld').toBe('')
+  expect(clamp.negative).toBe('')
+  expect(clamp.infinite).toBe('')
+
+  // A job whose byte count never advances must settle to no speed and no ETA.
+  await page.evaluate(() => {
+    state.downloads.set('fg-stall-test', {
+      jobId: 'fg-stall-test',
+      chatId: -1,
+      chatTitle: 'Test',
+      messageId: 1,
+      fileId: 99999,
+      fileName: 'stalled.mp4',
+      fileSize: 100000000,
+      downloaded: 1000,
+      status: 'downloading',
+      error: null,
+      destPath: null
+    })
+    renderDownloads()
+  })
+  // Repaint repeatedly without ever advancing `downloaded`.
+  for (let index = 0; index < 10; index++) {
+    await page.evaluate(() => renderDownloads())
+    await page.waitForTimeout(260)
+  }
+  const stalled = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#download-list .djob')]
+    const row = rows.find(node => (node.textContent || '').includes('stalled.mp4'))
+    if (!row) return null
+    return {
+      text: (row.textContent || '').trim(),
+      eta: [...row.querySelectorAll('.sub')].map(s => (s.textContent || '').trim()).find(t => t.startsWith('ETA')) || ''
+    }
+  })
+  if (stalled) {
+    expect(stalled.eta, `a stalled job published "${stalled.eta}"`).toBe('')
+    expect(stalled.text).not.toMatch(/e\+/i)
+    expect(stalled.text, 'no absurd hour count may appear').not.toMatch(/\d{3,}h/)
+  }
+  await page.evaluate(() => {
+    state.downloads.delete('fg-stall-test')
+    state.samples.delete('fg-stall-test')
+    renderDownloads()
+  })
 })

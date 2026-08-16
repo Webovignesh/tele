@@ -14,6 +14,11 @@
  * Every install is idempotent so a double-load is harmless.
  */
 ;(function fileGramShell () {
+  // A second <script> load must not re-run the installs, re-wrap the runtime
+  // globals or start a second set of timers.
+  if (window.__fileGramShellInstalled) return
+  window.__fileGramShellInstalled = true
+
   const $ = sel => document.querySelector(sel)
   const $$ = sel => [...document.querySelectorAll(sel)]
 
@@ -228,13 +233,19 @@
    * builds from getMe(). The avatar reuses the existing /api/media-preview
    * file resolver; no second profile-photo pipeline is introduced.
    */
-  const account = { name: '', username: '', photoFileId: 0 }
+  /* Identity is held on window rather than in this closure so that a re-execution
+   * of this file, or any repaint that happens to run before get-status resolves,
+   * cannot reset it to empty and repaint the placeholder over the real name. */
+  const account = window.__fileGramAccount ||
+    (window.__fileGramAccount = { name: '', username: '', photoFileId: 0 })
 
   function paintAccount () {
     const nameEl = $('#fg-account-name')
     const statusEl = $('#fg-account-status')
     const avatar = $('#fg-account-avatar')
     const label = account.name || account.username || ''
+    // Once a real identity is known, never regress to the neutral placeholder.
+    if (!label && nameEl && nameEl.dataset.fgRealName === '1') return
     // A session can be authenticated before the identity payload arrives (or on
     // a server build that predates `me` in get-status). Claiming "Not signed in"
     // in that window would be wrong, so fall back to a neutral signed-in label.
@@ -244,6 +255,7 @@
       const text = label || (signedIn ? 'Telegram account' : 'Not signed in')
       if (nameEl.textContent !== text) nameEl.textContent = text
       nameEl.title = text
+      if (label) nameEl.dataset.fgRealName = '1'
     }
     if (statusEl) {
       const text = account.username
@@ -909,8 +921,17 @@
     }
   }
 
-  /* All idempotent installs; a double-load is harmless. Final gate: delayed one
-   * tick so state, other owners and event listeners have finished installing. */
-  setTimeout(() => { fileGramShell(); syncStats(); applyChatFilters() }, 0)
+  /* Final gate: one tick later, so the other owners and their event listeners have
+   * finished installing.
+   *
+   * This must call decorate(), NEVER fileGramShell(). This IIFE *is*
+   * fileGramShell, so calling it here re-entered the whole file once per
+   * macrotask, forever. Each re-entry rebuilt the `account` closure as empty,
+   * which made paintAccount repaint the placeholder "Telegram account" over the
+   * real name; started another identity setInterval and another 120ms settle()
+   * chain; grew the handleEvent / applyStatus / renderChats wrapper chains by one
+   * link per tick; and added another MutationObserver. It was the single cause of
+   * both the blank/flashing profile and the right-panel flicker. */
+  setTimeout(() => { decorate(); syncStats(); applyChatFilters() }, 0)
 })()
 

@@ -90,17 +90,10 @@
   --fg-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --fg-duration-fast: 120ms;
 
-  /* Slider fill geometry. Custom properties must be declared on :root rather
-     than on the input element because pseudo-elements do not INHERIT custom
-     properties from their originating element. Declared on #concurrency, the
-     variables would be undefined inside ::-webkit-slider-runnable-track and
-     Chromium would treat the gradient as invalid background:none. */
-  --fg-range-ratio: 0; /* unitless 0..1, written by filegram-shell.js */
-  --fg-range-thumb: 14px; /* thumb width */
-  /* The x coordinate of the thumb CENTRE. A plain percentage of the track is
-     wrong because the thumb centre only travels between half a thumb from each
-     end, so a percentage stop runs ahead of the head and paints past it. */
-  --fg-range-stop: calc(var(--fg-range-ratio) * (100% - var(--fg-range-thumb)) + var(--fg-range-thumb) / 2);
+  /* The concurrency slider's filled track is written inline on the element as a
+     complete --fg-track-bg gradient by filegram-shell.js. Chromium will not
+     evaluate a gradient on ::-webkit-slider-runnable-track when it is assembled
+     from custom properties, so the whole value has to arrive pre-built. */
   --fg-duration-normal: 200ms;
   --fg-duration-slow: 320ms;
 

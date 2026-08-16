@@ -490,38 +490,47 @@
     }
   }
 
+  /* Bytes per second below which a job is reported as not moving at all.
+   * The EMA below decays geometrically (x0.65 per sample) and never reaches zero,
+   * so a job that is still flagged 'downloading' but has stopped advancing kept a
+   * denormal speed alive. Every `speed > 0` guard stayed true and
+   * remaining / speed exploded, which is where the absurd ETAs came from. */
+  const SPEED_FLOOR = 64
+  // How long without a single new byte before the speed is treated as zero.
+  const STALL_AFTER_MS = 4000
+
   function sampleSpeed (job, now, downloaded) {
     let sample = state.samples.get(job.jobId)
-    if (!sample || Array.isArray(sample)) sample = { time: now, downloaded, speed: 0 }
+    if (!sample || Array.isArray(sample)) sample = { time: now, downloaded, speed: 0, movedAt: now }
+    if (!sample.movedAt) sample.movedAt = now
     const elapsed = (now - sample.time) / 1000
     if (elapsed >= 0.18) {
-      const instant = Math.max(0, (downloaded - sample.downloaded) / Math.max(elapsed, 0.001))
+      const delta = downloaded - sample.downloaded
+      const instant = Math.max(0, delta / Math.max(elapsed, 0.001))
       sample.speed = sample.speed ? sample.speed * 0.65 + instant * 0.35 : instant
+      if (delta > 0) sample.movedAt = now
       sample.time = now
       sample.downloaded = downloaded
     }
+    // Snap to a hard zero once the transfer has clearly stopped, so callers can
+    // trust `speed > 0` to mean "actually moving".
+    if (sample.speed < SPEED_FLOOR || now - sample.movedAt > STALL_AFTER_MS) sample.speed = 0
     state.samples.set(job.jobId, sample)
     return Number(sample.speed || 0)
   }
 
-  function renderDownloadJob (job, speed) {
-    const downloaded = Math.max(0, Number(job.downloaded || 0))
-    const fileSize = Math.max(0, Number(job.fileSize || 0))
-    const el = h('div', 'djob ' + job.status)
-    el.appendChild(h('div', 'name', job.fileName || '…'))
-    const sub = h('div', 'sub')
-    const statusText = { downloading: speed > 0 ? `● ${fmtSpeed(speed)}` : 'downloading', queued: 'queued', paused: 'paused', done: 'saved', cancelled: 'cancelled', cancelling: 'cancelling…', error: 'failed' }[job.status] || job.status
-    sub.appendChild(h('span', '', fileSize ? `${fmtSize(downloaded)} / ${fmtSize(fileSize)}` : fmtSize(downloaded)))
-    sub.appendChild(h('span', 'status-tag', statusText))
-    el.appendChild(sub)
-    const bar = h('div', 'bar')
-    const fill = h('div', '')
-    fill.style.width = `${fileSize ? Math.min(100, downloaded / fileSize * 100) : 0}%`
-    bar.appendChild(fill)
-    el.appendChild(bar)
-    if (job.status === 'downloading' && speed > 0 && fileSize > downloaded) el.appendChild(h('div', 'sub', `ETA ${fmtEta((fileSize - downloaded) / speed)}`))
-    else el.appendChild(h('div', 'sub', ''))
-    el.appendChild(h('div', 'error-text', job.error || ''))
+  function setText (node, value) {
+    if (node && node.textContent !== value) node.textContent = value
+  }
+
+  /* The action set depends only on the status (and, for done, whether there is a
+   * path), so the buttons are rebuilt only when that signature changes rather
+   * than on every paint. */
+  function actionsSignature (job) {
+    return `${job.status}|${job.destPath ? 1 : 0}`
+  }
+
+  function buildActions (job) {
     const actions = h('div', 'actions')
     if (job.status === 'downloading' || job.status === 'queued') {
       const pause = h('button', 'ghost small', 'Pause')
@@ -550,7 +559,68 @@
       remove.onclick = () => { state.downloads.delete(job.jobId); state.samples.delete(job.jobId); scheduleDownloads(true); request('remove-download', { jobId: job.jobId }).catch(() => {}) }
       actions.appendChild(remove)
     }
-    el.appendChild(actions)
+    return actions
+  }
+
+  /* Patches an existing row in place, or builds one if there is none.
+   *
+   * Rows used to be rebuilt from scratch on every paint and the whole list swapped
+   * with replaceChildren. #download-list is itself the scroll container, so
+   * emptying it collapsed scrollHeight and the browser clamped scrollTop back to
+   * 0 about ten times a second: scrolling the list while anything was downloading
+   * was impossible, and the buttons under the cursor were destroyed mid-hover. */
+  function renderDownloadJob (job, speed, existing) {
+    const downloaded = Math.max(0, Number(job.downloaded || 0))
+    const fileSize = Math.max(0, Number(job.fileSize || 0))
+    let el = existing
+    if (!el) {
+      el = h('div', 'djob ' + job.status)
+      el.dataset.jobId = job.jobId
+      el.appendChild(h('div', 'name', ''))
+      const sub = h('div', 'sub')
+      sub.appendChild(h('span', '', ''))
+      sub.appendChild(h('span', 'status-tag', ''))
+      el.appendChild(sub)
+      const bar = h('div', 'bar')
+      bar.appendChild(h('div', ''))
+      el.appendChild(bar)
+      el.appendChild(h('div', 'sub', ''))
+      el.appendChild(h('div', 'error-text', ''))
+      el.appendChild(buildActions(job))
+      el.dataset.actions = actionsSignature(job)
+    }
+
+    const className = 'djob ' + job.status
+    if (el.className !== className) el.className = className
+
+    const nameEl = el.children[0]
+    const subEl = el.children[1]
+    const barEl = el.children[2]
+    const etaEl = el.children[3]
+    const errorEl = el.children[4]
+
+    setText(nameEl, job.fileName || '\u2026')
+    const statusText = { downloading: speed > 0 ? `● ${fmtSpeed(speed)}` : 'downloading', queued: 'queued', paused: 'paused', done: 'saved', cancelled: 'cancelled', cancelling: 'cancelling…', error: 'failed' }[job.status] || job.status
+    setText(subEl.children[0], fileSize ? `${fmtSize(downloaded)} / ${fmtSize(fileSize)}` : fmtSize(downloaded))
+    setText(subEl.children[1], statusText)
+
+    const fill = barEl.firstElementChild
+    const width = `${fileSize ? Math.min(100, downloaded / fileSize * 100) : 0}%`
+    if (fill && fill.style.width !== width) fill.style.width = width
+
+    // speed is now snapped to a hard zero when the transfer has stopped, so this
+    // no longer publishes an ETA derived from a decaying denormal.
+    const eta = job.status === 'downloading' && speed > 0 && fileSize > downloaded
+      ? fmtEta((fileSize - downloaded) / speed)
+      : ''
+    setText(etaEl, eta ? `ETA ${eta}` : '')
+    setText(errorEl, job.error || '')
+
+    const signature = actionsSignature(job)
+    if (el.dataset.actions !== signature) {
+      el.dataset.actions = signature
+      el.replaceChild(buildActions(job), el.children[5])
+    }
     return el
   }
 
@@ -594,8 +664,29 @@
       const rank = status => ({ downloading: 0, cancelling: 1, paused: 2, queued: 3, error: 4, done: 5, cancelled: 6 })[status] ?? 7
       return rank(a.job.status) - rank(b.job.status)
     })
-    const fragment = document.createDocumentFragment()
-    for (const row of display.slice(0, DOWNLOAD_LIST_LIMIT)) fragment.appendChild(renderDownloadJob(row.job, row.speed))
+    /* Keyed, in-place reconciliation. Rows are reused by job id, patched, then
+     * moved only when they are genuinely out of order, and leftovers are removed.
+     * Nothing clears the container, so the scroll position survives. */
+    const existing = new Map()
+    for (const node of list.children) {
+      if (node.dataset && node.dataset.jobId) existing.set(node.dataset.jobId, node)
+    }
+    const wanted = display.slice(0, DOWNLOAD_LIST_LIMIT)
+    const ordered = []
+    for (const row of wanted) {
+      const node = renderDownloadJob(row.job, row.speed, existing.get(row.job.jobId))
+      existing.delete(row.job.jobId)
+      ordered.push(node)
+    }
+    // Drop rows that are no longer displayed, plus the previous overflow note.
+    for (const node of existing.values()) node.remove()
+    const staleNote = list.querySelector('.tele-ui-download-list-note')
+    if (staleNote) staleNote.remove()
+    // Minimal moves: only touch the DOM where the order actually differs.
+    for (let index = 0; index < ordered.length; index++) {
+      const node = ordered[index]
+      if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null)
+    }
     /* Counters come from the server aggregate over the FULL queue. The loop
      * above only saw state.downloads, which holds the jobs this browser has
      * been told about — with concurrency 8 that is about 8 rows even when the
@@ -612,8 +703,9 @@
       queued = Number(queue.queued || 0)
       active = Number(queue.downloading || 0)
     }
-    if (total > display.length) fragment.appendChild(h('div', 'tele-ui-download-list-note', `Showing ${Math.min(display.length, DOWNLOAD_LIST_LIMIT).toLocaleString()} of ${total.toLocaleString()} jobs. Controls and stats apply to the whole queue.`))
-    list.replaceChildren(fragment)
+    if (total > ordered.length) {
+      list.appendChild(h('div', 'tele-ui-download-list-note', `Showing ${ordered.length.toLocaleString()} of ${total.toLocaleString()} jobs. Controls and stats apply to the whole queue.`))
+    }
     const pct = expectedBytes > 0 ? Math.min(100, downloadedBytes / expectedBytes * 100) : 0
     const eta = totalSpeed > 0 && expectedBytes > downloadedBytes ? fmtEta((expectedBytes - downloadedBytes) / totalSpeed) : ''
     const parts = []
@@ -629,7 +721,12 @@
     stats.textContent = parts.join(' · ')
     updateSummary({ speed: totalSpeed > 0 ? fmtSpeed(totalSpeed) : '0 B/s', current: active.toLocaleString(), remaining: remaining.toLocaleString(), total: total.toLocaleString() })
   }
-  renderDownloads = renderDownloadsNow
+  /* The global entry point is THROTTLED.
+   *
+   * app.js handles the 200ms `download-stats` broadcast by calling renderDownloads()
+   * directly, which bypassed the 220ms coalescer entirely and, together with the
+   * per-job updates, drove roughly ten full repaints a second. */
+  renderDownloads = function teleUiRenderDownloads () { scheduleDownloads(false) }
 
   /* Bulk operations are ONE server-wide request each.
    *
