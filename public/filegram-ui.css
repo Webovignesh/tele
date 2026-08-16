@@ -90,10 +90,14 @@
   --fg-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --fg-duration-fast: 120ms;
 
-  /* The concurrency slider's filled track is written inline on the element as a
-     complete --fg-track-bg gradient by filegram-shell.js. Chromium will not
-     evaluate a gradient on ::-webkit-slider-runnable-track when it is assembled
-     from custom properties, so the whole value has to arrive pre-built. */
+  /* Concurrency slider fill. filegram-shell.js publishes --fg-range-ratio (a
+     unitless 0..1) on the input itself; the track pseudo-element inherits it.
+     --fg-range-stop is the x of the thumb CENTRE, which is NOT a plain percentage
+     of the track: the centre only travels between half a thumb from each end, so
+     a percentage stop runs ahead of the head and paints blue past it. */
+  --fg-range-ratio: 0;
+  --fg-range-thumb: 14px;
+  --fg-range-stop: calc(var(--fg-range-ratio) * (100% - var(--fg-range-thumb)) + var(--fg-range-thumb) / 2);
   --fg-duration-normal: 200ms;
   --fg-duration-slow: 320ms;
 
@@ -2264,10 +2268,13 @@ li.chat-item.active {
   height: 6px;
   border-radius: 3px;
   border: none;
-  /* Chromium will not evaluate this gradient when it involves custom properties
-     that are set dynamically, even if they are declared inline on the element
-     itself. The JS writes the complete gradient as --fg-track-bg. */
-  background: var(--fg-track-bg, var(--fg-surface-3));
+  /* filegram-shell.js publishes --fg-range-ratio on the input; a pseudo-element
+     inherits custom properties from its originating element, so the stop can be
+     computed here. */
+  background: linear-gradient(
+    to right,
+    var(--fg-accent) 0 var(--fg-range-stop),
+    var(--fg-surface-3) var(--fg-range-stop) 100%);
 }
 
 #concurrency::-webkit-slider-thumb {

@@ -669,13 +669,13 @@
     const max = Number(slider.max || 64)
     const value = Number(slider.value || min)
     const span = max - min
-    const ratio = span > 0 ? (value - min) / span : 0
-    const stop = `calc(${ratio.toFixed(5)} * (100% - 14px) + 14px / 2)`
-    /* Chromium CANNOT apply background to ::-webkit-slider-runnable-track when the
-     * value involves dynamically-set custom properties, even if they are declared
-     * on the element itself. The gradient must be set inline as a --track-bg
-     * variable that the stylesheet reads. */
-    slider.style.setProperty('--fg-track-bg', `linear-gradient(to right, var(--fg-accent) 0 ${stop}, var(--fg-surface-3) ${stop} 100%)`)
+    const ratio = span > 0 ? Math.min(1, Math.max(0, (value - min) / span)) : 0
+    /* Only the ratio is published. The stylesheet turns it into the stop position,
+     * because a pseudo-element DOES inherit custom properties from its originating
+     * element. The stop has to be the thumb CENTRE, not a plain percentage of the
+     * track: the centre only travels between half a thumb from each end, so a
+     * percentage runs ahead of the head and paints blue past it. */
+    slider.style.setProperty('--fg-range-ratio', ratio.toFixed(5))
   }
 
   function installRangeFill () {
@@ -684,6 +684,27 @@
     slider.dataset.fgRangeFill = '1'
     slider.addEventListener('input', paintRangeFill)
     slider.addEventListener('change', paintRangeFill)
+
+    /* A programmatic assignment fires NO input or change event.
+     *
+     * applyStatus writes the server's concurrency straight to .value inside a
+     * promise, so the fill kept the markup default's geometry (value="16") while
+     * the thumb and the readout showed the real number - blue painted well past
+     * the head. Hooking the property means any layer that assigns .value
+     * repaints, whatever order things resolve in. */
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+    if (descriptor && descriptor.get && descriptor.set) {
+      Object.defineProperty(slider, 'value', {
+        configurable: true,
+        enumerable: descriptor.enumerable,
+        get () { return descriptor.get.call(this) },
+        set (next) { descriptor.set.call(this, next); paintRangeFill() }
+      })
+    }
+    // min/max/value can also be rewritten as attributes by another layer.
+    new MutationObserver(paintRangeFill)
+      .observe(slider, { attributes: true, attributeFilter: ['min', 'max', 'step', 'value'] })
+
     paintRangeFill()
   }
 

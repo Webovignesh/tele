@@ -1,5 +1,6 @@
 // @ts-check
 const { test, expect } = require('@playwright/test')
+const { decodePng, rightmostMatch, ACCENT } = require('./png-pixels')
 
 const APP = 'http://127.0.0.1:3000'
 
@@ -586,7 +587,7 @@ test('concurrency slider thumb is centred and the track shows the value', async 
     return {
       height: parseFloat(cs.height),
       background: cs.backgroundColor,
-      fill: cs.getPropertyValue('--fg-track-bg').trim(),
+      fill: cs.getPropertyValue('--fg-range-ratio').trim(),
       expected: ((value - min) / (max - min)).toFixed(5),
       value
     }
@@ -594,9 +595,7 @@ test('concurrency slider thumb is centred and the track shows the value', async 
   expect(slider, 'the slider must exist').not.toBeNull()
   // The box must be at least as tall as the 14px thumb or the head sits off-track.
   expect(slider.height, 'the input must be tall enough for the thumb').toBeGreaterThanOrEqual(14)
-  // The complete gradient is written inline; it must carry the current ratio.
-  expect(slider.fill, 'the track must be painted with a gradient').toContain('linear-gradient')
-  expect(slider.fill, 'the filled portion must track the value').toContain(slider.expected)
+  expect(slider.fill, 'the filled portion must track the value').toBe(slider.expected)
 
   // Moving the slider must repaint the fill.
   await page.locator('#concurrency').focus()
@@ -607,11 +606,11 @@ test('concurrency slider thumb is centred and the track shows the value', async 
     const min = Number(input.min || 1)
     const max = Number(input.max || 64)
     return {
-      fill: getComputedStyle(input).getPropertyValue('--fg-track-bg').trim(),
+      fill: getComputedStyle(input).getPropertyValue('--fg-range-ratio').trim(),
       expected: ((Number(input.value) - min) / (max - min)).toFixed(5)
     }
   })
-  expect(after.fill, 'the fill must follow the slider').toContain(after.expected)
+  expect(after.fill, 'the fill must follow the slider').toBe(after.expected)
   await page.keyboard.press('ArrowLeft')
   await page.waitForTimeout(400)
 })
@@ -940,22 +939,22 @@ test('slider fill boundary is computed at the thumb centre', async ({ page }) =>
     const min = Number(input.min || 1)
     const max = Number(input.max || 64)
     const ratio = (Number(input.value) - min) / (max - min)
-    const track = getComputedStyle(input).getPropertyValue('--fg-track-bg').trim()
+    const style = getComputedStyle(input)
     return {
-      track,
+      ratioVar: style.getPropertyValue('--fg-range-ratio').trim(),
       expected: ratio.toFixed(5),
-      // The stop expression embedded in the gradient.
-      stop: (track.match(/calc\([^)]*\([^)]*\)[^)]*\)/) || [''])[0]
+      stop: style.getPropertyValue('--fg-range-stop').trim(),
+      thumb: style.getPropertyValue('--fg-range-thumb').trim()
     }
   })
   expect(geometry, 'the slider must exist').not.toBeNull()
-  expect(geometry.track, 'the gradient must be pre-built inline').toContain('linear-gradient')
-  expect(geometry.track, 'the gradient must carry the current ratio').toContain(geometry.expected)
+  expect(geometry.ratioVar, 'the ratio must track the value').toBe(geometry.expected)
+  expect(geometry.thumb, 'the thumb width must be declared for the inset maths').toBe('14px')
   /* The stop must subtract a whole thumb width and re-centre by half of one.
-   * A plain percentage of the track runs ahead of the head, which is what painted
-   * blue past the thumb. */
-  expect(geometry.stop, `stop expression was "${geometry.stop}"`).toContain('100% - 14px')
-  expect(geometry.stop).toMatch(/14px\s*\/\s*2/)
+   * A plain percentage of the track runs ahead of the head. */
+  expect(geometry.stop).toContain('100%')
+  expect(geometry.stop, `stop expression was "${geometry.stop}"`).toMatch(/100%\s*-\s*(var\(--fg-range-thumb\)|14px)/)
+  expect(geometry.stop).toMatch(/\/\s*2/)
 
   await page.locator('#concurrency').focus()
   await page.keyboard.press('ArrowRight')
@@ -965,11 +964,54 @@ test('slider fill boundary is computed at the thumb centre', async ({ page }) =>
     const min = Number(input.min || 1)
     const max = Number(input.max || 64)
     return {
-      track: getComputedStyle(input).getPropertyValue('--fg-track-bg').trim(),
+      ratioVar: getComputedStyle(input).getPropertyValue('--fg-range-ratio').trim(),
       expected: ((Number(input.value) - min) / (max - min)).toFixed(5)
     }
   })
-  expect(moved.track).toContain(moved.expected)
+  expect(moved.ratioVar).toBe(moved.expected)
+})
+
+/* REGRESSION: a programmatic assignment fires no input or change event.
+ *
+ * applyStatus writes the server's concurrency straight to .value inside a promise,
+ * so the fill kept the markup default's geometry (value="16") while the thumb and
+ * the readout showed the real number - blue painted far past the head. The
+ * unbounded shell re-entry used to repaint constantly and hide this; once that was
+ * fixed, the stale fill became visible. */
+test('the slider fill survives a programmatic value change', async ({ page }) => {
+  if (!await boot(page)) return
+  const readRatio = () => page.evaluate(() => {
+    const input = document.querySelector('#concurrency')
+    const min = Number(input.min || 1)
+    const max = Number(input.max || 64)
+    return {
+      published: getComputedStyle(input).getPropertyValue('--fg-range-ratio').trim(),
+      expected: ((Number(input.value) - min) / (max - min)).toFixed(5),
+      value: Number(input.value)
+    }
+  })
+
+  const original = (await readRatio()).value
+  for (const value of [32, 64, 1, 8]) {
+    // Assign exactly the way applyStatus does: no event dispatched.
+    await page.evaluate(next => { document.querySelector('#concurrency').value = next }, value)
+    await page.waitForTimeout(120)
+    const state = await readRatio()
+    expect(state.value, 'the assignment must land').toBe(value)
+    expect(state.published, `fill went stale at value ${value}`).toBe(state.expected)
+  }
+
+  // An attribute rewrite by another layer must also repaint.
+  await page.evaluate(() => document.querySelector('#concurrency').setAttribute('max', '32'))
+  await page.waitForTimeout(120)
+  const afterMax = await readRatio()
+  expect(afterMax.published, 'a max change must repaint the fill').toBe(afterMax.expected)
+
+  await page.evaluate(value => {
+    const input = document.querySelector('#concurrency')
+    input.setAttribute('max', '64')
+    input.value = value
+  }, original)
   await page.keyboard.press('ArrowLeft')
   await page.waitForTimeout(400)
 })
@@ -1266,4 +1308,55 @@ test('ETA is clamped and never printed for a stalled transfer', async ({ page })
     state.samples.delete('fg-stall-test')
     renderDownloads()
   })
+})
+
+/* Pixel-level truth for the slider fill.
+ *
+ * Computed style cannot answer this: Chromium serialises the
+ * ::-webkit-slider-runnable-track background with its calc() unresolved, and the
+ * INPUT's own background-image is legitimately `none` because the stylesheet makes
+ * the input transparent. Reading the input's computed background is what made an
+ * earlier diagnosis of this bug wrong. So the rendered pixels are sampled instead.
+ */
+test('the painted fill never extends past the slider thumb', async ({ page }) => {
+  if (!await boot(page)) return
+  const slider = page.locator('#concurrency')
+  if (!await slider.count()) {
+    test.info().annotations.push({ type: 'note', description: 'slider not present; skipped' })
+    return
+  }
+
+  const original = await page.evaluate(() => Number(document.querySelector('#concurrency').value))
+  const failures = []
+
+  for (const value of [1, 8, 24, 32, 48, 64]) {
+    await page.evaluate(next => { document.querySelector('#concurrency').value = next }, value)
+    await page.waitForTimeout(150)
+
+    const geometry = await page.evaluate(() => {
+      const input = document.querySelector('#concurrency')
+      const min = Number(input.min || 1)
+      const max = Number(input.max || 64)
+      const width = input.getBoundingClientRect().width
+      const ratio = (Number(input.value) - min) / (max - min)
+      // The thumb centre only travels between half a thumb from each end.
+      return { width, thumbCentre: ratio * (width - 14) + 7 }
+    })
+
+    const png = decodePng(await slider.screenshot())
+    const row = Math.round(png.height / 2)
+    const rightmostBlue = rightmostMatch(png, row, ACCENT)
+    const thumbRight = geometry.thumbCentre + 7
+
+    // The fill stops at the thumb centre and the thumb's own accent body covers the
+    // rest, so blue may reach the thumb's right edge but never travel beyond it.
+    if (rightmostBlue > thumbRight + 4) {
+      failures.push(`value ${value}: blue reaches x=${rightmostBlue}, thumb edge is ${thumbRight.toFixed(1)} (overshoot ${(rightmostBlue - thumbRight).toFixed(1)}px)`)
+    }
+    // Sanity: the fill must actually be painted for a non-minimum value.
+    if (value > 1 && rightmostBlue < 0) failures.push(`value ${value}: no fill painted at all`)
+  }
+
+  await page.evaluate(value => { document.querySelector('#concurrency').value = value }, original)
+  expect(failures, failures.join('; ')).toEqual([])
 })
