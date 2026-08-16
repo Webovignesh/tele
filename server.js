@@ -2623,8 +2623,37 @@ if (config) {
   console.log('No API credentials found. Open the web UI to enter api_id and api_hash.')
 }
 
+/* Fail with an explanation instead of an unhandled 'error' event.
+ *
+ * The common case is starting FileGram when it is already running, which used to
+ * print a raw EADDRINUSE stack trace. The handler is attached to BOTH the http
+ * server and the WebSocket server on purpose: ws forwards the underlying server's
+ * 'listening', 'error' and 'upgrade' events onto itself, so handling it only on
+ * `server` still leaves an unhandled 'error' on `wss` and node throws anyway. */
+let listenFailureReported = false
+
+function reportListenFailure (error) {
+  if (listenFailureReported) return
+  listenFailureReported = true
+  if (error && error.code === 'EADDRINUSE') {
+    console.error(`\nFileGram cannot start: port ${PORT} is already in use.`)
+    console.error('It is most likely already running, in which case just open:')
+    console.error(`  http://127.0.0.1:${PORT}`)
+    console.error('\nTo find and stop whatever is holding the port:')
+    console.error(`  Get-NetTCPConnection -LocalPort ${PORT} -State Listen | Select-Object OwningProcess`)
+    console.error('  Stop-Process -Id <OwningProcess>')
+    console.error(`\nOr start on a different port:  $env:PORT=3010; npm start\n`)
+  } else {
+    console.error('\nFileGram server error:', (error && error.message) || error, '\n')
+  }
+  process.exit(1)
+}
+
+server.on('error', reportListenFailure)
+wss.on('error', reportListenFailure)
+
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Tele running at http://127.0.0.1:${PORT}`)
+  console.log(`FileGram running at http://127.0.0.1:${PORT}`)
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
