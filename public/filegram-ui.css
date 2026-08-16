@@ -3971,6 +3971,19 @@ button.secondary {
 }
 
 /* ---------- Duplicate check ----------
+   Explains the one skip bucket whose label cannot carry its own meaning. */
+.tele-dedupe-legend {
+  margin-top: var(--fg-space-2);
+  padding: var(--fg-space-2) var(--fg-space-3);
+  border-left: 2px solid var(--fg-border-accent);
+  background: var(--fg-surface-2);
+  border-radius: var(--fg-radius-sm);
+  color: var(--fg-text-secondary);
+  font-size: var(--fg-text-sm);
+  line-height: 1.5;
+}
+
+/* ---------- Duplicate check tiles ----------
    The tile count is not fixed: "Already downloaded" only makes sense once the
    selection is accounted for in full, so the grid adapts instead of being pinned
    to four columns by the earlier layers. */

@@ -789,16 +789,24 @@
 
     const stats = document.createElement('div')
     stats.className = 'tele-dedupe-stats'
-    /* Every selected file lands in exactly one bucket, so these add up to
-     * Selected. That invariant is what makes the numbers checkable:
-     * selected = already there + already downloaded + repeated + will download. */
+    /* Every selected file lands in exactly one bucket, so these add up to Selected.
+     * That invariant is what makes the numbers checkable:
+     * selected = on disk + marked done + repeated + will download.
+     *
+     * The labels name the EVIDENCE, not the outcome. "Already there" next to
+     * "Already downloaded" read as two words for the same thing, because both only
+     * said the file would be skipped and neither said how that was established. */
     const tiles = [
       ['Selected', selectedCount],
-      ['Already there', existingCount],
-      ['Already downloaded', completedCount],
-      ['Repeated selection', repeatedCount],
-      ['Will download', uniqueCount]
+      // A matching file is physically in the destination folder.
+      ['On disk', existingCount]
     ]
+    // Exceptional, so only shown when it applies: this app's own completed list
+    // says the file was fetched, but nothing matching it is in the folder now.
+    if (completedCount) tiles.push(['Marked done', completedCount])
+    // The same file chosen twice in one selection.
+    if (repeatedCount) tiles.push(['Repeated in selection', repeatedCount])
+    tiles.push(['Will download', uniqueCount])
     for (const [label, value] of tiles) {
       const card = document.createElement('div')
       card.className = 'tele-dedupe-stat'
@@ -810,6 +818,16 @@
       stats.appendChild(card)
     }
     body.appendChild(stats)
+
+    /* "Marked done" is the one bucket whose meaning is not self-evident, so it is
+     * spelled out rather than left to the label. Its own element, because the
+     * validation line below is rewritten by a later layer. */
+    if (completedCount) {
+      const legend = document.createElement('div')
+      legend.className = 'tele-dedupe-legend'
+      legend.textContent = `Marked done: ${completedCount.toLocaleString()} of these were downloaded before, but no matching file is in this folder now. They are skipped; use Unmark to fetch them again.`
+      body.appendChild(legend)
+    }
 
     const validation = document.createElement('div')
     validation.className = 'tele-dedupe-validation'

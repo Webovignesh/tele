@@ -129,7 +129,13 @@ const selection = [
       'the completed key must use the item\'s own chat, not the active one')
 
     const final = fs.readFileSync(path.join(__dirname, '..', 'public', 'daily-driver-final.js'), 'utf8')
-    assert.match(final, /\['Already downloaded', completedCount\]/, 'the modal must show the already-downloaded bucket')
+    /* Labels must name the evidence. "Already there" and "Already downloaded" sat
+     * side by side and read as the same thing. */
+    assert.match(final, /\['On disk', existingCount\]/, 'the on-disk bucket must say it means on disk')
+    assert.match(final, /\['Marked done', completedCount\]/, 'the completed-marker bucket must be distinguishable')
+    assert.doesNotMatch(final, /'Already there'/, 'the ambiguous label must be gone')
+    assert.doesNotMatch(final, /'Already downloaded'/, 'the ambiguous label must be gone')
+    assert.match(final, /tele-dedupe-legend/, 'the marked-done bucket must be explained in words')
 
     console.log('dedupe checks passed')
   } finally {
