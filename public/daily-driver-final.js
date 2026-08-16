@@ -771,6 +771,9 @@
     const uniqueCount = Number(report.uniqueCount || 0)
     const existingCount = duplicates.filter(row => row.reason === 'existing').length
     const repeatedCount = Math.max(0, duplicateCount - existingCount)
+    // Selected but already finished earlier in this browser, so not on disk under a
+    // matching name yet still not worth fetching again.
+    const completedCount = Number(report.completedCount || 0)
 
     modal.querySelector('#tele-dedupe-subtitle').textContent = duplicateCount
       ? `${duplicateCount.toLocaleString()} duplicate${duplicateCount === 1 ? '' : 's'} found · ${uniqueCount.toLocaleString()} ready to download`
@@ -786,9 +789,17 @@
 
     const stats = document.createElement('div')
     stats.className = 'tele-dedupe-stats'
-    for (const [label, value] of [
-      ['Selected', selectedCount], ['Already there', existingCount], ['Repeated selection', repeatedCount], ['Will download', uniqueCount]
-    ]) {
+    /* Every selected file lands in exactly one bucket, so these add up to
+     * Selected. That invariant is what makes the numbers checkable:
+     * selected = already there + already downloaded + repeated + will download. */
+    const tiles = [
+      ['Selected', selectedCount],
+      ['Already there', existingCount],
+      ['Already downloaded', completedCount],
+      ['Repeated selection', repeatedCount],
+      ['Will download', uniqueCount]
+    ]
+    for (const [label, value] of tiles) {
       const card = document.createElement('div')
       card.className = 'tele-dedupe-stat'
       const name = document.createElement('span')

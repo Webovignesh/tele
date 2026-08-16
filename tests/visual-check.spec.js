@@ -1513,3 +1513,159 @@ test('the selection dock never covers the page controls', async ({ page }) => {
 
   await page.evaluate(() => document.querySelector('#clear-selection')?.click())
 })
+
+/* REGRESSION: the download list re-sorted its visible window by status on every
+ * paint. During a real batch, one file finishing and the next starting happens
+ * several times a second, and each of those advances moved 101 of the 140 visible
+ * rows, changed the top row, and let the browser's scroll anchoring drag scrollTop
+ * from 600 to 1636 over twelve advances. Frames stayed at 60fps throughout, which
+ * is why it read as "sluggish scrolling" rather than measuring slow. */
+test('the download list holds its position while the queue advances', async ({ page }) => {
+  if (!await boot(page)) return
+
+  const seed = await page.evaluate(async () => {
+    const total = 4000
+    state.downloads.clear()
+    state.samples.clear()
+    const jobs = []
+    for (let index = 0; index < total; index++) {
+      let status
+      if (index < 15) status = 'downloading'
+      else if (index < 40) status = 'paused'
+      else if (index % 7 === 0) status = 'done'
+      else status = 'queued'
+      const job = {
+        jobId: `stable-${index}`,
+        chatId: -1,
+        chatTitle: 'Bench',
+        messageId: index,
+        fileId: 800000 + index,
+        fileName: `photo_${index}.jpg`,
+        fileSize: 250000,
+        downloaded: status === 'done' ? 250000 : 60000,
+        status,
+        error: null,
+        destPath: status === 'done' ? '/Bench/p.jpg' : null
+      }
+      state.downloads.set(job.jobId, job)
+      jobs.push(job)
+    }
+    window.__benchJobs = jobs
+    state.queueStats = {
+      total, queued: total - 55, downloading: 15, paused: 25, done: 15, error: 0, cancelled: 0,
+      remaining: total - 15, speed: 1500000, downloadedBytes: 1e8, expectedBytes: 1.5e9, concurrency: 15
+    }
+    renderDownloads()
+    await new Promise(resolve => setTimeout(resolve, 500))
+    const list = document.querySelector('#download-list')
+    return { rows: list ? list.querySelectorAll('.djob').length : 0, scrollable: list ? list.scrollHeight > list.clientHeight : false }
+  })
+  expect(seed.rows, 'the synthetic queue must render rows').toBeGreaterThan(20)
+
+  const result = await page.evaluate(async () => {
+    const list = document.querySelector('#download-list')
+    const order = () => [...list.querySelectorAll('.djob')].map(node => node.dataset.jobId)
+    const jobs = window.__benchJobs
+
+    list.scrollTop = Math.min(600, Math.max(0, list.scrollHeight - list.clientHeight - 10))
+    const scrollBefore = list.scrollTop
+    let previous = order()
+    const firstBefore = previous[0]
+    let moved = 0
+    let topChanges = 0
+
+    for (let pass = 0; pass < 10; pass++) {
+      // The normal rhythm of a batch: one active job completes, one queued starts.
+      const active = jobs.filter(job => job.status === 'downloading')
+      if (active.length) {
+        active[0].status = 'done'
+        active[0].downloaded = active[0].fileSize
+        handleEvent({ name: 'download-update', job: { ...active[0] } })
+      }
+      const next = jobs.find(job => job.status === 'queued')
+      if (next) {
+        next.status = 'downloading'
+        handleEvent({ name: 'download-update', job: { ...next } })
+      }
+      await new Promise(resolve => setTimeout(resolve, 300))
+
+      const current = order()
+      for (let index = 0; index < Math.min(current.length, previous.length); index++) {
+        if (current[index] !== previous[index]) moved++
+      }
+      if (current[0] !== previous[0]) topChanges++
+      previous = current
+    }
+
+    return {
+      moved,
+      topChanges,
+      firstBefore,
+      firstAfter: previous[0],
+      scrollBefore,
+      scrollAfter: list.scrollTop,
+      rows: previous.length
+    }
+  })
+
+  // Rows may be substituted in place, but the window must not reshuffle.
+  expect(result.moved, `${result.moved} row positions changed across 10 queue advances`).toBeLessThanOrEqual(12)
+  expect(result.topChanges, 'the top row must not keep changing identity').toBeLessThanOrEqual(1)
+  expect(Math.abs(result.scrollAfter - result.scrollBefore),
+    `scroll drifted from ${result.scrollBefore} to ${result.scrollAfter} without user input`).toBeLessThanOrEqual(4)
+
+  await page.evaluate(() => {
+    delete window.__benchJobs
+    state.downloads.clear()
+    state.samples.clear()
+    state.queueStats = null
+    renderDownloads()
+  })
+})
+
+/* The panel's totals must come from the server aggregate, not from the projection
+ * this browser happens to hold: with a 22,000-job queue the browser only ever sees
+ * about one concurrency window plus finished jobs. */
+test('download totals come from the server aggregate', async ({ page }) => {
+  if (!await boot(page)) return
+  const out = await page.evaluate(async () => {
+    state.downloads.clear()
+    state.samples.clear()
+    for (let index = 0; index < 200; index++) {
+      state.downloads.set(`agg-${index}`, {
+        jobId: `agg-${index}`, chatId: -1, chatTitle: 'S', messageId: index, fileId: index,
+        fileName: `f_${index}.jpg`, fileSize: 1000, downloaded: 0, status: 'queued', error: null, destPath: null
+      })
+    }
+    handleEvent({
+      name: 'download-stats',
+      stats: {
+        total: 22479, queued: 22000, downloading: 10, paused: 5, done: 452, error: 7, cancelled: 5,
+        remaining: 22015, speed: 0, downloadedBytes: 5e8, expectedBytes: 1e9, concurrency: 15
+      }
+    })
+    await new Promise(resolve => setTimeout(resolve, 600))
+    const tile = name => {
+      const node = document.querySelector(`[data-stat="${name}"]`)
+      return node ? node.textContent.trim() : null
+    }
+    return {
+      line: (document.querySelector('#download-stats') || {}).textContent || '',
+      total: tile('total'),
+      remaining: tile('remaining'),
+      current: tile('current')
+    }
+  })
+  expect(out.total, 'Total must be the whole queue').toBe('22,479')
+  expect(out.remaining).toBe('22,015')
+  expect(out.current).toBe('10')
+  expect(out.line, 'the summary must quote the aggregate').toContain('452/22479')
+  expect(out.line, 'percentage must use the aggregate byte totals').toContain('50%')
+
+  await page.evaluate(() => {
+    state.downloads.clear()
+    state.samples.clear()
+    state.queueStats = null
+    renderDownloads()
+  })
+})

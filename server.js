@@ -145,6 +145,10 @@ class DownloadManager {
     this.jobs = new Map()
     this.activeCount = 0
     this.lastEmit = new Map()
+    /* fileId -> the path a completed job delivered it to. One TDLib file can back
+     * several queued messages, and finalize() moves it out of TDLib's cache, so a
+     * sibling needs to know where the content ended up. */
+    this.deliveredByFile = new Map()
     // Set while a bulk operation walks the queue. tryRun() is a no-op during
     // that window so cancelling job 1 of 20,000 cannot start job 9 only for the
     // same pass to cancel it a moment later (an O(n^2) scan storm plus a burst
@@ -380,10 +384,18 @@ class DownloadManager {
         continue
       }
 
-      /* Neither active nor complete: TDLib stopped this download without
-       * finishing it. This case used to be a complete no-op, leaving the job
-       * parked in 'downloading' holding its slot for the life of the process. */
-      if (job.status === 'downloading' && job.active) this.requeue(job, 'download stopped')
+      /* Neither active nor complete.
+       *
+       * This is NOT a failure and must not be treated as one. TDLib accepts every
+       * downloadFile request and then schedules the transfers itself, running far
+       * fewer in parallel than we ask for, so "not active, no bytes yet" is the
+       * normal resting state of most of a large batch.
+       *
+       * Requeueing here cancelled healthy downloads, discarded their partial data,
+       * sent them to the back of TDLib's queue and eventually failed them outright.
+       * That is what made large batches stop and later start again on their own.
+       * sweep() re-asserts the request if a job really does go quiet for too long. */
+      job.speed = 0
     }
   }
 
@@ -395,20 +407,47 @@ class DownloadManager {
     if (job.finalizing || TERMINAL.includes(job.status)) return
     job.finalizing = true
     try {
-      const chatFolder = path.join(downloadsDir, sanitize(job.chatTitle))
-      fs.mkdirSync(chatFolder, { recursive: true })
-      const dest = uniquePath(chatFolder, sanitize(job.fileName))
-      await fs.promises.rename(srcPath, dest).catch(async () => {
-        await fs.promises.copyFile(srcPath, dest)
-        await fs.promises.unlink(srcPath).catch(() => {})
-      })
-      job.destPath = dest
-      job.status = 'done'
-      job.speed = 0
+      /* One TDLib file can back more than one queued message - the same photo
+       * reposted, or the same item indexed twice. Whichever job finalizes first
+       * MOVES the file out of TDLib's cache, so a sibling arriving afterwards has
+       * nothing left to move and used to fail with
+       * "ENOENT ... copyfile .td_files\photos\... -> ... (1).jpg".
+       *
+       * That is not a failure: the bytes are already on disk. The sibling adopts
+       * the delivered path instead of writing a second copy, which also stops the
+       * duplicate checker from later seeing phantom "(1)" files. */
+      const delivered = this.deliveredByFile.get(job.fileId)
+      if (delivered && fs.existsSync(delivered) && !fs.existsSync(srcPath)) {
+        job.destPath = delivered
+        job.status = 'done'
+        job.speed = 0
+      } else {
+        const chatFolder = path.join(downloadsDir, sanitize(job.chatTitle))
+        fs.mkdirSync(chatFolder, { recursive: true })
+        const dest = uniquePath(chatFolder, sanitize(job.fileName))
+        await fs.promises.rename(srcPath, dest).catch(async () => {
+          await fs.promises.copyFile(srcPath, dest)
+          await fs.promises.unlink(srcPath).catch(() => {})
+        })
+        job.destPath = dest
+        job.status = 'done'
+        job.speed = 0
+        this.deliveredByFile.set(job.fileId, dest)
+      }
     } catch (e) {
-      job.status = 'error'
-      job.error = String(e.message || e)
-      job.speed = 0
+      /* Last chance: a sibling may have delivered this same file while we were
+       * awaiting, in which case the content is on disk and this is not an error. */
+      const delivered = this.deliveredByFile.get(job.fileId)
+      if (delivered && fs.existsSync(delivered)) {
+        job.destPath = delivered
+        job.status = 'done'
+        job.error = null
+        job.speed = 0
+      } else {
+        job.status = 'error'
+        job.error = String(e.message || e)
+        job.speed = 0
+      }
     } finally {
       job.finalizing = false
     }
@@ -444,32 +483,17 @@ class DownloadManager {
     return drifted
   }
 
-  /* Returns a started-but-stuck job to the queue and frees its slot. */
-  requeue (job, reason) {
-    if (TERMINAL.includes(job.status)) return false
-    if ((job.attempts || 0) >= MAX_ATTEMPTS) {
-      job.status = 'error'
-      job.error = `${reason} (gave up after ${job.attempts} attempts)`
-      job.speed = 0
-      this.finishJob(job)
-      this.emitJob(job)
-      return false
-    }
-    // Invalidate the in-flight runner so it cannot finalize or release a slot it
-    // no longer owns, then reset TDLib's side before retrying.
-    job.run = (job.run || 0) + 1
-    job.status = 'queued'
-    job.speed = 0
-    job.lastProgressAt = Date.now()
-    if (client && ready) {
-      client.invoke({ _: 'cancelDownloadFile', file_id: job.fileId, only_if_pending: false }).catch(() => {})
-    }
-    this.finishJob(job)
-    this.emitJob(job)
-    return true
-  }
-
-  /* Watchdog pass. */
+  /* Watchdog pass.
+   *
+   * A job that has not received a byte for a while is NOT assumed dead, because
+   * with a large batch that is the normal condition of everything TDLib has not
+   * scheduled yet. Recovery is to RE-ASSERT the request, never to cancel it:
+   * downloadFile is idempotent, so for a file TDLib is already working on it only
+   * refreshes the priority, and for one TDLib has genuinely forgotten it starts it
+   * again. Nothing is discarded either way.
+   *
+   * Only jobs holding a slot are examined, so this is bounded by CONCURRENCY
+   * however large the queue is. */
   sweep () {
     if (this.bulk || !client || !ready) return
     const now = Date.now()
@@ -478,20 +502,68 @@ class DownloadManager {
       if (job.status !== 'downloading' || !job.active) continue
       if (now - (job.lastProgressAt || now) < STALL_AFTER_MS) continue
       job.speed = 0
-      // Ask TDLib directly before giving up: the completion update may simply
-      // have been missed rather than never sent.
-      client.invoke({ _: 'getFile', file_id: job.fileId }).then(info => {
-        const local = info && info.local
-        if (local && local.is_downloading_completed && local.path) {
-          job.downloaded = job.fileSize || local.downloaded_size || 0
-          return this.finalize(job, local.path)
-        }
-        if (job.status === 'downloading' && job.active) this.requeue(job, 'stalled with no progress')
-      }).catch(() => {
-        if (job.status === 'downloading' && job.active) this.requeue(job, 'stalled with no progress')
-      })
+      Promise.resolve(this.reassert(job)).catch(() => {})
     }
     this.tryRun()
+  }
+
+  /* Re-states a download request for a job that has gone quiet. */
+  async reassert (job) {
+    const run = job.run
+    const stale = () => job.run !== run || TERMINAL.includes(job.status) ||
+      job.status === 'paused' || job.status === 'cancelled'
+    try {
+      const info = await client.invoke({ _: 'getFile', file_id: job.fileId })
+      if (stale()) return
+      const local = (info && info.local) || {}
+
+      // The completion update may simply have been missed rather than never sent.
+      if (local.is_downloading_completed && local.path) {
+        job.downloaded = job.fileSize || local.downloaded_size || 0
+        return await this.finalize(job, local.path)
+      }
+
+      // A file Telegram will not serve any more is genuinely terminal.
+      if (info && info.can_be_downloaded === false) {
+        job.status = 'error'
+        job.error = 'Telegram will no longer serve this file'
+        job.speed = 0
+        this.finishJob(job)
+        this.emitJob(job)
+        return
+      }
+
+      /* Still pending or transferring. Re-assert without cancelling and give it a
+       * fresh window. Deliberately does NOT count an attempt: waiting for TDLib is
+       * not a failed try, and counting it here is what previously turned slow
+       * files into errors. */
+      job.idleChecks = (job.idleChecks || 0) + 1
+      job.lastProgressAt = Date.now()
+      if (local.downloaded_size) job.downloaded = Math.max(job.downloaded || 0, local.downloaded_size)
+      await client.invoke({
+        _: 'downloadFile',
+        file_id: job.fileId,
+        priority: 32,
+        offset: 0,
+        limit: 0,
+        synchronous: false
+      }).catch(() => {})
+      this.emitJob(job)
+    } catch (e) {
+      if (stale()) return
+      /* Only a repeatedly unreadable file state is treated as fatal. A single
+       * failed getFile is usually transient. */
+      job.stateFailures = (job.stateFailures || 0) + 1
+      if (job.stateFailures >= MAX_ATTEMPTS) {
+        job.status = 'error'
+        job.error = `cannot read file state: ${String(e.message || e)}`
+        job.speed = 0
+        this.finishJob(job)
+        this.emitJob(job)
+      } else {
+        job.lastProgressAt = Date.now()
+      }
+    }
   }
 
   /* Immediate recovery, used by Resume all so the button is never a no-op. */
@@ -509,7 +581,11 @@ class DownloadManager {
         recovered++
         this.emitJob(job)
       } else if (now - (job.lastProgressAt || now) >= STALL_AFTER_MS) {
-        if (this.requeue(job, 'stalled with no progress')) recovered++
+        /* Re-assert rather than cancel. A quiet job is usually just waiting for
+         * TDLib to schedule it, and cancelling would throw away whatever it has
+         * already fetched. */
+        Promise.resolve(this.reassert(job)).catch(() => {})
+        recovered++
       }
     }
     this.tryRun()
@@ -605,6 +681,7 @@ class DownloadManager {
       const removed = this.jobs.size
       this.jobs.clear()
       this.lastEmit.clear()
+      this.deliveredByFile.clear()
       this.activeCount = 0
       return { cancelled, removed }
     })

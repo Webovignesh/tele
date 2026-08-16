@@ -3970,6 +3970,14 @@ button.secondary {
   grid-row: 1 !important;
 }
 
+/* ---------- Duplicate check ----------
+   The tile count is not fixed: "Already downloaded" only makes sense once the
+   selection is accounted for in full, so the grid adapts instead of being pinned
+   to four columns by the earlier layers. */
+.tele-dedupe-stats {
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr)) !important;
+}
+
 /* ---------- Selection dock clearance ----------
    The dock is absolutely positioned against .chat, so it painted on top of the
    pager whenever anything was selected. The nav was not merely obscured but

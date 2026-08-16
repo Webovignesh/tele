@@ -384,18 +384,39 @@ function teleP1RenderDedupeReport (report) {
   })
 }
 
+/* Identity of a selected item. Uses the item's OWN chat, not the active one: the
+ * old `${state.activeChatId}:${messageId}` key was wrong for any selection that
+ * spans more than one chat. */
+function teleP1ItemUid (item) {
+  const chatId = item && item.chatId != null ? item.chatId : state.activeChatId
+  return `${chatId}:${item && item.messageId}`
+}
+
 startDownloads = async function teleP1StartDownloadsWithDedupe (items) {
-  const candidates = (items || []).filter(item => !isCompleted(`${state.activeChatId}:${item.messageId}`))
-  if (!candidates.length) {
-    if (items && items.length) toast('All selected files are already completed')
-    return
+  const selected = (items || []).filter(Boolean)
+  if (!selected.length) return
+
+  /* The WHOLE selection is scanned.
+   *
+   * Locally-completed items used to be filtered out here, before the scan. That
+   * made the modal's Selected tile disagree with the selection dock, because the
+   * scanner reports back the size of the list it was given - 9,521 against a real
+   * selection of 11,101. Worse, those same items are usually the ones already
+   * sitting on disk, so excluding them understated "Already there" by exactly the
+   * same amount (4,738 instead of about 6,278). They are now classified and
+   * reported rather than silently dropped. */
+  const completed = new Set()
+  for (const item of selected) {
+    const uid = teleP1ItemUid(item)
+    if (isCompleted(uid)) completed.add(uid)
   }
 
-  teleP1ShowDedupeScanning(candidates.length)
+  teleP1ShowDedupeScanning(selected.length)
   let report
   try {
     report = await request('download-dedupe-preview', {
-      items: candidates.map(item => ({
+      items: selected.map(item => ({
+        uid: teleP1ItemUid(item),
         messageId: item.messageId,
         fileName: item.name,
         fileSize: item.fileSize
@@ -408,11 +429,28 @@ startDownloads = async function teleP1StartDownloadsWithDedupe (items) {
     return
   }
 
-  const proceed = await teleP1RenderDedupeReport(report)
+  /* Correlate on the uid the scanner echoes back, falling back to messageId for a
+   * scanner build that predates it. */
+  const uniqueUids = Array.isArray(report.uniqueUids) && report.uniqueUids.length
+    ? new Set(report.uniqueUids.map(String))
+    : null
+  const uniqueMessageIds = new Set((report.uniqueMessageIds || []).map(String))
+  const notOnDisk = selected.filter(item => uniqueUids
+    ? uniqueUids.has(teleP1ItemUid(item))
+    : uniqueMessageIds.has(String(item.messageId)))
+
+  // Anything already finished in this browser is skipped, but counted so the modal
+  // can account for every selected file.
+  const todo = notOnDisk.filter(item => !completed.has(teleP1ItemUid(item)))
+
+  const proceed = await teleP1RenderDedupeReport({
+    ...report,
+    selectedCount: selected.length,
+    completedCount: notOnDisk.length - todo.length,
+    uniqueCount: todo.length
+  })
   if (!proceed) return
 
-  const allowed = new Set((report.uniqueMessageIds || []).map(String))
-  const todo = candidates.filter(item => allowed.has(String(item.messageId)))
   if (!todo.length) {
     toast('Everything selected is already present in the download folder')
     return

@@ -40,13 +40,15 @@ function extractQueueSource (text) {
   return text.slice(constStart, index + 1)
 }
 
-function makeHarness (concurrency = 8) {
+function makeHarness (concurrency = 8, overrides = {}) {
   const invocations = []
   const broadcasts = []
 
   const client = {
     invoke (payload) {
       invocations.push(payload)
+      // Tests that exercise the watchdog need to control what TDLib reports.
+      if (overrides[payload._]) return overrides[payload._](payload)
       if (payload._ === 'getFile') return Promise.resolve({ size: 1000 })
       if (payload._ === 'downloadFile') {
         // Resolves without completing, so nothing auto-finalizes and the test
@@ -57,13 +59,29 @@ function makeHarness (concurrency = 8) {
     }
   }
 
+  /* A real (if tiny) file model. The previous stub answered existsSync with a flat
+   * false and let every rename succeed, which made it impossible to express the
+   * case that matters: one TDLib file backing two jobs, where the first delivery
+   * MOVES the cache file and the second finds it gone. */
+  const disk = new Set()
+  const missing = (op, target) =>
+    Object.assign(new Error(`ENOENT: no such file or directory, ${op} '${target}'`), { code: 'ENOENT' })
   const fakeFs = {
-    existsSync: () => false,
+    existsSync: target => disk.has(String(target)),
     mkdirSync: () => {},
     promises: {
-      rename: () => Promise.resolve(),
-      copyFile: () => Promise.resolve(),
-      unlink: () => Promise.resolve()
+      rename: (from, to) => {
+        if (!disk.has(String(from))) return Promise.reject(missing('rename', from))
+        disk.delete(String(from))
+        disk.add(String(to))
+        return Promise.resolve()
+      },
+      copyFile: (from, to) => {
+        if (!disk.has(String(from))) return Promise.reject(missing('copyfile', from))
+        disk.add(String(to))
+        return Promise.resolve()
+      },
+      unlink: target => { disk.delete(String(target)); return Promise.resolve() }
     }
   }
 
@@ -96,7 +114,15 @@ function makeHarness (concurrency = 8) {
     concurrency
   )
 
-  return { ...api, invocations, broadcasts, dm: new api.DownloadManager() }
+  return {
+    ...api,
+    invocations,
+    broadcasts,
+    disk,
+    // Pretends TDLib has finished writing a file into its cache.
+    seed: target => { disk.add(String(target)); return target },
+    dm: new api.DownloadManager()
+  }
 }
 
 function enqueue (dm, count, offset = 0) {
@@ -196,7 +222,7 @@ const stoppedUpdate = job => ({
 /* Test 3: enqueue 100, complete 10 -> 10 done / 90 remaining / 100    */
 /* ------------------------------------------------------------------ */
 async function runCompletionTest () {
-  const { dm } = makeHarness(8)
+  const { dm, seed } = makeHarness(8)
   enqueue(dm, 100)
 
   // Completing a job frees its slot and the pump starts the next queued one, so
@@ -204,7 +230,7 @@ async function runCompletionTest () {
   for (let completed = 0; completed < 10; completed++) {
     const job = [...dm.jobs.values()].find(j => j.status === 'downloading')
     assert.ok(job, 'an active job must be available to complete')
-    await dm.finalize(job, '/tmp/src.bin')
+    await dm.finalize(job, seed(`/cache/src-${completed}.bin`))
   }
 
   const stats = dm.stats()
@@ -321,14 +347,14 @@ async function runStallTests () {
    * Gating completion on 'downloading' dropped the signal: the row kept a full
    * bar labelled QUEUED for ever and stats().done never moved. */
   {
-    const { dm } = makeHarness(2)
+    const { dm, seed } = makeHarness(2)
     enqueue(dm, 10)
     const queued = [...dm.jobs.values()].find(j => j.status === 'queued')
     assert.ok(queued, 'a queued job must exist')
 
     dm.onFileUpdate({
       id: queued.fileId,
-      local: { is_downloading_completed: true, path: '/tmp/done.bin', downloaded_size: 1000 }
+      local: { is_downloading_completed: true, path: seed('/cache/done.bin'), downloaded_size: 1000 }
     })
     await settle()
 
@@ -336,31 +362,123 @@ async function runStallTests () {
     assert.equal(dm.stats().done, 1, 'stats().done must reflect it')
   }
 
-  /* ---- a stopped download must not hold its slot for ever ----
-   * updateFile with neither is_downloading_active nor is_downloading_completed
-   * used to be a total no-op, leaving the job parked in 'downloading'. Eight of
-   * those starved the queue permanently. */
+  /* ---- a download TDLib has not scheduled yet must be LEFT ALONE ----
+   *
+   * TDLib accepts every downloadFile request and schedules the transfers itself,
+   * running far fewer in parallel than we ask for. So an updateFile carrying
+   * neither is_downloading_active nor is_downloading_completed is the normal
+   * resting state of most of a large batch, not a failure.
+   *
+   * Treating it as one cancelled healthy downloads, discarded their partial data,
+   * sent them to the back of TDLib's queue and eventually failed them - the cause
+   * of large batches stopping and then restarting on their own. */
   {
-    const { dm } = makeHarness(2)
+    const { dm, invocations } = makeHarness(2)
     enqueue(dm, 5)
     const job = [...dm.jobs.values()].find(j => j.status === 'downloading')
     const attemptsBefore = job.attempts
+    const runBefore = job.run
+    job.downloaded = 400
+    invocations.length = 0
 
     dm.onFileUpdate(stoppedUpdate(job))
 
-    assert.ok(job.attempts > attemptsBefore || job.status === 'queued', 'a stopped download must be retried')
-    assert.equal(dm.activeCount, 2, 'the slot must be reused, not leaked')
-    assert.equal(dm.activeCount, trulyActive(dm), 'the slot count must match reality')
+    assert.equal(job.status, 'downloading', 'a merely unscheduled download must stay downloading')
+    assert.equal(job.attempts, attemptsBefore, 'waiting for TDLib is not a failed attempt')
+    assert.equal(job.run, runBefore, 'its runner must not be invalidated')
+    assert.equal(job.downloaded, 400, 'partial progress must be kept')
+    assert.equal(
+      invocations.filter(i => i._ === 'cancelDownloadFile').length, 0,
+      'a healthy download must never be cancelled'
+    )
+    assert.equal(dm.activeCount, trulyActive(dm), 'the slot count must stay consistent')
   }
 
-  /* ---- retries are bounded ---- */
+  /* ---- the watchdog re-asserts instead of cancelling ---- */
   {
-    const { dm, MAX_ATTEMPTS } = makeHarness(1)
+    const { dm, invocations } = makeHarness(1, {
+      // Still pending inside TDLib: not active, not complete, some bytes fetched.
+      getFile: () => Promise.resolve({ size: 1000, local: { is_downloading_active: false, is_downloading_completed: false, downloaded_size: 250 } })
+    })
+    enqueue(dm, 2)
+    const job = [...dm.jobs.values()].find(j => j.status === 'downloading')
+    // Pretend it has been quiet for a long time.
+    job.lastProgressAt = Date.now() - 10 * 60 * 1000
+    invocations.length = 0
+
+    dm.sweep()
+    await settle()
+    await settle()
+
+    assert.equal(job.status, 'downloading', 'a quiet but live download must survive the watchdog')
+    assert.equal(
+      invocations.filter(i => i._ === 'cancelDownloadFile').length, 0,
+      'the watchdog must not cancel'
+    )
+    assert.ok(
+      invocations.some(i => i._ === 'downloadFile' && i.file_id === job.fileId),
+      'the watchdog must re-assert the download request'
+    )
+    assert.equal(job.downloaded, 250, 'bytes reported by TDLib must be adopted')
+    assert.ok(job.lastProgressAt > Date.now() - 5000, 'the stall window must be refreshed')
+  }
+
+  /* ---- the watchdog finalizes a completion it had missed ---- */
+  {
+    const { dm, seed } = makeHarness(1, {
+      getFile: () => Promise.resolve({ size: 1000, local: { is_downloading_completed: true, path: '/cache/found.bin', downloaded_size: 1000 } })
+    })
+    seed('/cache/found.bin')
     enqueue(dm, 1)
     const job = [...dm.jobs.values()][0]
-    for (let attempt = 0; attempt <= MAX_ATTEMPTS + 1; attempt++) dm.onFileUpdate(stoppedUpdate(job))
-    assert.equal(job.status, 'error', 'a permanently stopped download must end as error, not retry for ever')
-    assert.match(job.error, /gave up/, 'the reason must say it gave up')
+    job.lastProgressAt = Date.now() - 10 * 60 * 1000
+
+    dm.sweep()
+    await settle()
+    await settle()
+
+    assert.equal(job.status, 'done', 'a missed completion must be recovered by the watchdog')
+  }
+
+  /* ---- a file Telegram will not serve is terminal ---- */
+  {
+    const { dm } = makeHarness(1, {
+      getFile: () => Promise.resolve({ size: 1000, can_be_downloaded: false, local: {} })
+    })
+    enqueue(dm, 2)
+    const job = [...dm.jobs.values()].find(j => j.status === 'downloading')
+    job.lastProgressAt = Date.now() - 10 * 60 * 1000
+
+    dm.sweep()
+    await settle()
+    await settle()
+
+    assert.equal(job.status, 'error', 'an undownloadable file must not occupy a slot for ever')
+    assert.equal(dm.activeCount, trulyActive(dm))
+  }
+
+  /* ---- a repeatedly unreadable file state eventually fails, one failure does not ---- */
+  {
+    const { dm, MAX_ATTEMPTS } = makeHarness(1, {
+      getFile: () => Promise.reject(new Error('file id is invalid'))
+    })
+    enqueue(dm, 1)
+    const job = [...dm.jobs.values()][0]
+
+    job.lastProgressAt = Date.now() - 10 * 60 * 1000
+    dm.sweep()
+    await settle()
+    await settle()
+    assert.equal(job.status, 'downloading', 'a single failed state read must be tolerated')
+
+    for (let attempt = 0; attempt < MAX_ATTEMPTS + 1; attempt++) {
+      job.lastProgressAt = Date.now() - 10 * 60 * 1000
+      dm.sweep()
+      await settle()
+      await settle()
+    }
+    assert.equal(job.status, 'error', 'a persistently unreadable file must end as error')
+    assert.match(job.error, /cannot read file state/)
     assert.equal(dm.activeCount, 0, 'its slot must be released')
   }
 
@@ -447,20 +565,50 @@ async function runStallTests () {
 
   /* ---- finalize must not run twice and flip done -> error ---- */
   {
-    const { dm } = makeHarness(1)
+    const { dm, seed } = makeHarness(1)
     enqueue(dm, 1)
     const job = [...dm.jobs.values()][0]
-    await Promise.all([dm.finalize(job, '/tmp/a.bin'), dm.finalize(job, '/tmp/a.bin')])
+    const src = seed('/cache/a.bin')
+    await Promise.all([dm.finalize(job, src), dm.finalize(job, src)])
     assert.equal(job.status, 'done', 'a second finalize must not overwrite the first')
+    assert.equal(job.error, null, 'and must not leave an error behind')
+    assert.equal(dm.activeCount, trulyActive(dm))
+  }
+
+  /* ---- two jobs backed by ONE TDLib file ----
+   * finalize() moves the file out of TDLib's cache, so whichever sibling arrives
+   * second has nothing left to move. That produced
+   * "ENOENT ... copyfile .td_files\photos\... -> ... (1).jpg" against real traffic.
+   * The bytes are already on disk, so the sibling must adopt that path. */
+  {
+    const { dm, disk, seed } = makeHarness(2)
+    // Both jobs point at the same fileId, as a reposted photo does.
+    const first = dm.add(-100, 'Chat', 1001, 5555, 'photo.jpg', 1000)
+    const second = dm.add(-100, 'Chat', 1002, 5555, 'photo.jpg', 1000)
+    const jobA = dm.jobs.get(first)
+    const jobB = dm.jobs.get(second)
+
+    const cached = seed('/cache/photo.jpg')
+    await dm.finalize(jobA, cached)
+    assert.equal(jobA.status, 'done', 'the first job must deliver the file')
+    assert.ok(jobA.destPath, 'and record where it went')
+    assert.equal(disk.has(cached), false, 'the cache file must have been moved, not copied')
+
+    // The sibling now points at a cache file that no longer exists.
+    await dm.finalize(jobB, cached)
+    assert.equal(jobB.status, 'done', 'the sibling must not fail just because the cache file moved')
+    assert.equal(jobB.destPath, jobA.destPath, 'the sibling must adopt the delivered path')
+    assert.equal(jobB.error, null, 'and record no error')
+    assert.equal(dm.stats().error, 0, 'a shared file must not inflate the failure count')
     assert.equal(dm.activeCount, trulyActive(dm))
   }
 
   /* ---- a late completion must not resurrect a finished job ---- */
   {
-    const { dm } = makeHarness(1)
+    const { dm, seed } = makeHarness(1)
     enqueue(dm, 1)
     const job = [...dm.jobs.values()][0]
-    await dm.finalize(job, '/tmp/a.bin')
+    await dm.finalize(job, seed('/cache/a.bin'))
     assert.equal(job.status, 'done')
     dm.onFileUpdate({ id: job.fileId, local: { is_downloading_active: true, downloaded_size: 10 } })
     assert.equal(job.status, 'done', 'a terminal job must ignore later updates')
@@ -474,7 +622,13 @@ function runRecoveryContractTests () {
   assert.match(source, /STALL_AFTER_MS/, 'a stall threshold must exist')
   assert.match(source, /sweep \(\)/, 'a watchdog pass must exist')
   assert.match(source, /reconcile \(\)/, 'the slot count must be reconcilable')
-  assert.match(source, /requeue \(job, reason\)/, 'stuck jobs must be requeueable')
+  assert.match(source, /async reassert \(job\)/, 'quiet jobs must be re-assertable')
+  /* The watchdog must never cancel. Cancelling a download that TDLib simply had
+   * not scheduled yet discarded partial data and stalled large batches. */
+  assert.doesNotMatch(source, /requeue \(job, reason\)/, 'the cancel-and-retry path must be gone')
+  const sweepBody = /sweep \(\) \{([\s\S]*?)\n  \}/.exec(source)
+  assert.ok(sweepBody, 'sweep must exist')
+  assert.doesNotMatch(sweepBody[1], /cancelDownloadFile/, 'sweep must not cancel downloads')
   assert.match(source, /recover \(\)/, 'explicit recovery must exist for Resume all')
   assert.match(source, /this\.sweepTimer = setInterval/, 'the watchdog must be scheduled')
   assert.match(source, /sweepTimer\.unref/, 'the watchdog must not hold the process open')

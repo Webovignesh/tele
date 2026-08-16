@@ -624,13 +624,110 @@
     return el
   }
 
+  /* Which jobs deserve a row, most urgent first. Used only to CHOOSE rows, never
+   * to order the ones already on screen. */
+  const DISPLAY_RANK = { downloading: 0, cancelling: 1, paused: 2, error: 3, queued: 4, done: 5, cancelled: 6 }
+  const rankOf = status => (DISPLAY_RANK[status] === undefined ? 7 : DISPLAY_RANK[status])
+
+  /* The window is deliberately sticky: a job keeps its row, and its position, for
+   * as long as it is shown. At most this many rows may be swapped out per paint so
+   * newly active work can become visible without the list reshuffling.
+   *
+   * The previous version re-sorted the whole window by status on every paint.
+   * Measured with 6,000 jobs, a single "one finishes, the next starts" advance -
+   * which happens several times a second in a real batch - moved 101 of the 140
+   * visible rows, changed the top row every single time, and let the browser's
+   * scroll anchoring drag scrollTop from 600 to 1636 across twelve advances. The
+   * list ran away under the cursor. Frames were a solid 60fps throughout, which is
+   * why it read as sluggish rather than measuring slow. */
+  const MAX_SUBSTITUTIONS_PER_PAINT = 6
+  const displayOrder = []
+
+  /* Chooses the visible job ids, preserving the order of rows already shown. */
+  function chooseDisplayIds () {
+    const shown = []
+    const seen = new Set()
+    for (const jobId of displayOrder) {
+      if (!state.downloads.has(jobId) || seen.has(jobId)) continue
+      shown.push(jobId)
+      seen.add(jobId)
+    }
+
+    /* Free slots are filled by priority. Once the window is full this whole block
+     * is skipped, so the steady-state paint is O(window) rather than O(queue). */
+    if (shown.length < DOWNLOAD_LIST_LIMIT) {
+      const candidates = []
+      for (const job of state.downloads.values()) {
+        if (!seen.has(job.jobId)) candidates.push(job)
+      }
+      candidates.sort((a, b) => rankOf(a.status) - rankOf(b.status))
+      for (const job of candidates) {
+        if (shown.length >= DOWNLOAD_LIST_LIMIT) break
+        shown.push(job.jobId)
+        seen.add(job.jobId)
+      }
+    } else {
+      /* Full window: let work that needs attention take the place of a row that
+       * does not, IN PLACE. Substituting at the same index moves exactly one row
+       * instead of resorting everything. */
+      let budget = MAX_SUBSTITUTIONS_PER_PAINT
+      let worstIndex = shown.length - 1
+      for (const job of state.downloads.values()) {
+        if (budget <= 0) break
+        if (seen.has(job.jobId)) continue
+        const incoming = rankOf(job.status)
+        // Only genuinely urgent states may displace an existing row.
+        if (incoming > rankOf('paused')) continue
+        // Find the least interesting row still on screen.
+        let victim = -1
+        let victimRank = incoming
+        for (let index = worstIndex; index >= 0; index--) {
+          const current = state.downloads.get(shown[index])
+          const rank = current ? rankOf(current.status) : 7
+          if (rank > victimRank) { victimRank = rank; victim = index }
+        }
+        if (victim < 0) break
+        seen.delete(shown[victim])
+        shown[victim] = job.jobId
+        seen.add(job.jobId)
+        worstIndex = victim - 1
+        budget--
+      }
+    }
+
+    displayOrder.length = 0
+    for (const jobId of shown) displayOrder.push(jobId)
+    return shown
+  }
+
   function renderDownloadsNow () {
     lastDownloadsPaint = Date.now()
     const list = document.querySelector('#download-list')
     const stats = document.querySelector('#download-stats')
     if (!list || !stats) return
     const now = Date.now()
+    const queue = state.queueStats
+    const wantedIds = chooseDisplayIds()
+
+    /* Speed is sampled only for the rows actually on screen. Byte and status
+     * totals come from the server aggregate, which already covers the whole queue -
+     * walking every job here to re-derive them was pure duplication, and it also
+     * meant a Map delete per job per paint. */
     let totalSpeed = 0
+    const wanted = []
+    for (const jobId of wantedIds) {
+      const job = state.downloads.get(jobId)
+      if (!job) continue
+      let speed = 0
+      if (job.status === 'downloading') {
+        speed = sampleSpeed(job, now, Math.max(0, Number(job.downloaded || 0)))
+        totalSpeed += speed
+      } else if (state.samples.has(jobId)) {
+        state.samples.delete(jobId)
+      }
+      wanted.push({ job, speed })
+    }
+
     let active = 0
     let queued = 0
     let paused = 0
@@ -639,31 +736,29 @@
     let cancelled = 0
     let downloadedBytes = 0
     let expectedBytes = 0
-    const display = []
-    for (const job of state.downloads.values()) {
-      const downloaded = Math.max(0, Number(job.downloaded || 0))
-      const fileSize = Math.max(0, Number(job.fileSize || 0))
-      downloadedBytes += downloaded
-      expectedBytes += fileSize
-      let speed = 0
-      if (job.status === 'downloading') {
-        speed = sampleSpeed(job, now, downloaded)
-        active++
-        totalSpeed += speed
-      } else {
-        state.samples.delete(job.jobId)
-        if (job.status === 'queued') queued++
+    if (queue) {
+      active = Number(queue.downloading || 0)
+      queued = Number(queue.queued || 0)
+      paused = Number(queue.paused || 0)
+      done = Number(queue.done || 0)
+      failed = Number(queue.error || 0)
+      cancelled = Number(queue.cancelled || 0)
+      downloadedBytes = Number(queue.downloadedBytes || 0)
+      expectedBytes = Number(queue.expectedBytes || 0)
+    } else {
+      // No aggregate yet (first paint after boot): fall back to the projection.
+      for (const job of state.downloads.values()) {
+        downloadedBytes += Math.max(0, Number(job.downloaded || 0))
+        expectedBytes += Math.max(0, Number(job.fileSize || 0))
+        if (job.status === 'downloading') active++
+        else if (job.status === 'queued') queued++
         else if (job.status === 'paused') paused++
         else if (job.status === 'done') done++
         else if (job.status === 'error') failed++
         else if (job.status === 'cancelled' || job.status === 'cancelling') cancelled++
       }
-      if (display.length < DOWNLOAD_LIST_LIMIT || ['downloading', 'paused', 'error', 'cancelling'].includes(job.status)) display.push({ job, speed })
     }
-    display.sort((a, b) => {
-      const rank = status => ({ downloading: 0, cancelling: 1, paused: 2, queued: 3, error: 4, done: 5, cancelled: 6 })[status] ?? 7
-      return rank(a.job.status) - rank(b.job.status)
-    })
+
     /* Keyed, in-place reconciliation. Rows are reused by job id, patched, then
      * moved only when they are genuinely out of order, and leftovers are removed.
      * Nothing clears the container, so the scroll position survives. */
@@ -671,7 +766,6 @@
     for (const node of list.children) {
       if (node.dataset && node.dataset.jobId) existing.set(node.dataset.jobId, node)
     }
-    const wanted = display.slice(0, DOWNLOAD_LIST_LIMIT)
     const ordered = []
     for (const row of wanted) {
       const node = renderDownloadJob(row.job, row.speed, existing.get(row.job.jobId))
@@ -687,22 +781,12 @@
       const node = ordered[index]
       if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null)
     }
-    /* Counters come from the server aggregate over the FULL queue. The loop
-     * above only saw state.downloads, which holds the jobs this browser has
-     * been told about — with concurrency 8 that is about 8 rows even when the
-     * queue holds 20,000, which is why Total used to read 8. Byte totals and
-     * live speed stay local because they are sampled per visible job. */
-    const queue = state.queueStats
+    /* Totals are the server's aggregate over the FULL queue. state.downloads is
+     * only the projection this browser has been told about, so counting it made
+     * Total read 8 for a 20,000-file queue. Live speed stays local because it is
+     * sampled per visible row. */
     const total = queue ? Number(queue.total || 0) : state.downloads.size
     const remaining = queue ? Number(queue.remaining || 0) : active + queued + paused
-    if (queue) {
-      done = Number(queue.done || 0)
-      failed = Number(queue.error || 0)
-      cancelled = Number(queue.cancelled || 0)
-      paused = Number(queue.paused || 0)
-      queued = Number(queue.queued || 0)
-      active = Number(queue.downloading || 0)
-    }
     if (total > ordered.length) {
       list.appendChild(h('div', 'tele-ui-download-list-note', `Showing ${ordered.length.toLocaleString()} of ${total.toLocaleString()} jobs. Controls and stats apply to the whole queue.`))
     }
