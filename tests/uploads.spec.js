@@ -5,7 +5,8 @@ const path = require('node:path')
 const { test, expect } = require('@playwright/test')
 
 const CORE = path.join(__dirname, '..', 'public', 'upload-queue-core.js')
-const UPLOADS = path.join(__dirname, '..', 'public', 'uploads.js')
+const UPLOADS = path.join(__dirname, '..', 'public', 'bulk-uploads.js')
+const HARDENING = path.join(__dirname, '..', 'public', 'uploads-hardening.js')
 const CSS = path.join(__dirname, '..', 'public', 'uploads.css')
 
 async function fixture (page, options = {}) {
@@ -29,7 +30,10 @@ async function fixture (page, options = {}) {
     window.state = {
       status: 'ready',
       activeChatId: 777,
-      chats: [{ id: 777, title: 'TEST', kind: 'channel', unread: 0 }]
+      chats: [
+        { id: 777, title: 'TEST', kind: 'channel', unread: 0 },
+        { id: 888, title: 'NOT OWNED', kind: 'channel', unread: 0 }
+      ]
     }
     window.toast = (message, kind) => { window.__lastToast = { message, kind } }
     window.confirm = () => true
@@ -39,7 +43,11 @@ async function fixture (page, options = {}) {
     }
     window.request = async (type, payload) => {
       if (type === 'get-chat-management') {
-        return { chat: { id: payload.chatId, title: 'TEST', kind: 'channel' }, permissions: { isOwner: true } }
+        const owner = Number(payload.chatId) === 777
+        return {
+          chat: { id: payload.chatId, title: owner ? 'TEST' : 'NOT OWNED', kind: 'channel' },
+          permissions: { isOwner: owner }
+        }
       }
       if (type === 'search-media') return { items: [], totalCount: 0, hasMore: false }
       if (type === 'delete-chat-message') return { ok: true }
@@ -79,10 +87,12 @@ async function fixture (page, options = {}) {
   }, options)
   await page.addScriptTag({ path: CORE })
   await page.addScriptTag({ path: UPLOADS })
+  await page.addScriptTag({ path: HARDENING })
   await expect(page.locator('#mg-tab-uploads')).toBeVisible()
   await page.locator('#mg-tab-uploads').click()
   await expect(page.locator('#mg-uploads-pane')).toBeVisible()
   await expect(page.locator('#fg-upload-channel option', { hasText: 'TEST' })).toHaveCount(1)
+  await expect(page.locator('#fg-upload-channel option', { hasText: 'NOT OWNED' })).toHaveCount(0)
   await page.locator('#fg-upload-channel').selectOption({ label: 'TEST' })
 }
 
@@ -101,7 +111,20 @@ async function addFilesThroughPicker (page, files) {
   await expect(page.locator('#fg-upload-review-modal')).toBeVisible()
 }
 
-test('Uploads tab reviews duplicates then uploads unique files', async ({ page }) => {
+async function persistedUploadCount (page) {
+  return page.evaluate(async () => new Promise((resolve, reject) => {
+    const req = indexedDB.open('filegram-uploads-v1', 1)
+    req.onerror = () => reject(req.error)
+    req.onsuccess = () => {
+      const db = req.result
+      const count = db.transaction('jobs', 'readonly').objectStore('jobs').count()
+      count.onerror = () => reject(count.error)
+      count.onsuccess = () => { resolve(count.result); db.close() }
+    }
+  }))
+}
+
+test('Uploads tab only offers owned channels, reviews duplicates, then uploads unique files', async ({ page }) => {
   await fixture(page)
   await addFilesThroughPicker(page, [
     { name: 'alpha.txt', mimeType: 'text/plain', buffer: Buffer.from('alpha') },
@@ -157,7 +180,7 @@ test('Cancel all covers the entire queue, not only parallel workers', async ({ p
   expect(stats.total).toBe(20)
 })
 
-test('Clear done and Clear all have full-queue semantics', async ({ page }) => {
+test('Clear done and Clear all have full-queue and persistent semantics', async ({ page }) => {
   await fixture(page)
   await addFilesThroughPicker(page, [
     { name: 'done-1.txt', mimeType: 'text/plain', buffer: Buffer.from('1') },
@@ -168,14 +191,16 @@ test('Clear done and Clear all have full-queue semantics', async ({ page }) => {
   await page.locator('#fg-upload-clear-done').click()
   await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(0)
 
-  await addFilesThroughPicker(page, Array.from({ length: 6 }, (_, index) => ({
+  await addFilesThroughPicker(page, Array.from({ length: 40 }, (_, index) => ({
     name: `clear-${index}.txt`, mimeType: 'text/plain', buffer: Buffer.from(String(index))
   })))
   await page.locator('#fg-upload-review-unique').click()
-  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(6)
+  await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(40)
   await page.locator('#fg-upload-clear-all').click()
   await expect.poll(async () => page.evaluate(() => window.FileGramUploads.snapshot().stats.total)).toBe(0)
   await expect(page.locator('#fg-upload-list .fg-up-job')).toHaveCount(0)
+  await page.waitForTimeout(500)
+  expect(await persistedUploadCount(page)).toBe(0)
 })
 
 test('server interruption automatically retries without losing the queue', async ({ page }) => {
