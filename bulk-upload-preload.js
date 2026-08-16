@@ -25,20 +25,6 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
   let activeClient = null
   const priorCreateClient = tdl.createClient.bind(tdl)
 
-  /* TDLib gives an outgoing message a temporary (normally negative) id and then
-   * replaces it with the final Telegram id through updateMessageSendSucceeded.
-   * server.js already knows how to remove media-index rows when it receives an
-   * updateDeleteMessages event, but TDLib does not emit that event for this id
-   * replacement. The result was one stale temporary media row plus one final row
-   * for every successful upload: 11 real files became 22 in FileGram.
-   *
-   * `tdl` clients expose `on()` but are not Node EventEmitters, so methods such as
-   * prependListener()/emit() are not available. Intercept update subscriptions
-   * instead. Any consumer subscribing after this preload receives the synthetic
-   * delete immediately before the real send-succeeded update. session-preload.js
-   * is one such consumer and forwards both updates through its stable EventEmitter
-   * facade to server.js in the correct order.
-   */
   function installTemporaryMessageRetirement (client) {
     if (!client || client.__fileGramTemporaryMessageRetirement) return
     if (typeof client.on !== 'function') return
@@ -99,10 +85,16 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
     })
   }
 
+  /* Never treat a generic "not found" as proof that a Telegram message was
+   * deleted. A transient/permission/chat lookup error must leave the persistent
+   * Files index untouched. Only TDLib's message-id-specific errors are evidence
+   * strong enough to prune a row. */
   function missingMessageError (error) {
     const code = Number(error && (error.code || error.error_code) || 0)
     const text = String(error && (error.message || error.error_message) || error || '')
-    return code === 404 || /message\s+(?:not\s+found|identifier\s+is\s+invalid)|not\s+found/i.test(text)
+    if (/MESSAGE_ID_INVALID/i.test(text)) return true
+    if (/message\s+(?:not\s+found|identifier\s+is\s+invalid)/i.test(text)) return true
+    return code === 404 && /message/i.test(text)
   }
 
   async function mapLimit (values, limit, worker) {
@@ -118,15 +110,6 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
     return results
   }
 
-  /* A persistent Files index is intentionally append-friendly so a partial scan
-   * can never shrink a 20k-channel to a 100-item page. That same rule means a
-   * deletion must be handled explicitly rather than by unioning snapshots.
-   *
-   * This endpoint verifies ONLY message ids already present in the local index.
-   * It never scans history and never downloads media. It lets the browser repair
-   * indexes created before deletion-aware reconciliation existed, and is also a
-   * safe recovery path when FileGram was offline while Telegram messages were
-   * deleted elsewhere. */
   async function reconcileMessageIds (req, res) {
     try {
       if (!activeClient) return res.status(503).json({ ok: false, error: 'Telegram client is not ready' })
@@ -181,19 +164,25 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
       })
       let stdout = ''
       let stderr = ''
+      let settled = false
+      const finish = (fn, value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        fn(value)
+      }
       const timer = setTimeout(() => {
         try { child.kill() } catch {}
-        reject(new Error('Folder picker timed out'))
+        finish(reject, new Error('Folder picker timed out'))
       }, 5 * 60 * 1000)
       if (timer.unref) timer.unref()
       child.stdout.on('data', chunk => { stdout += chunk.toString('utf8') })
       child.stderr.on('data', chunk => { stderr += chunk.toString('utf8') })
-      child.on('error', error => { clearTimeout(timer); reject(error) })
+      child.on('error', error => finish(reject, error))
       child.on('close', code => {
-        clearTimeout(timer)
-        if (code !== 0) return reject(new Error(stderr.trim() || `Folder picker exited with code ${code}`))
+        if (code !== 0) return finish(reject, new Error(stderr.trim() || `Folder picker exited with code ${code}`))
         const selected = stdout.trim()
-        resolve(selected || null)
+        finish(resolve, selected || null)
       })
     })
   }
