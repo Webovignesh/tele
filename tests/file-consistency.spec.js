@@ -5,6 +5,7 @@ const path = require('node:path')
 const { test, expect } = require('@playwright/test')
 
 const HARDENING = path.join(__dirname, '..', 'public', 'uploads-hardening.js')
+const CONSISTENCY = path.join(__dirname, '..', 'public', 'file-consistency-fix.js')
 
 async function fixture (page, options = {}) {
   const initialItems = options.items || [
@@ -23,14 +24,18 @@ async function fixture (page, options = {}) {
       <section id="messages"></section>
       <section id="media-grid"></section>
       <aside class="downloads">
-        <label class="conc">
-          <span>Save to</span>
-          <span class="row">
-            <input id="dl-dir" value="F:\\Old" />
-            <button id="set-dir" type="button">Browse</button>
-          </span>
-        </label>
-        <div id="dl-dir-current"></div>
+        <div id="mg-downloads-pane">
+          <div class="dl-controls">
+            <label class="conc">
+              <span>Save to</span>
+              <span class="row">
+                <input id="dl-dir" value="F:\\Old" />
+                <button id="set-dir" type="button">Browse</button>
+              </span>
+            </label>
+            <div id="dl-dir-current"></div>
+          </div>
+        </div>
       </aside>
     </body></html>`
   }))
@@ -99,13 +104,17 @@ async function fixture (page, options = {}) {
         const existing = missingOnReconcile ? [] : snapshot.items.map(item => String(item.messageId))
         return { ok: true, status: 200, json: async () => ({ ok: true, missing, existing, unknown: [] }) }
       }
-      if (target.includes('/api/filegram/pick-download-folder')) {
+      if (target.includes('/api/filegram/pick-download-folder-modern')) {
         return { ok: true, status: 200, json: async () => ({ ok: true, cancelled: false, path: 'F:\\Picked\\Folder' }) }
+      }
+      if (target.includes('/api/filegram/pick-download-folder')) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, cancelled: false, path: 'F:\\Legacy\\Folder' }) }
       }
       throw new Error(`Unexpected fetch ${target}`)
     }
   }, { initialItems, missingOnReconcile: options.missingOnReconcile !== false })
   await page.addScriptTag({ path: HARDENING })
+  await page.addScriptTag({ path: CONSISTENCY })
 }
 
 test('stale deleted files are removed from the committed index and duplicate Chat info is removed', async ({ page }) => {
@@ -131,13 +140,15 @@ test('realtime message deletion lowers the persistent Files count instead of uni
   await expect.poll(async () => page.evaluate(() => window.__persistedSnapshot && window.__persistedSnapshot.items.length)).toBe(1)
 })
 
-test('download destination is one button and selecting it commits the chosen native folder', async ({ page }) => {
+test('download destination is one full-width button and commits the chosen modern native folder', async ({ page }) => {
   await fixture(page, { items: [], missingOnReconcile: false })
 
   const picker = page.locator('#set-dir')
   await expect(picker).toHaveClass(/fg-download-folder-picker/)
   await expect(page.locator('#dl-dir')).toBeHidden()
   await expect(picker).toContainText('F:\\Old')
+  const geometry = await picker.evaluate(el => ({ width: el.getBoundingClientRect().width, parent: el.parentElement.getBoundingClientRect().width }))
+  expect(geometry.width).toBeGreaterThanOrEqual(geometry.parent - 2)
 
   await picker.click()
 
