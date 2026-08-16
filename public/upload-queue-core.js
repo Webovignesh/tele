@@ -22,13 +22,14 @@
   }
 
   function normalizeError (error) {
-    if (!error) return { message: 'Upload failed', transient: false, uncertain: false }
+    if (!error) return { message: 'Upload failed', transient: false, uncertain: false, retryAfterMs: 0 }
     return {
       message: String(error.message || error),
       transient: !!error.transient,
       uncertain: !!error.uncertain,
       code: error.code || null,
-      status: Number(error.status || 0) || 0
+      status: Number(error.status || 0) || 0,
+      retryAfterMs: Math.max(0, Number(error.retryAfterMs || 0))
     }
   }
 
@@ -41,9 +42,6 @@
       this.verifyDelivery = typeof options.verifyDelivery === 'function' ? options.verifyDelivery : async () => false
       this.onChange = typeof options.onChange === 'function' ? options.onChange : () => {}
       this.now = typeof options.now === 'function' ? options.now : () => Date.now()
-      // Browser timer functions are Web-IDL methods and must not be invoked with
-      // an UploadQueue instance as their receiver. Wrapping them also keeps the
-      // queue deterministic in Node tests where custom timer functions are used.
       this.setTimer = typeof options.setTimer === 'function' ? options.setTimer : ((fn, ms) => setTimeout(fn, ms))
       this.clearTimer = typeof options.clearTimer === 'function' ? options.clearTimer : (id => clearTimeout(id))
       this.concurrency = clamp(options.concurrency || 3, 1, options.maxConcurrency || 8)
@@ -86,15 +84,16 @@
           totalBytes: Math.max(0, Number(descriptor.totalBytes || descriptor.size || 0)),
           speed: 0,
           attempts: Math.max(0, Number(descriptor.attempts || 0)),
-          retryAt: 0,
-          error: null,
+          retryAt: Math.max(0, Number(descriptor.retryAt || 0)),
+          error: descriptor.error ? String(descriptor.error) : null,
           createdAt: Number(descriptor.createdAt || now),
-          updatedAt: now,
+          updatedAt: Number(descriptor.updatedAt || now),
           startedAt: Number(descriptor.startedAt || 0),
           attemptStartedAt: 0,
           completedAt: Number(descriptor.completedAt || 0),
           telegramMessageId: descriptor.telegramMessageId || null,
           recovered: !!descriptor.recovered,
+          result: descriptor.result && typeof descriptor.result === 'object' ? { ...descriptor.result } : null,
           _source: descriptor._source || null,
           _progressAt: 0,
           _progressBytes: 0,
@@ -112,16 +111,15 @@
     }
 
     restore (records = []) {
-      const restored = []
+      const normalized = []
       for (const record of records) {
         if (!record || !record.id) continue
         let status = String(record.status || 'queued')
         if (status === 'uploading' || status === 'retrying' || status === 'verifying') status = 'queued'
-        const added = this.add([{ ...record, status }])
-        if (added.length) restored.push(added[0])
+        normalized.push({ ...record, status, retryAt: 0 })
       }
-      this.changed('restored', restored)
-      this.pump()
+      const restored = this.add(normalized)
+      if (restored.length) this.changed('restored', restored)
       return restored
     }
 
@@ -483,7 +481,8 @@
 
     retryLater (job, error) {
       const exponent = Math.max(0, Math.min(8, Number(job.attempts || 1) - 1))
-      const delay = Math.min(this.retryMaxMs, this.retryBaseMs * Math.pow(2, exponent))
+      const exponential = Math.min(this.retryMaxMs, this.retryBaseMs * Math.pow(2, exponent))
+      const delay = Math.max(exponential, Math.max(0, Number(error.retryAfterMs || 0)))
       job.status = 'retrying'
       job.retryAt = this.now() + delay
       job.speed = 0
