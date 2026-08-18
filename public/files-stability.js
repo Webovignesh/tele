@@ -312,7 +312,7 @@
     if (reconcileJobs.has(key)) return reconcileJobs.get(key)
     const last = Number(lastTruthPass.get(key) || 0); if (!options.force && last && Date.now() - last < TRUTH_THROTTLE_MS) return { status: 'skipped', reason: 'throttled' }
     const job = (async () => {
-      const current = await restore(chatId); if (!current) return { status: 'skipped', reason: 'no-index' }; lastTruthPass.set(key, Date.now())
+      let current = await restore(chatId); if (!current) return { status: 'skipped', reason: 'no-index' }; lastTruthPass.set(key, Date.now())
       let truth = null
       try { truth = await request('media-truth-v1', { chatId }) } catch (error) { truth = { ok: false, complete: false, accessible: true, error: String(error && error.message ? error.message : error), source: 'request' } }
       if (!(truth && truth.complete && truth.accessible !== false)) {
@@ -320,10 +320,47 @@
         logReconcile({ chatId, cached: current.items.length, live: null, missing: [], remaining: current.items.length, persisted: `skipped(reason=${truth && truth.error ? 'truth-error' : truth && truth.accessible === false ? 'chat-inaccessible' : 'truth-incomplete'})`, truth: truth && truth.source || 'unknown', complete: !!(truth && truth.complete), accessible: truth && truth.accessible })
         return { status: 'unknown', reason: truth && truth.error ? 'truth-error' : 'truth-incomplete' }
       }
-      clearBackoff(chatId); const liveIds = new Set((Array.isArray(truth.ids) ? truth.ids : []).map(idOf)); const missing = current.items.filter(item => !liveIds.has(idOf(item.messageId))).map(item => idOf(item.messageId)); const remainingItems = current.items.filter(item => liveIds.has(idOf(item.messageId))); const at = Date.now()
-      const result = await commitAuthoritative(chatId, { ...current, items: remainingItems, savedAt: at, done: remainingItems.length >= Number(truth.count || liveIds.size) }, { at, truth, presentIds: liveIds, removedIds: missing })
+
+      const rawIds = Array.isArray(truth.ids) ? truth.ids.map(idOf).filter(id => /^\d+$/.test(id)) : []
+      const liveIds = new Set(rawIds)
+      const reportedCount = Number(truth.count)
+      if (!Number.isSafeInteger(reportedCount) || reportedCount < 0 || reportedCount !== liveIds.size || rawIds.length !== liveIds.size) {
+        scheduleBackoff(chatId); try { setLoadState('Telegram file truth was inconsistent. Retrying automatically.') } catch {}
+        logReconcile({ chatId, cached: current.items.length, live: Number.isFinite(reportedCount) ? reportedCount : null, missing: [], remaining: current.items.length, persisted: 'skipped(reason=truth-inconsistent)', truth: truth.source || 'unknown', complete: true, accessible: true })
+        return { status: 'unknown', reason: 'truth-inconsistent' }
+      }
+
+      /* A complete truth ID set is allowed to remove stale rows only after the
+       * owner also has metadata for every live ID. If the browser index is partial,
+       * pruning immediately would turn "100 cached / 120 live" into an even smaller
+       * intersection. Recover metadata through the normal full scanner first; its
+       * result is discovery-only and therefore cannot lower the current index. */
+      let knownIds = new Set(current.items.map(item => idOf(item.messageId)))
+      let missingMetadata = [...liveIds].filter(id => !knownIds.has(id))
+      if (missingMetadata.length) {
+        fullScanJobs.add(key)
+        try {
+          const scan = await request('scan-media-v3', { chatId, force: true })
+          if (belongsToChat(chatId, scan)) await commitDiscovery(chatId, { ...scan, chatId, savedAt: Number(scan.savedAt || Date.now()) }, { source: 'truth-metadata-recovery' })
+        } catch {}
+        finally { fullScanJobs.delete(key) }
+        current = committed.get(key) || current
+        knownIds = new Set(current.items.map(item => idOf(item.messageId)))
+        missingMetadata = [...liveIds].filter(id => !knownIds.has(id))
+        if (missingMetadata.length) {
+          scheduleBackoff(chatId); try { setLoadState('File metadata is incomplete. Retrying automatically.') } catch {}
+          logReconcile({ chatId, cached: current.items.length, live: liveIds.size, missing: [], remaining: current.items.length, persisted: `skipped(reason=metadata-incomplete:${missingMetadata.length})`, truth: truth.source || 'unknown', complete: true, accessible: true })
+          return { status: 'unknown', reason: 'metadata-incomplete', missingMetadata: missingMetadata.length }
+        }
+      }
+
+      clearBackoff(chatId)
+      const missing = current.items.filter(item => !liveIds.has(idOf(item.messageId))).map(item => idOf(item.messageId))
+      const remainingItems = current.items.filter(item => liveIds.has(idOf(item.messageId)))
+      const at = Date.now()
+      const result = await commitAuthoritative(chatId, { ...current, items: remainingItems, savedAt: at, done: remainingItems.length === reportedCount }, { at, truth: { ...truth, count: reportedCount }, presentIds: liveIds, removedIds: missing })
       const next = result.snapshot; const persisted = result.persisted && result.persisted.written ? 'written' : `skipped(reason=${result.persisted && result.persisted.reason || 'unknown'})`
-      logReconcile({ chatId, cached: current.items.length, live: Number(truth.count || liveIds.size), missing, remaining: next.items.length, persisted, truth: truth.source || 'unknown', complete: true, accessible: true })
+      logReconcile({ chatId, cached: current.items.length, live: reportedCount, missing, remaining: next.items.length, persisted, truth: truth.source || 'unknown', complete: true, accessible: true })
       if (state && idOf(state.activeChatId) === key && state.view === 'files') try { setLoadState(`Loaded ${next.items.length.toLocaleString()} indexed files`) } catch {}
       return { status: missing.length ? 'pruned' : 'unchanged', missing: missing.length, remaining: next.items.length }
     })().finally(() => reconcileJobs.delete(key)); reconcileJobs.set(key, job); return job
