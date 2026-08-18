@@ -6,11 +6,11 @@
   if (window.__fileGramBulkUploadsLoaderInstalled) return
   window.__fileGramBulkUploadsLoaderInstalled = true
 
-  /* Keep the upload stats fix from uploads.css, but neutralize the download-drawer
-   * regression introduced by the last spacing patch. The core FileGram stylesheet
-   * already defines Save-to as a horizontal flex row; forcing it to grid stacks the
-   * icon/label/path and clips the path. This late style restores the intended flex
-   * layout and adds spacing only between Save-to and Parallel files. */
+  /* uploads.css is intentionally loaded after the main design system. Keep the
+   * upload-stat geometry from that layer, but make the download drawer contract
+   * explicit here. The design system has a high-specificity
+   * `.dl-controls .conc:has(#concurrency)` rule, so this selector must target the
+   * same element (with the drawer id) rather than relying on source order alone. */
   if (!document.getElementById('fg-drawer-layout-fix')) {
     const style = document.createElement('style')
     style.id = 'fg-drawer-layout-fix'
@@ -35,16 +35,16 @@
         flex-direction:column!important;
         gap:2px!important;
       }
-      .downloads .conc,
-      #mg-downloads-pane .conc {
+      #mg-downloads-pane .dl-controls .conc:has(#concurrency),
+      .downloads .dl-controls .conc:has(#concurrency) {
         display:grid!important;
         gap:10px!important;
-        margin:18px 0 0!important;
-        padding:18px 0 0!important;
+        margin:24px 0 0!important;
+        padding:20px 0 0!important;
         border-top:1px solid var(--fg-border,#203147)!important;
       }
-      .downloads .conc>.row,
-      #mg-downloads-pane .conc>.row {
+      #mg-downloads-pane .dl-controls .conc:has(#concurrency)>.row,
+      .downloads .dl-controls .conc:has(#concurrency)>.row {
         margin:0!important;
         min-height:24px!important;
         align-items:center!important;
