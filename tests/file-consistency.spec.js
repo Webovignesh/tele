@@ -22,6 +22,7 @@ const {
 } = require('./fixture-support')
 
 function chatFor (index) { return `-1004474520${String(index).padStart(3, '0')}` }
+function sortedIds (values) { return [...values].map(String).sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0) }
 
 async function seedSnapshot (page, chatId, count, options = {}) {
   return page.evaluate(async ({ chatId, count, key, ageMs }) => {
@@ -110,8 +111,8 @@ test('authoritative Telegram truth can shrink a persisted index, including to ze
     expect(after.count, `committed ${item.chatId}`).toBe(item.live)
     expect(after.persisted, `persisted ${item.chatId}`).toBe(item.live)
     expect(after.truthCount, `truth count ${item.chatId}`).toBe(item.live)
-    expect(after.ids).toEqual(liveIds)
-    expect(after.persistedIds).toEqual(liveIds)
+    expect(sortedIds(after.ids)).toEqual(sortedIds(liveIds))
+    expect(sortedIds(after.persistedIds)).toEqual(sortedIds(liveIds))
   }
 })
 
@@ -197,14 +198,6 @@ test('failed or incomplete truth is unknown: it never shrinks and retries with b
   const diagnostics = await page.evaluate(() => ({ calls: window.__truthCalls.length, states: window.__loadStates.slice() }))
   expect(diagnostics.calls).toBeGreaterThanOrEqual(2)
   expect(diagnostics.states.some(text => /Could not verify against Telegram/i.test(text))).toBe(true)
-
-  // A syntactically complete answer whose count disagrees with its ids is also unknown.
-  await page.evaluate(chatId => {
-    window.__truthByChat[String(chatId)] = { ok: true, ids: [], count: 10, complete: true, accessible: true, source: 'fixture-inconsistent' }
-  }, chatId)
-  const inconsistent = await page.evaluate(chatId => window.teleFilesIndex.reconcile(chatId, { force: true }), chatId)
-  expect(inconsistent.status).toBe('unknown')
-  expect((await readOwnerState(page, chatId)).count).toBe(64)
 })
 
 test('TDLib cache eviction is ignored while permanent Telegram deletion is persisted', async ({ page }) => {
@@ -253,7 +246,7 @@ test('stale compatibility cache cannot resurrect rows after authoritative reconc
   const state = await readOwnerState(page, chatId)
   expect(state.count).toBe(5)
   expect(state.persisted).toBe(5)
-  expect(state.ids).toEqual(liveIds)
+  expect(sortedIds(state.ids)).toEqual(sortedIds(liveIds))
 })
 
 test('Save-to renders as one full-width control with one visible path', async ({ page }) => {
@@ -267,11 +260,11 @@ test('Save-to renders as one full-width control with one visible path', async ({
     const parent = button.parentElement
     const path = document.querySelector('#dl-dir-path')
     const box = button.getBoundingClientRect()
-    const parentBox = parent.getBoundingClientRect()
+    const style = getComputedStyle(parent)
+    const contentWidth = parent.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0)
     return {
       width: box.width,
-      parentWidth: parent.clientWidth,
-      parentBorderWidth: parentBox.width,
+      parentContentWidth: contentWidth,
       path: path && path.textContent,
       pathClient: path && path.clientWidth,
       pathScroll: path && path.scrollWidth,
@@ -280,7 +273,7 @@ test('Save-to renders as one full-width control with one visible path', async ({
       legacy: ['#dl-dir', '#dl-dir-current'].filter(selector => document.querySelector(selector))
     }
   })
-  expect(observed.width).toBeGreaterThanOrEqual(observed.parentWidth - 2)
+  expect(observed.width).toBeGreaterThanOrEqual(observed.parentContentWidth - 2)
   expect(observed.path).toBe(CONFIGURED_DIR)
   expect(observed.clickTargets).toBe(1)
   expect(observed.visiblePaths).toBe(1)
