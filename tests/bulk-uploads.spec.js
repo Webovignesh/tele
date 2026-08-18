@@ -45,7 +45,17 @@ async function fixture (page, options = {}) {
     window.__remoteSnapshot = { items: remoteItems.map(item => ({ ...item })), done: true }
     window.teleFilesIndex = {
       ensure: async () => window.__remoteSnapshot,
-      snapshot: () => window.__remoteSnapshot
+      snapshot: () => window.__remoteSnapshot,
+      /* uploads-hardening delegates temporary-id retirement to the Files owner.
+       * This is the owner contract, not a second production implementation. */
+      retireTemporary: async (_chatId, ids) => {
+        const explicit = Array.isArray(ids) && ids.length ? new Set(ids.map(String)) : null
+        window.__remoteSnapshot.items = window.__remoteSnapshot.items.filter(item => {
+          const id = String(item && item.messageId)
+          return explicit ? !explicit.has(id) : !id.startsWith('-')
+        })
+        return window.__remoteSnapshot
+      }
     }
     window.request = async (type, payload) => {
       if (type === 'get-chat-management') {
