@@ -38,16 +38,40 @@
       #mg-downloads-pane .dl-controls .conc:has(#concurrency),
       .downloads .dl-controls .conc:has(#concurrency) {
         display:grid!important;
+        width:100%!important;
+        min-width:0!important;
+        align-self:stretch!important;
         gap:10px!important;
         margin:24px 0 0!important;
         padding:20px 0 0!important;
         border-top:1px solid var(--fg-border,#203147)!important;
+        box-sizing:border-box!important;
       }
       #mg-downloads-pane .dl-controls .conc:has(#concurrency)>.row,
       .downloads .dl-controls .conc:has(#concurrency)>.row {
+        display:grid!important;
+        grid-template-columns:minmax(0,1fr) auto!important;
+        width:100%!important;
+        min-width:0!important;
         margin:0!important;
         min-height:24px!important;
         align-items:center!important;
+        gap:12px!important;
+      }
+      #mg-downloads-pane #concurrency,
+      .downloads #concurrency {
+        display:block!important;
+        width:100%!important;
+        min-width:0!important;
+        max-width:none!important;
+        justify-self:stretch!important;
+        margin:0!important;
+      }
+      #mg-downloads-pane #concurrency-val,
+      .downloads #concurrency-val {
+        min-width:2ch!important;
+        justify-self:end!important;
+        text-align:right!important;
       }
     `
     document.head.appendChild(style)
