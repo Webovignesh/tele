@@ -12,6 +12,7 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
   const path = require('node:path')
   const tdl = require('tdl')
   const { createBulkUploadHandler } = require('./bulk-upload-server')
+  const { createOwnedBulkDeleteHandler } = require('./owned-bulk-delete-server')
   const { ScalableUploadLedger } = require('./bulk-upload-ledger')
 
   let activeClient = null
@@ -69,6 +70,12 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
     const ledger = new ScalableUploadLedger(root)
     const active = new Set()
     const handler = createBulkUploadHandler({ root, getClient: () => activeClient, ledger, active })
+    const deleteHandler = createOwnedBulkDeleteHandler({ getClient: () => activeClient })
+
+    /* Route-specific JSON parsing is required because this preload registers the
+     * endpoint before server.js installs its normal Express middleware. Ownership
+     * is checked again inside deleteHandler immediately before TDLib deleteMessages. */
+    app.post('/api/filegram/owned-bulk-delete/:chatId', originalExpress.json({ limit: '2mb' }), deleteHandler)
 
     app.post('/api/chat-attachment/:chatId', (req, res, next) => {
       const tagged = req.headers['x-filegram-upload-id']
