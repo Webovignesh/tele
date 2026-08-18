@@ -306,6 +306,23 @@
     const delay = Math.max(TRUTH_BACKOFF_START_MS, Number(current.delay || TRUTH_BACKOFF_START_MS)); const timer = setTimeout(() => { const next = backoff.get(key); if (next) next.timer = null; reconcile(chatId, { force: true }).catch(() => {}) }, delay)
     if (timer && timer.unref) timer.unref(); backoff.set(key, { delay: Math.min(TRUTH_BACKOFF_MAX_MS, current.delay * 2), timer })
   }
+  async function recoverLiveMetadata (chatId, key, current, liveIds) {
+    let knownIds = new Set(current.items.map(item => idOf(item.messageId)))
+    let missingMetadata = [...liveIds].filter(id => !knownIds.has(id))
+    if (!missingMetadata.length) return { current, missingMetadata }
+
+    fullScanJobs.add(key)
+    try {
+      const scan = await request('scan-media-v3', { chatId, force: true })
+      if (belongsToChat(chatId, scan)) await commitDiscovery(chatId, { ...scan, chatId, savedAt: Number(scan.savedAt || Date.now()) }, { source: 'truth-metadata-recovery' })
+    } catch {}
+    finally { fullScanJobs.delete(key) }
+
+    const refreshed = committed.get(key) || current
+    knownIds = new Set(refreshed.items.map(item => idOf(item.messageId)))
+    missingMetadata = [...liveIds].filter(id => !knownIds.has(id))
+    return { current: refreshed, missingMetadata }
+  }
   async function reconcile (chatId, options = {}) {
     if (chatId == null) return { status: 'skipped', reason: 'no-chat' }; const key = idOf(chatId)
     if (fullScanJobs.has(key) || progressInFlight.has(key) || candidates.has(key)) return { status: 'skipped', reason: 'scan-in-flight' }
@@ -333,25 +350,14 @@
       /* A complete truth ID set is allowed to remove stale rows only after the
        * owner also has metadata for every live ID. If the browser index is partial,
        * pruning immediately would turn "100 cached / 120 live" into an even smaller
-       * intersection. Recover metadata through the normal full scanner first; its
-       * result is discovery-only and therefore cannot lower the current index. */
-      let knownIds = new Set(current.items.map(item => idOf(item.messageId)))
-      let missingMetadata = [...liveIds].filter(id => !knownIds.has(id))
-      if (missingMetadata.length) {
-        fullScanJobs.add(key)
-        try {
-          const scan = await request('scan-media-v3', { chatId, force: true })
-          if (belongsToChat(chatId, scan)) await commitDiscovery(chatId, { ...scan, chatId, savedAt: Number(scan.savedAt || Date.now()) }, { source: 'truth-metadata-recovery' })
-        } catch {}
-        finally { fullScanJobs.delete(key) }
-        current = committed.get(key) || current
-        knownIds = new Set(current.items.map(item => idOf(item.messageId)))
-        missingMetadata = [...liveIds].filter(id => !knownIds.has(id))
-        if (missingMetadata.length) {
-          scheduleBackoff(chatId); try { setLoadState('File metadata is incomplete. Retrying automatically.') } catch {}
-          logReconcile({ chatId, cached: current.items.length, live: liveIds.size, missing: [], remaining: current.items.length, persisted: `skipped(reason=metadata-incomplete:${missingMetadata.length})`, truth: truth.source || 'unknown', complete: true, accessible: true })
-          return { status: 'unknown', reason: 'metadata-incomplete', missingMetadata: missingMetadata.length }
-        }
+       * intersection. Recovery runs through the normal full scanner, but stays
+       * discovery-only and therefore cannot lower the current index. */
+      const recovery = await recoverLiveMetadata(chatId, key, current, liveIds)
+      current = recovery.current
+      if (recovery.missingMetadata.length) {
+        scheduleBackoff(chatId); try { setLoadState('File metadata is incomplete. Retrying automatically.') } catch {}
+        logReconcile({ chatId, cached: current.items.length, live: liveIds.size, missing: [], remaining: current.items.length, persisted: `skipped(reason=metadata-incomplete:${recovery.missingMetadata.length})`, truth: truth.source || 'unknown', complete: true, accessible: true })
+        return { status: 'unknown', reason: 'metadata-incomplete', missingMetadata: recovery.missingMetadata.length }
       }
 
       clearBackoff(chatId)
