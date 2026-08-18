@@ -2,26 +2,21 @@
 
 /* Daily-driver P1 stabilization.
  * - latest-message pinning on chat open
- * - cache-first, throttled per-chat file reconciliation
  * - lazy/deduplicated thumbnails
+ *
+ * The "cache-first, throttled per-chat file reconciliation" this layer used to
+ * advertise is gone; `public/files-stability.js` owns the Files index.
  */
 
 const teleP1ThumbCache = new Map()
 const teleP1ThumbInflight = new Map()
 const teleP1ThumbTargets = new WeakMap()
-const teleP1FilePaintTimers = new Map()
 let teleP1OpenToken = 0
 let teleP1PinUntil = 0
 let teleP1PinChatKey = null
 let teleP1UserTouchedMessages = false
 
 function teleP1Key (value) { return String(value) }
-
-function teleP1SnapshotBelongs (chatId, snapshot) {
-  if (!snapshot || !Array.isArray(snapshot.items)) return false
-  const wanted = teleP1Key(chatId)
-  return snapshot.items.every(item => item && teleP1Key(item.chatId) === wanted)
-}
 
 function teleP1ScrollLatest () {
   if (state.view !== 'messages' || state.activeChatId == null) return
@@ -66,28 +61,13 @@ setView = function teleP1SetView (view) {
   return result
 }
 
+/* The `openChat` index restore is gone: this wrapper used to read the IndexedDB
+ * record itself and push it into `rescueFileCache`, one of the several independent
+ * restores that let a single stale copy repopulate every surface. It keeps the two
+ * things it owns, both about the Messages tab: pinning the newest message and
+ * scrolling to it. */
 const teleP1BaseOpenChat = openChat
 openChat = async function teleP1OpenChat (chatId) {
-  const key = teleP1Key(chatId)
-  const memory = rescueFileCache.get(key)
-  if (teleP1SnapshotBelongs(chatId, memory)) {
-    try { teleHotfixValidatedChats.add(key) } catch {}
-  } else {
-    try {
-      teleP0v2ReadIndex(chatId).then(snapshot => {
-        if (!teleP1SnapshotBelongs(chatId, snapshot)) return
-        rescueFileCache.set(key, snapshot)
-        try { teleHotfixValidatedChats.add(key) } catch {}
-        if (state.activeChatId != null && teleP1Key(state.activeChatId) === key && state.view === 'files') {
-          rescueApplyCompleteFiles(chatId, snapshot)
-          renderFiles()
-          updateMediaCountLabel()
-          setLoadState(`Cached ${snapshot.items.length.toLocaleString()} files`)
-        }
-      }).catch(() => {})
-    } catch {}
-  }
-
   teleP1BeginLatestPin(chatId)
   const result = await teleP1BaseOpenChat(chatId)
   teleP1ScrollLatest()
@@ -102,70 +82,17 @@ function teleP1SortMediaItems (items) {
   })
 }
 
-function teleP1PaintFiles (chatId, snapshot, finalPaint) {
-  const key = teleP1Key(chatId)
-  if (state.activeChatId == null || teleP1Key(state.activeChatId) !== key || state.view !== 'files') return
-  rescueApplyCompleteFiles(chatId, snapshot)
-  renderFiles()
-  updateMediaCountLabel()
-  if (finalPaint) setLoadState(`Loaded ${snapshot.items.length.toLocaleString()} files`)
-  else if (!snapshot.done) setLoadState(`Syncing files... ${snapshot.items.length.toLocaleString()} indexed`)
-}
-
-function teleP1ScheduleFilePaint (chatId, snapshot, finalPaint) {
-  const key = teleP1Key(chatId)
-  if (finalPaint) {
-    clearTimeout(teleP1FilePaintTimers.get(key))
-    teleP1FilePaintTimers.delete(key)
-    teleP1PaintFiles(chatId, snapshot, true)
-    return
-  }
-  if (teleP1FilePaintTimers.has(key)) return
-  const timer = setTimeout(() => {
-    teleP1FilePaintTimers.delete(key)
-    const live = rescueFileCache.get(key)
-    if (teleP1SnapshotBelongs(chatId, live)) teleP1PaintFiles(chatId, live, false)
-  }, 220)
-  teleP1FilePaintTimers.set(key, timer)
-}
-
-function teleP1MergeMediaProgress (payload) {
-  if (!payload || payload.chatId == null) return
-  const key = teleP1Key(payload.chatId)
-  const current = rescueFileCache.get(key)
-  const snapshot = teleP1SnapshotBelongs(payload.chatId, current)
-    ? current
-    : { chatId: payload.chatId, items: [], found: 0, scanned: 0, typeCounts: {}, savedAt: Date.now(), done: false }
-
-  const byKey = new Map((snapshot.items || []).map(item => [String(item.key || `${item.chatId}:${item.messageId}`), item]))
-  for (const item of payload.items || []) {
-    if (!item || teleP1Key(item.chatId) !== key) continue
-    byKey.set(String(item.key || `${item.chatId}:${item.messageId}`), item)
-  }
-  snapshot.chatId = payload.chatId
-  snapshot.items = teleP1SortMediaItems([...byKey.values()])
-  snapshot.found = snapshot.items.length
-  snapshot.scanned = Number(payload.scanned || snapshot.scanned || 0)
-  snapshot.typeCounts = payload.typeCounts || snapshot.typeCounts || {}
-  snapshot.savedAt = Date.now()
-  snapshot.done = !!payload.done
-  rescueFileCache.set(key, snapshot)
-  try { teleHotfixValidatedChats.add(key) } catch {}
-
-  if (snapshot.done) {
-    try { teleP0v2WriteIndex(payload.chatId, snapshot).catch(() => {}) } catch {}
-  }
-  teleP1ScheduleFilePaint(payload.chatId, snapshot, snapshot.done)
-}
-
-const teleP1BaseHandleEvent = handleEvent
-handleEvent = function teleP1HandleEvent (event) {
-  if (event && event.name === 'media-index-progress') {
-    teleP1MergeMediaProgress(event.payload || {})
-    return
-  }
-  return teleP1BaseHandleEvent(event)
-}
+/* `teleP1MergeMediaProgress`, `teleP1PaintFiles`, `teleP1ScheduleFilePaint`, the
+ * `media-index-progress` wrapper and the `teleP0v2WriteIndex` call are gone.
+ *
+ * This was the fourth layer merging the same progress stream into the same shared
+ * cache on its own 220 ms paint timer, and it also returned without calling the base
+ * chain. `public/files-stability.js` owns `media-index-progress`, batches it
+ * (PROGRESS_FLUSH_MS 350, PROGRESS_FLUSH_ITEMS 800) and ignores obsolete progress for
+ * chats that already hold a complete index - which is what stopped the visible count
+ * jumping 22k -> 6k -> 22k.
+ *
+ * `teleP1SortMediaItems` stays: other layers call it as a helper. */
 
 function teleP1RevealThumb (img, item, pathValue) {
   if (!img || !img.isConnected || !pathValue) return

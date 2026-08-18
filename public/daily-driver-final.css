@@ -377,10 +377,7 @@
   min-width: 0;
 }
 
-#mg-downloads-pane #dl-dir {
-  min-width: 0 !important;
-  width: 100% !important;
-}
+/* `#mg-downloads-pane #dl-dir` is gone with the input. */
 
 #mg-downloads-pane .dl-controls > .row button {
   min-width: 0 !important;

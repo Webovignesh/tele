@@ -6,27 +6,19 @@
   if (window.__fileGramBulkUploadsLoaderInstalled) return
   window.__fileGramBulkUploadsLoaderInstalled = true
 
-  function loadConsistency () {
-    if (document.querySelector('script[data-filegram-file-consistency-v2]')) return
-    const script = document.createElement('script')
-    script.src = 'file-consistency-v2.js?v=3'
-    script.dataset.filegramFileConsistencyV2 = '3'
-    script.async = false
-    document.body.appendChild(script)
-  }
-
+  /* The chain used to end with a third link, `file-consistency-v2.js?v=3`, appended
+   * on this script's load event. That file is deleted: it duplicated Files
+   * reconciliation, the folder-picker handler and the Save-to paint, and being last
+   * in the chain it won `#set-dir` by accident of load order. Its concerns belong to
+   * `files-stability.js`, `app.js` and `index.html` + `filegram-ui.css` now. The
+   * chain keeps its shape - bulk-uploads, then hardening on its load event - so
+   * nothing about the upload path changes. */
   function loadHardening () {
-    const existing = document.querySelector('script[data-filegram-upload-hardening]')
-    if (existing) {
-      if (window.__fileGramUploadsHardeningInstalled) loadConsistency()
-      else existing.addEventListener('load', loadConsistency, { once: true })
-      return
-    }
+    if (document.querySelector('script[data-filegram-upload-hardening]')) return
     const hardening = document.createElement('script')
     hardening.src = 'uploads-hardening.js?v=3'
     hardening.dataset.filegramUploadHardening = '3'
     hardening.async = false
-    hardening.addEventListener('load', loadConsistency, { once: true })
     document.body.appendChild(hardening)
   }
 

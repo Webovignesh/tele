@@ -236,8 +236,8 @@
   background: #131e2a;
 }
 #mg-downloads-pane .conc { gap: 5px; }
-#mg-downloads-pane #dl-dir { background: #0c151f; }
-#mg-downloads-pane .dir-current { padding: 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* `#dl-dir` and `.dir-current` are gone from the markup. The Save-to control is
+   styled once, in filegram-ui.css. */
 #mg-downloads-pane .dl-controls > .row { gap: 5px !important; }
 #mg-downloads-pane .dl-controls button { border-radius: 9px; }
 #download-list { padding: 0 8px 12px; }

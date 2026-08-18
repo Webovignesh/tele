@@ -296,10 +296,15 @@ details code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; 
 .scan-banner.done { border-color: var(--ok); background: rgba(63,185,80,.12); }
 
 .dl-controls { padding: 0 14px 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-.dir-current { font-size: 11px; word-break: break-all; line-height: 1.3; }
+/* `.dir-current` is gone with `#dl-dir-current`: the Save-to control shows the path
+   itself, so there is no second path line to style. */
 .conc { flex-direction: row; align-items: center; justify-content: space-between; font-size: 12px; }
-.conc .row { display: flex; align-items: center; gap: 8px; width: 60%; }
-.conc input[type=text] { flex: 1; min-width: 0; padding: 4px 7px; font-size: 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+/* `width: 60%` was here to leave room for the Save-to input beside its button. The
+   only `.conc` left is Parallel files, whose row is already `width: 100% !important`
+   from filegram-ui.css, so the declaration described a layout that no longer exists.
+   `.conc input[type=text]` styled `#dl-dir`, which is gone; no text input remains
+   inside a `.conc`. */
+.conc .row { display: flex; align-items: center; gap: 8px; }
 .conc b { min-width: 22px; text-align: right; }
 .conc input[type=range] { flex: 1; padding: 0; accent-color: var(--accent); }
 .dl-controls .row { display: flex; gap: 6px; }

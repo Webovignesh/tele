@@ -12,21 +12,62 @@
   window.__fileGramUploadsHardeningInstalled = true
 
   const TRANSIENT_HTTP = new Set([408, 425, 429, 500, 502, 503, 504])
-  const HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
-  const RECONCILE_MARK_KEY = 'filegram-files-delete-reconcile-v1'
+  /* THIS LAYER NO LONGER OWNS ANY PART OF THE FILES INDEX.
+   *
+   * Removed: `HIGH_WATER_KEY` and `exactHighWater` (a second implementation of the
+   * durable total floor), `RECONCILE_MARK_KEY` / `readReconcileMarks` /
+   * `markReconciled` (the permanent per-chat mark that disabled reconciliation for a
+   * chat in every LATER session, so files deleted after the stamp stayed for ever),
+   * `deletedByChat` / `rememberDeletedIds` / `pruneDeletedIndex` (session-lifetime
+   * tombstones that made the counts look right for one page load and were lost on
+   * reload), `indexSnapshot`, `paintFileCount`, `persistSnapshot`,
+   * `scrubTemporaryIndex`, `reconcilePersistedIndex`, `reconcileFlights`,
+   * `reconciledThisSession`, `installIndexApiHardening` (which wrapped
+   * `teleFilesIndex.snapshot`/`ensure`/`hardRefresh` to filter the owner's answers
+   * through those tombstones), `reconcileActiveChat` and the 900 ms chat-switch
+   * interval that drove it.
+   *
+   * One of those was also an active hazard rather than merely redundant:
+   * `pruneDeletedIndex` edited the array of the snapshot `teleFilesIndex.snapshot()`
+   * handed it, IN PLACE. The old monotonic persistence guard absorbed that - a foreign
+   * in-place shrink could never reach storage - so making the boundary unconditional
+   * turned it into a durable corruption, which is what broke preservation test 3.12
+   * while task 5 was being written. The owner now keeps a private ledger as the merge
+   * base and publishes a copy, so a legacy layer editing the exposed snapshot can
+   * still change what is on screen for that session but can never become the base of a
+   * commit.
+   *
+   * `public/files-stability.js` owns discovery, restore, reconciliation, persistence
+   * and the durable floor, and exposes `reconcile` and `retireTemporary` for the two
+   * things this layer legitimately needs.
+   *
+   * KEPT, untouched: the upload transport, retry classification, `Retry-After`
+   * handling and `installQueueHardening` (clause 3.12); the temporary-id suppression
+   * in `installRealtimeHardening` (clause 3.5); the Messages-tab merge in
+   * `scheduleRecentRefresh`; and `removeCaptionUi` / `removeDuplicateHeaderInfo`. */
   const refreshTimers = new Map()
-  const deletedByChat = new Map()
-  const reconcileFlights = new Map()
-  const reconciledThisSession = new Set()
   let uiObserver = null
-  let folderPickerInstalled = false
-  let indexApiPatched = false
 
   function isTemporaryId (value) {
     return String(value == null ? '' : value).trim().startsWith('-')
   }
 
   function chatKey (value) { return String(value == null ? '' : value) }
+
+  /* The one index operation this layer still performs, and it goes through the owner.
+   *
+   * A temporary sending id is synthetic: Telegram can never report it as present, so it
+   * has no business in the durable index. The owner drops the requested ids (or every
+   * temporary id it holds when none are named), repaints and persists, and deliberately
+   * does NOT record them as removals - a real re-upload arrives with a real id. */
+  function retireTemporaryIds (chatId, ids) {
+    if (chatId == null) return
+    try {
+      if (window.teleFilesIndex && typeof window.teleFilesIndex.retireTemporary === 'function') {
+        window.teleFilesIndex.retireTemporary(chatId, ids)
+      }
+    } catch {}
+  }
 
   function retryAfterMs (xhr) {
     const raw = String(xhr.getResponseHeader('Retry-After') || '').trim()
@@ -87,198 +128,6 @@
     })
   }
 
-  function typeCounts (items) {
-    const counts = {}
-    for (const item of items || []) {
-      if (!item || !item.type) continue
-      counts[item.type] = (counts[item.type] || 0) + 1
-    }
-    return counts
-  }
-
-  function compareIds (a, b) {
-    let aa = 0n; let bb = 0n
-    try { aa = BigInt(String(a || 0)) } catch {}
-    try { bb = BigInt(String(b || 0)) } catch {}
-    return aa === bb ? 0 : (aa < bb ? -1 : 1)
-  }
-
-  function indexSnapshot (chatId) {
-    try {
-      if (window.teleFilesIndex && typeof window.teleFilesIndex.snapshot === 'function') {
-        const snapshot = window.teleFilesIndex.snapshot(chatId)
-        if (snapshot && Array.isArray(snapshot.items)) return snapshot
-      }
-    } catch {}
-    try {
-      if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.get) {
-        const snapshot = rescueFileCache.get(chatKey(chatId))
-        if (snapshot && Array.isArray(snapshot.items)) return snapshot
-      }
-    } catch {}
-    return null
-  }
-
-  function exactHighWater (chatId, count) {
-    try {
-      const floors = JSON.parse(localStorage.getItem(HIGH_WATER_KEY) || '{}') || {}
-      const key = chatKey(chatId)
-      if (count > 0) floors[key] = { count, at: Date.now() }
-      else delete floors[key]
-      localStorage.setItem(HIGH_WATER_KEY, JSON.stringify(floors))
-    } catch {}
-  }
-
-  function paintFileCount (chatId, snapshot) {
-    try {
-      if (typeof state === 'undefined' || !state || chatKey(state.activeChatId) !== chatKey(chatId)) return
-      const total = Array.isArray(snapshot && snapshot.items) ? snapshot.items.length : 0
-      state.mediaCount = total
-      state.typeCounts = snapshot && snapshot.typeCounts || {}
-      const label = document.querySelector('#chat-media-count')
-      if (label) label.textContent = `${total.toLocaleString()} file${total === 1 ? '' : 's'}`
-      const selectAll = document.querySelector('#select-all-media')
-      if (selectAll) {
-        selectAll.textContent = `Select all (${total.toLocaleString()})`
-        selectAll.disabled = total === 0
-      }
-    } catch {}
-  }
-
-  function persistSnapshot (chatId, snapshot) {
-    try {
-      if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.set) rescueFileCache.set(chatKey(chatId), snapshot)
-    } catch {}
-    try {
-      if (typeof teleP0v2WriteIndex === 'function') Promise.resolve(teleP0v2WriteIndex(chatId, snapshot)).catch(() => {})
-    } catch {}
-  }
-
-  function rememberDeletedIds (chatId, ids) {
-    const key = chatKey(chatId)
-    if (!key) return new Set()
-    let set = deletedByChat.get(key)
-    if (!set) {
-      set = new Set()
-      deletedByChat.set(key, set)
-    }
-    for (const id of ids || []) if (id != null) set.add(String(id))
-    return set
-  }
-
-  function pruneDeletedIndex (chatId, extraIds, options = {}) {
-    const key = chatKey(chatId)
-    if (!key) return 0
-    const deleted = rememberDeletedIds(chatId, extraIds)
-    const snapshot = indexSnapshot(chatId)
-    if (!snapshot || !Array.isArray(snapshot.items)) return 0
-
-    const before = snapshot.items.length
-    const clean = snapshot.items.filter(item => item && !deleted.has(String(item.messageId)) && !isTemporaryId(item.messageId))
-    if (clean.length === before && !(extraIds && extraIds.length)) {
-      paintFileCount(chatId, snapshot)
-      return 0
-    }
-
-    clean.sort((a, b) => compareIds(b && b.messageId, a && a.messageId))
-    snapshot.items = clean
-    snapshot.found = clean.length
-    snapshot.typeCounts = typeCounts(clean)
-    snapshot.newestMessageId = clean.length ? clean[0].messageId : 0
-    snapshot.savedAt = Date.now()
-    if (snapshot.done == null) snapshot.done = true
-
-    exactHighWater(chatId, clean.length)
-    persistSnapshot(chatId, snapshot)
-
-    try {
-      if (typeof state !== 'undefined' && state && chatKey(state.activeChatId) === key) {
-        if (Array.isArray(state.messages)) {
-          state.messages = state.messages.filter(message => message && !deleted.has(String(message.id)) && !isTemporaryId(message.id))
-        }
-        if (typeof rescueSaveActiveChat === 'function') rescueSaveActiveChat()
-        paintFileCount(chatId, snapshot)
-        if (options.render !== false) {
-          if (state.view === 'messages' && typeof renderMessagesList === 'function') renderMessagesList()
-          if (state.view === 'files' && typeof renderFiles === 'function') renderFiles()
-        }
-      }
-    } catch {}
-    return before - clean.length
-  }
-
-  function scrubTemporaryIndex (chatId) {
-    const snapshot = indexSnapshot(chatId)
-    if (!snapshot || !Array.isArray(snapshot.items)) return 0
-    const temporary = snapshot.items.filter(item => item && isTemporaryId(item.messageId)).map(item => item.messageId)
-    return temporary.length ? pruneDeletedIndex(chatId, temporary) : 0
-  }
-
-  function readReconcileMarks () {
-    try { return JSON.parse(localStorage.getItem(RECONCILE_MARK_KEY) || '{}') || {} } catch { return {} }
-  }
-
-  function markReconciled (chatId) {
-    try {
-      const marks = readReconcileMarks()
-      marks[chatKey(chatId)] = Date.now()
-      localStorage.setItem(RECONCILE_MARK_KEY, JSON.stringify(marks))
-    } catch {}
-  }
-
-  async function reconcilePersistedIndex (chatId, force = false) {
-    const key = chatKey(chatId)
-    if (!key || reconcileFlights.has(key)) return reconcileFlights.get(key) || null
-    if (!force && reconciledThisSession.has(key)) return null
-    const marks = readReconcileMarks()
-    if (!force && Number(marks[key] || 0) > 0) {
-      reconciledThisSession.add(key)
-      return null
-    }
-
-    const snapshot = indexSnapshot(chatId)
-    // Do not stamp a chat reconciled merely because its persistent index has not
-    // finished restoring yet. That race permanently preserved stale counts on a
-    // fast chat switch because the later real snapshot was never verified.
-    if (!snapshot || !Array.isArray(snapshot.items)) return null
-    if (!snapshot.items.length) {
-      if (snapshot.done === false) return null
-      reconciledThisSession.add(key)
-      markReconciled(chatId)
-      exactHighWater(chatId, 0)
-      paintFileCount(chatId, snapshot)
-      return null
-    }
-
-    const flight = (async () => {
-      let unknown = 0
-      const ids = snapshot.items.map(item => String(item.messageId)).filter(id => /^-?\d+$/.test(id))
-      for (let offset = 0; offset < ids.length; offset += 750) {
-        const messageIds = ids.slice(offset, offset + 750)
-        const response = await fetch(`/api/filegram/reconcile-message-ids/${encodeURIComponent(String(chatId))}`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ messageIds })
-        })
-        let payload = {}
-        try { payload = await response.json() } catch {}
-        if (!response.ok || !payload.ok) throw new Error(payload.error || `Index reconciliation failed (${response.status})`)
-        unknown += Array.isArray(payload.unknown) ? payload.unknown.length : 0
-        const missing = Array.isArray(payload.missing) ? payload.missing : []
-        if (missing.length) pruneDeletedIndex(chatId, missing)
-        await new Promise(resolve => setTimeout(resolve, 0))
-      }
-      scrubTemporaryIndex(chatId)
-      if (!unknown) {
-        reconciledThisSession.add(key)
-        markReconciled(chatId)
-      }
-      return { unknown }
-    })().catch(() => null).finally(() => reconcileFlights.delete(key))
-    reconcileFlights.set(key, flight)
-    return flight
-  }
-
   function scheduleRecentRefresh (chatId) {
     const key = chatKey(chatId)
     if (!key) return
@@ -291,93 +140,54 @@
         const data = await request('get-messages', { chatId: Number(chatId), fromMessageId: 0, limit: 100 })
         if (chatKey(state.activeChatId) !== key) return
         rescueMergeMessages(chatId, data && data.messages || [])
-        pruneDeletedIndex(chatId, [], { render: false })
         if (typeof rescueSaveActiveChat === 'function') rescueSaveActiveChat()
         if (state.view === 'messages' && typeof renderMessagesList === 'function') renderMessagesList()
       } catch {}
     }, 350))
   }
 
-  function installIndexApiHardening () {
-    if (indexApiPatched || !window.teleFilesIndex) return false
-    const api = window.teleFilesIndex
-    const baseSnapshot = typeof api.snapshot === 'function' ? api.snapshot.bind(api) : null
-    const baseEnsure = typeof api.ensure === 'function' ? api.ensure.bind(api) : null
-    const baseHardRefresh = typeof api.hardRefresh === 'function' ? api.hardRefresh.bind(api) : null
-
-    if (baseSnapshot) {
-      api.snapshot = chatId => {
-        const snapshot = baseSnapshot(chatId)
-        if (!snapshot || !Array.isArray(snapshot.items)) return snapshot
-        const deleted = deletedByChat.get(chatKey(chatId))
-        if (deleted && deleted.size) {
-          const clean = snapshot.items.filter(item => item && !deleted.has(String(item.messageId)) && !isTemporaryId(item.messageId))
-          if (clean.length !== snapshot.items.length) {
-            snapshot.items = clean
-            snapshot.found = clean.length
-            snapshot.typeCounts = typeCounts(clean)
-            snapshot.newestMessageId = clean.length ? clean[0].messageId : 0
-          }
-        }
-        return snapshot
-      }
-    }
-    if (baseEnsure) {
-      api.ensure = async (...args) => {
-        const result = await baseEnsure(...args)
-        const chatId = args[0]
-        pruneDeletedIndex(chatId, [], { render: false })
-        return api.snapshot ? api.snapshot(chatId) : result
-      }
-    }
-    api.count = chatId => {
-      const snapshot = api.snapshot ? api.snapshot(chatId) : null
-      return snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0
-    }
-    api.total = api.count
-    if (baseHardRefresh) {
-      api.hardRefresh = async (...args) => {
-        const result = await baseHardRefresh(...args)
-        pruneDeletedIndex(args[0], [], { render: false })
-        return api.snapshot ? api.snapshot(args[0]) : result
-      }
-    }
-    indexApiPatched = true
-    return true
-  }
+  /* `installIndexApiHardening` is gone.
+   *
+   * It wrapped the owner's `snapshot`, `ensure`, `count`, `total` and `hardRefresh` so
+   * every answer was filtered through this layer's in-memory `deletedByChat` set. That
+   * is what made deletions look correct for the rest of a page session and wrong again
+   * after a reload, and it also meant the owner's API returned something the owner had
+   * not decided. The owner records removals durably in the persistent record
+   * (`removedIds`, `reconciledAt`) instead, so no filter on the way out is needed and
+   * correctness no longer depends on session lifetime (clause 2.13). */
 
   function installRealtimeHardening () {
     if (typeof handleEvent !== 'function' || handleEvent.__fileGramUploadRealtimeHardened) return false
     const baseHandleEvent = handleEvent
+    /* All that survives here is TEMPORARY-ID correctness (clause 3.5).
+     *
+     * An outgoing media message still carrying its temporary sending id is dropped
+     * before it reaches the chain, so an optimistic row never enters the index; when the
+     * real message arrives, the temporary ids are retired through the owner and the
+     * Messages tab is refreshed. The delete handling that used to be here is the owner's
+     * `handleRealtimeDelete`, which prunes the index AND the record and is gated on
+     * `isPermanent` - this layer's version pruned on every delete event, including the
+     * `is_permanent: false, from_cache: true` evictions TDLib emits in bulk after a full
+     * walk (22,489 ids about ten seconds after a complete scan, measured on this host),
+     * which would delete a whole channel's index for files that still exist. */
     const wrapped = function fileGramUploadStableHandleEvent (event) {
       if (event && event.name === 'message-upsert') {
         const message = event.message || event.payload && event.payload.message
         const chatId = event.chatId != null ? event.chatId : event.payload && event.payload.chatId
         if (message && message.media && message.outgoing && isTemporaryId(message.id)) return
         const result = baseHandleEvent(event)
-        pruneDeletedIndex(chatId, [], { render: false })
         if (message && message.media && !isTemporaryId(message.id)) {
-          scrubTemporaryIndex(chatId)
+          retireTemporaryIds(chatId)
           scheduleRecentRefresh(chatId)
         }
         return result
       }
-
-      const result = baseHandleEvent(event)
-      if (event && event.name === 'message-delete') {
-        const payload = event.payload || event
-        const chatId = event.chatId != null ? event.chatId : payload.chatId
-        const ids = event.messageIds || payload.messageIds || []
-        pruneDeletedIndex(chatId, ids)
-        setTimeout(() => pruneDeletedIndex(chatId, ids), 0)
-        setTimeout(() => pruneDeletedIndex(chatId, ids), 120)
-      }
-      return result
+      return baseHandleEvent(event)
     }
     wrapped.__fileGramUploadRealtimeHardened = true
     handleEvent = wrapped
     try {
-      if (typeof state !== 'undefined' && state && state.activeChatId != null) scrubTemporaryIndex(state.activeChatId)
+      if (typeof state !== 'undefined' && state && state.activeChatId != null) retireTemporaryIds(state.activeChatId)
     } catch {}
     return true
   }
@@ -390,105 +200,32 @@
     document.querySelectorAll('#mg-open-info').forEach(node => node.remove())
   }
 
-  function installHardeningStyles () {
-    if (document.querySelector('#fg-hardening-style')) return
-    const style = document.createElement('style')
-    style.id = 'fg-hardening-style'
-    style.textContent = `
-      #dl-dir, #dl-dir-current { display: none !important; }
-      #set-dir.fg-download-folder-picker {
-        width: 100% !important; min-width: 0 !important; min-height: 42px !important;
-        display: flex !important; align-items: center !important; justify-content: flex-start !important;
-        gap: 10px !important; padding: 8px 12px !important; overflow: hidden !important;
-        text-align: left !important;
-      }
-      #set-dir.fg-download-folder-picker .fg-folder-icon { flex: 0 0 auto; font-size: 16px; }
-      #set-dir.fg-download-folder-picker .fg-folder-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-      #set-dir.fg-download-folder-picker .fg-folder-label { color: var(--fg-text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; }
-      #set-dir.fg-download-folder-picker .fg-folder-path { color: var(--fg-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    `
-    document.head.appendChild(style)
-  }
-
-  function paintFolderButton () {
-    const button = document.querySelector('#set-dir')
-    const input = document.querySelector('#dl-dir')
-    if (!button || !input) return
-    const current = String(input.value || '').trim() || 'Choose a download folder'
-    const ready = button.dataset.fgFolderPath === current && !!button.querySelector('.fg-folder-path')
-    if (ready) return
-
-    button.dataset.fgFolderPath = current
-    button.title = current
-    if (!button.querySelector('.fg-folder-copy')) {
-      button.innerHTML = '<span class="fg-folder-icon" aria-hidden="true">📁</span><span class="fg-folder-copy"><span class="fg-folder-label">Save to</span><span class="fg-folder-path"></span></span>'
-    }
-    const path = button.querySelector('.fg-folder-path')
-    if (path && path.textContent !== current) path.textContent = current
-  }
-
-  function installDownloadFolderPicker () {
-    const button = document.querySelector('#set-dir')
-    const input = document.querySelector('#dl-dir')
-    if (!button || !input) return false
-    installHardeningStyles()
-    button.classList.add('fg-download-folder-picker')
-    paintFolderButton()
-
-    if (!folderPickerInstalled) {
-      folderPickerInstalled = true
-      button.onclick = async () => {
-        if (button.disabled) return
-        button.disabled = true
-        try {
-          const response = await fetch('/api/filegram/pick-download-folder', { method: 'POST' })
-          let payload = {}
-          try { payload = await response.json() } catch {}
-          if (!response.ok || !payload.ok) throw new Error(payload.error || `Folder picker failed (${response.status})`)
-          if (payload.cancelled || !payload.path) return
-          if (typeof request !== 'function') throw new Error('FileGram is not connected')
-          const result = await request('set-download-dir', { dir: payload.path })
-          if (typeof setDirLabel === 'function') setDirLabel(result.downloadsDir || payload.path)
-          else input.value = result.downloadsDir || payload.path
-          paintFolderButton()
-          if (typeof toastOk === 'function') toastOk('Download folder changed')
-          else if (typeof toast === 'function') toast('Download folder changed', 'ok')
-        } catch (error) {
-          if (typeof toast === 'function') toast(error.message || String(error), 'error')
-        } finally {
-          button.disabled = false
-        }
-      }
-
-      try {
-        if (typeof setDirLabel === 'function' && !setDirLabel.__fileGramFolderAware) {
-          const baseSetDirLabel = setDirLabel
-          const wrapped = function fileGramFolderAwareSetDirLabel (dir) {
-            const result = baseSetDirLabel(dir)
-            paintFolderButton()
-            return result
-          }
-          wrapped.__fileGramFolderAware = true
-          setDirLabel = wrapped
-        }
-      } catch {}
-    }
-    return true
-  }
-
+  /* The Save-to control is not this layer's business any more.
+   *
+   * `installHardeningStyles` (the injected `#fg-hardening-style`), `paintFolderButton`,
+   * `installDownloadFolderPicker` and the `setDirLabel` wrapper are all gone, together
+   * with the MutationObserver, the 25 ms bootstrap interval and the 15 s sweep that
+   * kept re-running them. Three consequences of that machinery were measured on the
+   * running app: its `#fg-hardening-style` was one of three injected
+   * `width: 100% !important` rules that all lost the cascade to
+   * `#mg-downloads-pane #set-dir { width: 54px !important }`; `paintFolderButton`
+   * rewrote the button's innerHTML with its own internal structure, competing with two
+   * other layers doing the same; and its `onclick` was silently discarded when
+   * file-consistency-v2.js clone-replaced the node, so the handler the user actually
+   * triggered belonged to a different layer than the markup they saw.
+   *
+   * One control, one stylesheet block (filegram-ui.css), one painter and one handler
+   * (both in app.js). `removeCaptionUi` and `removeDuplicateHeaderInfo` keep their own
+   * cleanup loop below - they are unrelated to the download folder. */
   function installUiCleanup () {
     removeCaptionUi()
     removeDuplicateHeaderInfo()
-    installDownloadFolderPicker()
     if (uiObserver || !document.body) return
 
-    // Bootstrap-only observer. Every repaint below is idempotent; in particular
-    // paintFolderButton does not mutate the DOM if its path is unchanged, so the
-    // observer cannot feed itself forever.
+    // Bootstrap-only observer, and both callbacks below are pure removals.
     uiObserver = new MutationObserver(() => {
       removeCaptionUi()
       removeDuplicateHeaderInfo()
-      installDownloadFolderPicker()
     })
     uiObserver.observe(document.body, { childList: true, subtree: true })
     setTimeout(() => {
@@ -496,7 +233,6 @@
       uiObserver = null
       removeCaptionUi()
       removeDuplicateHeaderInfo()
-      installDownloadFolderPicker()
     }, 15000)
   }
 
@@ -558,39 +294,23 @@
     return true
   }
 
-  function reconcileActiveChat () {
-    try {
-      if (typeof state === 'undefined' || !state || state.activeChatId == null) return
-      const chatId = state.activeChatId
-      pruneDeletedIndex(chatId, [], { render: false })
-      reconcilePersistedIndex(chatId).then(() => {
-        pruneDeletedIndex(chatId, [])
-      }).catch(() => {})
-    } catch {}
-  }
+  /* `reconcileActiveChat` and the 900 ms chat-switch interval that called it are gone.
+   *
+   * They drove `reconcilePersistedIndex`, this layer's own reconciliation, against
+   * `POST /api/filegram/reconcile-message-ids/:chatId` - a second truth source, deleted
+   * in task 4.3, which asked "do these specific ids still exist" one getMessage at a
+   * time and could see nothing the client had never indexed. Reconciliation is
+   * `files-stability.js` `reconcile()`, over `media-truth-v1`, scheduled from its own
+   * `openChat` wrapper once per 60 s freshness window - no polling interval, and one
+   * request per pass. */
 
   installUiCleanup()
-  installIndexApiHardening()
   installRealtimeHardening()
-  reconcileActiveChat()
 
   let tries = 0
   const timer = setInterval(() => {
     installRealtimeHardening()
-    installIndexApiHardening()
     installUiCleanup()
-    reconcileActiveChat()
     if (installQueueHardening() || ++tries > 240) clearInterval(timer)
   }, 25)
-
-  let lastActiveChat = ''
-  setInterval(() => {
-    try {
-      const current = typeof state !== 'undefined' && state ? chatKey(state.activeChatId) : ''
-      if (!current || current === lastActiveChat) return
-      lastActiveChat = current
-      pruneDeletedIndex(current, [], { render: false })
-      reconcilePersistedIndex(current).then(() => pruneDeletedIndex(current, [])).catch(() => {})
-    } catch {}
-  }, 900)
 })()

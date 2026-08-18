@@ -13,21 +13,62 @@ const compatSource = fs.readFileSync('tdl-upload-compat.js', 'utf8')
 const dedupeSource = fs.readFileSync('download-dedupe-preload.js', 'utf8')
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'))
 
+/* Comments must not satisfy or break an assertion: the deletions this fix makes leave
+ * comments naming the removed code, so checks by ABSENCE read comment-stripped source. */
+const stripComments = source => source
+  .split('\n')
+  .filter(line => {
+    const trimmed = line.trim()
+    return !(trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*/') || trimmed.startsWith('*'))
+  })
+  .join('\n')
+const p1Code = stripComments(p1)
+
 assert.match(html, /daily-driver-p1\.js/, 'P1 runtime must load last')
 assert.match(html, /daily-driver-p1\.css/, 'P1 stylesheet must be active')
 assert.match(p1, /teleP1BeginLatestPin/, 'chat opening must pin the message viewport to the latest message')
 assert.match(p1, /panel\.scrollTop = panel\.scrollHeight/, 'latest-message pin must scroll to the bottom')
 assert.match(p1, /wheel[^]*teleP1UserTouchedMessages = true/, 'manual user scrolling must cancel latest-message pinning')
-assert.match(p1, /media-index-progress/, 'P1 must own progressive file-index reconciliation')
-assert.match(p1, /teleP1FilePaintTimers/, 'file-index rendering must be throttled')
-assert.match(p1, /teleP0v2ReadIndex/, 'completed file indexes must restore from persistent cache')
-assert.match(p1, /teleP0v2WriteIndex/, 'completed file indexes must persist after reconciliation')
+/* INVERTED, and the requirements moved rather than dropped.
+ *
+ * These four required P1 to OWN progressive file-index reconciliation, to throttle its
+ * own file paints, and to restore from and persist to the legacy IndexedDB boundary.
+ * Four layers claimed that ownership simultaneously, each swallowing
+ * `media-index-progress` without calling the base chain, which is what made the visible
+ * count fluctuate and what let a partial batch reach storage.
+ *
+ * `public/files-stability.js` owns the stream, and it still batches (PROGRESS_FLUSH_MS
+ * 350, PROGRESS_FLUSH_ITEMS 800) and still persists a completed index - the properties
+ * are asserted against the owner. Called out in the task 7/8/9 evidence. */
+const p1Owner = fs.readFileSync('public/files-stability.js', 'utf8')
+assert.doesNotMatch(p1Code, /media-index-progress/, 'only the Files index owner may handle the progress stream')
+assert.doesNotMatch(p1Code, /teleP0v2ReadIndex|teleP0v2WriteIndex/, 'this layer must not read or write the persistent index')
+assert.doesNotMatch(p1Code, /rescueFileCache\.set/, 'the Files index owner must be the only writer of the shared cache')
+assert.match(p1Owner, /event\.name === 'media-index-progress'/, 'the owner must handle the progress stream')
+assert.match(p1Owner, /PROGRESS_FLUSH_MS = 350/, 'progress flushing must stay throttled')
+assert.match(p1Owner, /PROGRESS_FLUSH_ITEMS = 800/, 'progress flushing must stay batched by item count')
+assert.match(p1Owner, /async function writePersistent/, 'completed file indexes must still persist, from the owner')
 assert.match(p1, /IntersectionObserver/, 'file thumbnails must load near the viewport instead of eagerly')
 assert.match(p1, /teleP1ThumbInflight/, 'thumbnail requests must be deduplicated')
 assert.match(p1, /video\.preload = 'none'/, 'message videos must not start metadata downloads eagerly')
 assert.match(p1Css, /#mg-downloads-pane \.dl-controls/, 'downloads drawer must use the P1 flat layout')
-assert.match(p1Css, /\.dir-current[^]*display: none/, 'duplicate download path card must be removed')
-assert.match(p1Css, /grid-template-columns: minmax\(0, 1fr\) 54px/, 'download folder row must reserve readable path width')
+/* INVERTED, and this pair is the one that mattered most.
+ *
+ * `grid-template-columns: minmax(0, 1fr) 54px` reserved a 54px track for the Save-to
+ * button, and the companion rule `#mg-downloads-pane #set-dir { width: 54px !important }`
+ * filled it. At two ID selectors that rule outranked all three injected
+ * `width: 100% !important` overrides, so the control computed 54px inside a 361px row and
+ * rendered as `[icon] SAV...` over `F:...`. This suite required both to exist, which is
+ * why editing the JS layers could never fix the render. `.dir-current { display: none }`
+ * hid the duplicate path line rather than removing it, which is the "hidden legacy
+ * control" clause 2.20 objects to.
+ *
+ * Both are deleted. `public/filegram-ui.css` styles one full-width control, and
+ * `#dl-dir-current` no longer exists to hide. Called out in the task 7/8/9 evidence. */
+const p1CssCode = p1Css.replace(/\/\*[\s\S]*?\*\//g, ' ')
+assert.doesNotMatch(p1CssCode, /54px/, 'the 54px Save-to rule and its grid track must be gone, not overridden')
+assert.doesNotMatch(p1CssCode, /dir-current/, 'the duplicate download path card must be removed from the markup, not hidden')
+assert.doesNotMatch(p1CssCode, /#set-dir|#dl-dir/, 'only filegram-ui.css may style the Save-to control')
 
 assert.match(p1, /download-dedupe-preview/, 'download selected must run a dedupe preflight before queueing')
 assert.match(p1, /Exact filename \+ exact size/, 'dedupe report must explain the two-factor duplicate validation')

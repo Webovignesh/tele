@@ -682,12 +682,10 @@
     iconify($('#mg-tab-downloads'), ICON.download, 'Downloads')
     iconify($('#mg-tab-info'), ICON.info, 'Chat Info')
 
-    const setDir = $('#set-dir')
-    if (setDir && setDir.dataset.fgLabel !== '1') {
-      setDir.dataset.fgLabel = '1'
-      setDir.textContent = 'Browse'
-      setDir.title = 'Set the download destination folder'
-    }
+    /* This used to set `#set-dir.textContent = 'Browse'`, which destroyed the
+     * control's icon/label/path markup on every pass and made it one of the three
+     * layers fighting over the node. The Save-to control carries its own markup in
+     * index.html and `setDirLabel` in app.js is its only painter. */
   }
 
   /* Paints the elapsed portion of the concurrency track.

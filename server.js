@@ -4,6 +4,10 @@ const path = require('node:path')
 const fs = require('node:fs')
 const http = require('node:http')
 const crypto = require('node:crypto')
+// Owns the download folder picker (POST /api/filegram/pick-download-folder), which
+// spawns the Windows common item dialog. computeBuildId() below requires this
+// module lazily as well; the top-level require keeps one copy.
+const childProcess = require('node:child_process')
 
 const express = require('express')
 const { WebSocketServer } = require('ws')
@@ -44,6 +48,46 @@ fs.mkdirSync(MANAGEMENT_UPLOAD_DIR, { recursive: true })
 
 const PORT = Number(process.env.PORT || 3000)
 let CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 8))
+
+/* Build identity.
+ *
+ * A running Node process keeps whatever module bytes it loaded at boot, so a
+ * process started before a fix still serves the old code no matter what is on
+ * disk. Three defects on this branch were declared fixed while user-visible
+ * behaviour did not change, and a stale process was one of the candidate
+ * explanations that no amount of source reading can rule out. The build id makes
+ * the running process identify itself: it is the short HEAD sha when git is
+ * available, and otherwise a sha256 prefix over server.js plus the preload files
+ * that `npm start` wraps, so it still changes when those files change in a
+ * checkout without git. It is printed at boot and returned on `get-status`, so
+ * the browser can compare what answered it against the working tree. */
+const BUILD_SOURCES = [
+  'server.js',
+  'tdlib-temp-preload.js',
+  'tdl-upload-compat.js',
+  'bulk-upload-preload.js',
+  'download-dedupe-preload.js',
+  'thumb-cache-preload.js',
+  'session-preload.js'
+]
+
+function computeBuildId () {
+  try {
+    const head = childProcess
+      .execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString('utf8')
+      .trim()
+    if (head) return { buildId: head, buildIdSource: 'git' }
+  } catch {}
+  const hash = crypto.createHash('sha256')
+  for (const name of BUILD_SOURCES) {
+    try { hash.update(fs.readFileSync(path.join(ROOT, name))) } catch { hash.update(`missing:${name}`) }
+  }
+  return { buildId: hash.digest('hex').slice(0, 12), buildIdSource: 'sha256' }
+}
+
+const { buildId: BUILD_ID, buildIdSource: BUILD_ID_SOURCE } = computeBuildId()
+const PROCESS_STARTED_AT = new Date().toISOString()
 
 let client = null
 let ready = false
@@ -1133,6 +1177,14 @@ function cloneMediaIndexSnapshot (snapshot, extra = {}) {
     items: Array.isArray(snapshot && snapshot.items) ? snapshot.items.map(item => ({ ...item })) : [],
     cancelled: !!(snapshot && snapshot.cancelled),
     done: !!(snapshot && snapshot.done),
+    /* Completeness of the WALK, distinct from `done`.
+     *
+     * `done` only means "this scan stopped and was not cancelled", which a
+     * truncated walk also satisfies, so it cannot tell a failed scan from an
+     * empty chat. `historyComplete` is true only when the walk reached the real
+     * end of history (an empty page). A repeated cursor, a page that added no
+     * new messages, the iteration guard, a cancel or a throw all leave it false. */
+    historyComplete: !!(snapshot && snapshot.historyComplete),
     ...extra
   }
 }
@@ -1150,7 +1202,10 @@ function emitMediaIndexProgress (job, items, done) {
         typeCounts: { ...job.typeCounts },
         items: Array.isArray(items) ? items : [],
         cancelled: !!job.cancelled,
-        done: !!done
+        done: !!done,
+        // False for every streaming event; true on the final event only when the
+        // walk reached the empty-page end of history.
+        historyComplete: !!job.historyComplete && !job.cancelled
       }
     }
   })
@@ -1183,6 +1238,10 @@ async function scanMediaIndexV3 (chatId, force = false) {
     found: 0,
     typeCounts: { document: 0, photo: 0, video: 0, gif: 0, audio: 0, voice: 0, video_note: 0, sticker: 0 },
     items: [],
+    /* Set true at exactly one place: the empty-page exit below. Every other way
+     * out of the loop (repeated cursor, newMessages === 0, the 100000-iteration
+     * guard, a cancel, a throw) leaves it false. */
+    historyComplete: false,
     promise: null
   }
 
@@ -1202,7 +1261,11 @@ async function scanMediaIndexV3 (chatId, force = false) {
           only_local: false
         })
         const messages = (history.messages || []).filter(message => message.sending_state === undefined)
-        if (!messages.length) break
+        if (!messages.length) {
+          // The real end of history, and the ONLY exit that proves completeness.
+          job.historyComplete = true
+          break
+        }
 
         const batchItems = []
         let newMessages = 0
@@ -1250,6 +1313,12 @@ async function scanMediaIndexV3 (chatId, force = false) {
         items: job.items.map(item => ({ ...item })),
         cancelled: !!job.cancelled,
         done: !job.cancelled,
+        /* Carried into the cached snapshot, so a later reader (`media-truth-v1`,
+         * or the `fromCache` early return above) can still tell a walk that
+         * reached the end of history from one that stopped early. A cancel clears
+         * it even if the empty page was reached, because a cancelled walk is not a
+         * truth pass. A throw never gets here at all. */
+        historyComplete: !!job.historyComplete && !job.cancelled,
         savedAt: Date.now()
       }
       if (!job.cancelled) mediaIndexCache.set(key, snapshot)
@@ -1262,6 +1331,138 @@ async function scanMediaIndexV3 (chatId, force = false) {
 
   mediaIndexScanJobs.set(key, job)
   return job.promise
+}
+
+/* ------------------------------ Telegram media truth ------------------------------ */
+
+/* The single source of truth for "which media message ids does Telegram hold for
+ * this chat right now", and the only thing the client is allowed to prune against.
+ *
+ * Two properties matter more than the id list itself:
+ *
+ * `accessible` - probed with getChat. A chat that was left, deleted or is
+ * otherwise unreachable answers `accessible: false`, never an empty chat, so an
+ * inaccessible chat can never be mistaken for a deletion event.
+ *
+ * `complete` - true only when the walk reached the real end of history (an empty
+ * page) on an accessible chat with no thrown error. It is deliberately NOT derived
+ * from how many rows were found: the previous truth source reported
+ * `exact: ids.length < 5000`, which is true for a scan that failed and returned
+ * nothing, so a failure was indistinguishable from an empty channel. Completeness
+ * is a property of how the walk ended, so there is no item cap here either.
+ *
+ * The walk is the same getChatHistory walk `scanMediaIndexV3` performs, with the
+ * same message filter (`extractMedia` yields a file, and `sending_state` is
+ * undefined so a message still being sent is not counted as live history). Only
+ * ids are collected, so nothing here can write the media index. */
+async function mediaTruthV1 (chatId) {
+  if (!client || !ready) throw new Error('Not logged in')
+  const key = String(chatId)
+
+  let accessible = false
+  try {
+    const chat = await client.invoke({ _: 'getChat', chat_id: chatId })
+    accessible = !!(chat && chat.id != null)
+  } catch (error) {
+    return {
+      ok: true,
+      ids: [],
+      count: 0,
+      complete: false,
+      accessible: false,
+      scanned: 0,
+      source: 'probe',
+      error: String(error && error.message ? error.message : error)
+    }
+  }
+  if (!accessible) {
+    return { ok: true, ids: [], count: 0, complete: false, accessible: false, scanned: 0, source: 'probe' }
+  }
+
+  /* A cached snapshot is reusable only when its own walk reached the end of
+   * history and was not cancelled. `scan-media-v3` keeps that snapshot fresh
+   * through the live delete and upsert paths, so reusing it avoids re-walking a
+   * large channel on every reconciliation pass. */
+  const cached = mediaIndexCache.get(key)
+  if (cached && Array.isArray(cached.items) && cached.historyComplete && !cached.cancelled) {
+    const ids = cached.items.map(item => String(item.messageId))
+    return {
+      ok: true,
+      ids,
+      count: ids.length,
+      complete: true,
+      accessible: true,
+      scanned: Number(cached.scanned || 0),
+      source: 'cache'
+    }
+  }
+
+  const ids = []
+  const seenMessages = new Set()
+  let scanned = 0
+  let historyComplete = false
+  let cursor = 0
+
+  try {
+    for (let iteration = 0; iteration < 100000; iteration++) {
+      const history = await client.invoke({
+        _: 'getChatHistory',
+        chat_id: chatId,
+        from_message_id: cursor,
+        offset: 0,
+        limit: 100,
+        only_local: false
+      })
+      const messages = (history.messages || []).filter(message => message.sending_state === undefined)
+      if (!messages.length) {
+        // The real end of history, and the ONLY exit that proves completeness.
+        historyComplete = true
+        break
+      }
+      let newMessages = 0
+      for (const message of messages) {
+        const messageKey = String(message.id)
+        if (seenMessages.has(messageKey)) continue
+        seenMessages.add(messageKey)
+        newMessages++
+        const media = extractMedia(message)
+        if (!media || !media.file) continue
+        ids.push(messageKey)
+      }
+      scanned += newMessages
+      const oldest = messages[messages.length - 1]
+      const nextCursor = oldest && oldest.id
+      // A repeated cursor or a page that added nothing new means the walk stopped
+      // early: it leaves historyComplete false, exactly as in scanMediaIndexV3.
+      if (!nextCursor || String(nextCursor) === String(cursor) || newMessages === 0) break
+      cursor = nextCursor
+      await new Promise(resolve => setImmediate(resolve))
+    }
+  } catch (error) {
+    /* A thrown walk reports no ids at all. Returning the partial set would invite
+     * a caller to prune against it; `complete: false` plus an empty list makes
+     * misuse impossible rather than merely discouraged. */
+    return {
+      ok: false,
+      ids: [],
+      count: 0,
+      complete: false,
+      accessible: true,
+      scanned,
+      source: 'walk',
+      error: String(error && error.message ? error.message : error)
+    }
+  }
+
+  return {
+    ok: true,
+    ids,
+    count: ids.length,
+    complete: historyComplete,
+    accessible: true,
+    scanned,
+    source: 'walk'
+  }
 }
 
 
@@ -1528,7 +1729,7 @@ function initClient (config) {
       return
     }
     if (u._ === 'updateDeleteMessages') {
-      deleteMediaIndexMessages(u.chat_id, u.message_ids || [])
+      deleteMediaIndexMessages(u.chat_id, u.message_ids || [], { permanent: !!u.is_permanent, fromCache: !!u.from_cache })
       sendAll({
         type: 'event',
         event: {
@@ -1732,12 +1933,32 @@ function patchMediaIndexMessage (chatId, message) {
   cached.savedAt = Date.now()
 }
 
-function deleteMediaIndexMessages (chatId, messageIds) {
+/* `options.permanent` says whether Telegram actually deleted the messages.
+ *
+ * TDLib also sends updateDeleteMessages with `is_permanent: false` and
+ * `from_cache: true` when it merely evicts messages from its own local cache,
+ * which it does routinely right after a full history walk. Measured on this host:
+ * a complete scan of one 22492-message channel indexed 22485 files, and about ten
+ * seconds later TDLib evicted 22489 message ids in five batches, all
+ * `is_permanent: false, from_cache: true`. Those files still exist on Telegram.
+ *
+ * The pruning below is left exactly as it was, so nothing that reads this cache
+ * changes behaviour. What must not survive an eviction is the snapshot's CLAIM to
+ * be a complete view of history: `media-truth-v1` would otherwise reuse a snapshot
+ * holding 2 of 22485 files and report it as complete truth, which is the one thing
+ * a truth source may never do. Clearing `historyComplete` makes the next truth
+ * request re-walk instead of trusting a shredded snapshot.
+ *
+ * Callers that pass nothing are treated as permanent, which is what the explicit
+ * delete path and the temporary-id retirement both are. */
+function deleteMediaIndexMessages (chatId, messageIds, options = {}) {
   const key = String(chatId)
   const cached = mediaIndexCache.get(key)
   if (!cached || !Array.isArray(cached.items)) return
   const ids = new Set((messageIds || []).map(String))
+  const before = cached.items.length
   cached.items = cached.items.filter(item => !ids.has(String(item.messageId)))
+  if (cached.items.length !== before && options.permanent === false) cached.historyComplete = false
   cached.found = cached.items.length
   cached.typeCounts = cached.items.reduce((counts, item) => {
     counts[item.type] = (counts[item.type] || 0) + 1
@@ -2482,15 +2703,27 @@ async function sendManagedAttachmentMessage (chatId, filePath, caption, replyToM
 
 /* ------------------------------ File search ------------------------------ */
 
+/* TDLib class names, not invented ones.
+ *
+ * This map used to read `messageFilterDocument`, `messageFilterPhoto` and five more
+ * siblings. TDLib has no such classes - the family is `searchMessagesFilter*` - so
+ * `searchChatMessages` rejected the request at PARSE time with
+ * `Unknown class "messageFilterDocument"`. That failure was chat-independent and
+ * total: all seven non-`all` filters were dead for every chat, always, and
+ * `loadSearchMore` in public/app.js toasted the raw TDLib string at the user.
+ *
+ * Only whole-chat search reached this code. The ordinary Files-tab type dropdown
+ * filters the already-loaded index in the browser, which is why the defect stayed
+ * invisible until someone filtered a search. */
 const MESSAGE_FILTERS = {
   all: null,
-  document: 'messageFilterDocument',
-  photo: 'messageFilterPhoto',
-  video: 'messageFilterVideo',
-  audio: 'messageFilterAudio',
-  voice: 'messageFilterVoiceNote',
-  gif: 'messageFilterAnimation',
-  video_note: 'messageFilterVideoNote'
+  document: 'searchMessagesFilterDocument',
+  photo: 'searchMessagesFilterPhoto',
+  video: 'searchMessagesFilterVideo',
+  audio: 'searchMessagesFilterAudio',
+  voice: 'searchMessagesFilterVoiceNote',
+  gif: 'searchMessagesFilterAnimation',
+  video_note: 'searchMessagesFilterVideoNote'
 }
 
 async function searchMedia (chatId, query, fromMessageId, limit, filter) {
@@ -2792,6 +3025,296 @@ app.get('/api/downloads', (req, res) => {
   res.json(dm.snapshot().filter(j => j.status === 'done'))
 })
 
+/* On-disk hashes for every script in public/.
+ *
+ * `?v=` tokens on this branch are reused across content changes, so a browser can
+ * keep executing an older copy of a changed file and a real code fix can be
+ * invisible. The browser cannot know what is on disk, so the server reports it
+ * here and app.js compares the bytes it actually received against these hashes,
+ * printing one `[FileGram runtime]` line per script. That is what allows a claim
+ * about behaviour to be tied to the code that produced it, instead of being
+ * judged against source that may never have reached the browser. */
+app.get('/api/filegram/asset-hashes', (req, res) => {
+  const dir = path.join(ROOT, 'public')
+  const assets = {}
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith('.js')) continue
+      try {
+        const bytes = fs.readFileSync(path.join(dir, name))
+        assets[name] = { sha256: crypto.createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length }
+      } catch {}
+    }
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e.message || e) })
+  }
+  res.json({ ok: true, buildId: BUILD_ID, buildIdSource: BUILD_ID_SOURCE, serverPid: process.pid, assets })
+})
+
+/* ---------------------------- Download folder picker ----------------------------
+ *
+ * One endpoint, in the process `npm start` actually launches.
+ *
+ * It used to live in `bulk-upload-preload.js`, which meant reachability depended on
+ * which preloads happened to wrap express, and a second copy lived in
+ * `native-folder-picker-preload.js`, which nothing required, so its
+ * `-modern` route answered 404 for its whole life. Both are gone; this is the only
+ * implementation.
+ *
+ * The dialog is the Windows Vista+ common item dialog (`IFileOpenDialog`) in
+ * folder-pick mode: the large, resizable Explorer surface with an address bar, a
+ * contents pane and a sidebar. The previous implementation used
+ * `OpenFileDialog` with a synthetic file name (`$d.FileName = "Select this folder"`)
+ * and derived the directory from `Split-Path -Parent` of whatever the dialog left
+ * in the file-name box, so the answer could be a parent directory or an empty
+ * string that was then indistinguishable from a cancel. `GetResult()` +
+ * `GetDisplayName(SIGDN_FILESYSPATH)` returns the chosen directory itself, so there
+ * is nothing to derive (clause 2.17).
+ *
+ * `implementation` on the response body names the dialog that actually ran. That
+ * field is how a stale process is caught next time: at HEAD the response carried no
+ * such field, so the running dialog could not be identified from what the browser
+ * received. */
+const PICKER_TIMEOUT_MS = 5 * 60 * 1000
+const PICKER_PRIMARY = 'IFileOpenDialog'
+const PICKER_FALLBACK = 'OpenFileDialog'
+const PICKER_TITLE = 'Select FileGram download folder'
+
+/* `IFileOpenDialog` / `IShellItem` interop.
+ *
+ * The unused vtable slots are declared as no-argument placeholders because a COM
+ * interface declared `InterfaceIsIUnknown` is dispatched by slot ORDER; the
+ * signatures of methods that are never called do not matter, their positions do.
+ * Only Show, GetOptions, SetOptions, SetTitle, SetOkButtonLabel, SetFolder,
+ * GetResult and GetDisplayName are ever invoked. */
+const PICKER_INTEROP_SCRIPT = `$ErrorActionPreference = 'Stop'
+$source = @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace FileGramPicker
+{
+    [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IShellItem
+    {
+        void BindToHandler();
+        void GetParent();
+        void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+        void GetAttributes();
+        void Compare();
+    }
+
+    [ComImport, Guid("d57c7288-d4ad-4768-be02-9d969532d960"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IFileOpenDialog
+    {
+        [PreserveSig] int Show(IntPtr hwndParent);
+        void SetFileTypes();
+        void SetFileTypeIndex();
+        void GetFileTypeIndex();
+        void Advise();
+        void Unadvise();
+        void SetOptions(uint fos);
+        void GetOptions(out uint pfos);
+        void SetDefaultFolder(IShellItem psi);
+        void SetFolder(IShellItem psi);
+        void GetFolder();
+        void GetCurrentSelection();
+        void SetFileName();
+        void GetFileName();
+        void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+        void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+        void SetFileNameLabel();
+        void GetResult(out IShellItem ppsi);
+        void AddPlace();
+        void SetDefaultExtension();
+        void Close();
+        void SetClientGuid();
+        void ClearClientData();
+        void SetFilter();
+        void GetResults();
+        void GetSelectedItems();
+    }
+
+    [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7"), ClassInterface(ClassInterfaceType.None)]
+    public class FileOpenDialogShell { }
+
+    public static class Picker
+    {
+        const uint FOS_PICKFOLDERS = 0x00000020;
+        const uint FOS_FORCEFILESYSTEM = 0x00000040;
+        const uint FOS_PATHMUSTEXIST = 0x00000800;
+        const uint SIGDN_FILESYSPATH = 0x80058000;
+        const int CANCELLED = unchecked((int)0x800704C7);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        static extern void SHCreateItemFromParsingName(
+            [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
+            IntPtr pbc,
+            [MarshalAs(UnmanagedType.LPStruct)] Guid riid,
+            [MarshalAs(UnmanagedType.Interface)] out object ppv);
+
+        public static string Pick(string title, string startIn)
+        {
+            IFileOpenDialog dialog = (IFileOpenDialog)(new FileOpenDialogShell());
+            uint options;
+            dialog.GetOptions(out options);
+            dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+            if (!string.IsNullOrEmpty(title)) dialog.SetTitle(title);
+            dialog.SetOkButtonLabel("Select folder");
+            if (!string.IsNullOrEmpty(startIn))
+            {
+                try
+                {
+                    object item;
+                    SHCreateItemFromParsingName(startIn, IntPtr.Zero, typeof(IShellItem).GUID, out item);
+                    if (item != null) dialog.SetFolder((IShellItem)item);
+                }
+                catch { }
+            }
+            int hr = dialog.Show(IntPtr.Zero);
+            if (hr == CANCELLED) return null;
+            if (hr != 0) Marshal.ThrowExceptionForHR(hr);
+            IShellItem chosen;
+            dialog.GetResult(out chosen);
+            string chosenPath;
+            chosen.GetDisplayName(SIGDN_FILESYSPATH, out chosenPath);
+            return chosenPath;
+        }
+    }
+}
+'@
+Add-Type -TypeDefinition $source -Language CSharp | Out-Null
+[Console]::Out.Write('FILEGRAM_READY')
+[Console]::Out.Flush()
+$picked = [FileGramPicker.Picker]::Pick($env:FILEGRAM_PICKER_TITLE, $env:FILEGRAM_PICKER_START)
+if ($null -eq $picked) { [Console]::Out.Write('FILEGRAM_CANCELLED') }
+else { [Console]::Out.Write('FILEGRAM_PATH:' + $picked) }
+`
+
+/* Declared degradation, never a silent one.
+ *
+ * If the interop shim cannot be built on this host (no C# compiler reachable from
+ * Add-Type, a locked-down .NET) the fallback is `OpenFileDialog` with
+ * `ValidateNames = $false`, which is still the Explorer shell surface but is a FILE
+ * chooser used as a folder chooser. It reports `implementation: 'OpenFileDialog'`
+ * and `degraded: true` so the response says which dialog the user saw. The
+ * directory comes from the dialog's own folder via `GetDirectoryName`, and only
+ * when that yields a real existing directory - never from `Split-Path -Parent` of a
+ * fabricated file name. */
+const PICKER_FALLBACK_SCRIPT = `$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = $env:FILEGRAM_PICKER_TITLE
+$dialog.ValidateNames = $false
+$dialog.CheckFileExists = $false
+$dialog.CheckPathExists = $true
+$dialog.Multiselect = $false
+$dialog.RestoreDirectory = $true
+if ($env:FILEGRAM_PICKER_START -and (Test-Path -LiteralPath $env:FILEGRAM_PICKER_START)) { $dialog.InitialDirectory = $env:FILEGRAM_PICKER_START }
+[Console]::Out.Write('FILEGRAM_READY')
+[Console]::Out.Flush()
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  $candidate = [System.IO.Path]::GetDirectoryName($dialog.FileName)
+  if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Container)) { [Console]::Out.Write('FILEGRAM_PATH:' + $candidate) }
+  else { [Console]::Out.Write('FILEGRAM_CANCELLED') }
+} else { [Console]::Out.Write('FILEGRAM_CANCELLED') }
+`
+
+function runPickerScript (script) {
+  return new Promise(resolve => {
+    const child = childProcess.spawn('powershell.exe', ['-NoProfile', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, FILEGRAM_PICKER_TITLE: PICKER_TITLE, FILEGRAM_PICKER_START: downloadsDir || '' }
+    })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const finish = value => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      try { child.kill() } catch {}
+      finish({ code: null, stdout, stderr, timedOut: true })
+    }, PICKER_TIMEOUT_MS)
+    if (timer.unref) timer.unref()
+    child.stdout.on('data', chunk => { stdout += chunk.toString('utf8') })
+    child.stderr.on('data', chunk => { stderr += chunk.toString('utf8') })
+    child.on('error', error => finish({ code: null, stdout, stderr: String(error && error.message || error), spawnFailed: true }))
+    child.on('close', code => finish({ code, stdout, stderr }))
+  })
+}
+
+/* Reads the child's answer. Three outcomes and no fourth:
+ *   FILEGRAM_PATH:<dir>   a directory the user chose
+ *   FILEGRAM_CANCELLED    the user cancelled, or the dialog closed with no result
+ *   neither               nothing was chosen, and `ranDialog` says whether the shim
+ *                         got as far as showing a dialog at all
+ *
+ * `FILEGRAM_READY` is written and flushed by the script after `Add-Type` succeeds and
+ * before `Show()`, which is what makes the third case decidable. It matters: without
+ * it, a dialog the user (or a test) closed abnormally looked identical to an interop
+ * shim that could not be built, so the endpoint fell back and opened a SECOND dialog
+ * on top of the one that had just been dismissed. Observed while verifying this
+ * endpoint, and fixed here rather than left as a surprise.
+ *
+ * The old implementation had no third case at all: a dialog that ended abnormally
+ * exited 4294967295 and the route answered HTTP 500 with the string "Folder picker
+ * exited with code 4294967295", which was toasted verbatim at the user. A dialog that
+ * produced no selection is a cancel as far as the configured folder is concerned, and
+ * nothing about it changes, so that is what is reported. */
+function readPickerAnswer (result) {
+  const text = String(result && result.stdout || '')
+  const ranDialog = text.includes('FILEGRAM_READY')
+  const marker = text.indexOf('FILEGRAM_PATH:')
+  if (marker >= 0) {
+    const picked = text.slice(marker + 'FILEGRAM_PATH:'.length).trim()
+    if (picked) return { kind: 'path', path: picked }
+  }
+  if (text.includes('FILEGRAM_CANCELLED')) return { kind: 'cancelled', reason: 'cancelled' }
+  // The dialog was on screen and went away without a result: an abnormal close, not an
+  // unavailable shim. Reported as a cancel, and never retried through the fallback.
+  if (ranDialog) return { kind: 'cancelled', reason: 'dialog-closed' }
+  return { kind: 'unavailable', stderr: String(result && result.stderr || '').trim() }
+}
+
+app.post('/api/filegram/pick-download-folder', async (req, res) => {
+  if (process.platform !== 'win32') {
+    return res.status(501).json({ ok: false, cancelled: false, path: null, implementation: null, error: 'The native folder picker is available on Windows only' })
+  }
+  try {
+    const primary = await runPickerScript(PICKER_INTEROP_SCRIPT)
+    const answer = readPickerAnswer(primary)
+    if (answer.kind === 'path') return res.json({ ok: true, cancelled: false, path: answer.path, implementation: PICKER_PRIMARY, degraded: false })
+    if (answer.kind === 'cancelled') {
+      return res.json({ ok: true, cancelled: true, path: null, implementation: PICKER_PRIMARY, degraded: false, reason: answer.reason })
+    }
+
+    console.warn('[FileGram picker] IFileOpenDialog unavailable on this host, falling back to OpenFileDialog:', answer.stderr || `exit ${primary.code}`)
+    const fallback = await runPickerScript(PICKER_FALLBACK_SCRIPT)
+    const fallbackAnswer = readPickerAnswer(fallback)
+    if (fallbackAnswer.kind === 'path') return res.json({ ok: true, cancelled: false, path: fallbackAnswer.path, implementation: PICKER_FALLBACK, degraded: true })
+    if (fallbackAnswer.kind === 'cancelled') {
+      return res.json({ ok: true, cancelled: true, path: null, implementation: PICKER_FALLBACK, degraded: true, reason: fallbackAnswer.reason })
+    }
+    return res.status(500).json({
+      ok: false,
+      cancelled: false,
+      path: null,
+      implementation: null,
+      degraded: true,
+      // A sentence, not an exit code. The frontend toasts this text.
+      error: 'The folder picker could not open on this computer. Nothing was changed.'
+    })
+  } catch (error) {
+    console.warn('[FileGram picker] failed:', error && error.stack || error)
+    res.status(500).json({ ok: false, cancelled: false, path: null, implementation: null, error: 'The folder picker could not open on this computer. Nothing was changed.' })
+  }
+})
+
 app.post('/api/config', (req, res) => {
   const { apiId, apiHash } = req.body || {}
   if (!apiId || !apiHash) {
@@ -2825,14 +3348,20 @@ wss.on('connection', (ws) => {
       switch (type) {
         case 'get-status': {
           const config = loadConfig()
-          if (!config) return respond(ws, id, true, { status: 'need-config' })
+          if (!config) return respond(ws, id, true, { status: 'need-config', buildId: BUILD_ID, buildIdSource: BUILD_ID_SOURCE, serverPid: process.pid, serverStartedAt: PROCESS_STARTED_AT })
           return respond(ws, id, true, {
             status: ready ? 'ready' : (authState ? 'waiting-input' : 'initializing'),
             ready,
             concurrency: CONCURRENCY,
             downloadsDir,
             authState: authState ? authState._ : null,
-            me: ready ? currentUser : null
+            me: ready ? currentUser : null,
+            // Same identity as the boot banner, so the browser can tell which
+            // process answered it and whether that process is this working tree.
+            buildId: BUILD_ID,
+            buildIdSource: BUILD_ID_SOURCE,
+            serverPid: process.pid,
+            serverStartedAt: PROCESS_STARTED_AT
           })
         }
         case 'login-input':
@@ -2990,6 +3519,16 @@ wss.on('connection', (ws) => {
         }
         case 'cancel-media-scan-v3':
           return respond(ws, id, true, { cancelled: cancelMediaIndexScanV3(payload.chatId) })
+        /* The one truth request. Answers with the media message ids Telegram holds
+         * for the chat, plus whether the chat was reachable and whether the walk
+         * reached the end of history. The transport response stays `ok: true` even
+         * for an inaccessible chat, because "this chat is not reachable" is an
+         * answer, not a transport failure; the payload's own `accessible` and
+         * `complete` flags are what a caller must gate pruning on. */
+        case 'media-truth-v1': {
+          if (payload.chatId == null) return respond(ws, id, false, null, 'chatId is required')
+          return respond(ws, id, true, await mediaTruthV1(payload.chatId))
+        }
         case 'scan-media': {
           if (scanState && scanState.active) {
             if (scanState.mode === 'count' && String(scanState.chatId) !== String(payload.chatId)) scanState.cancelled = true
@@ -3106,6 +3645,7 @@ wss.on('error', reportListenFailure)
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`FileGram running at http://127.0.0.1:${PORT}`)
+  console.log(`[FileGram server] pid=${process.pid} started=${PROCESS_STARTED_AT} buildId=${BUILD_ID} buildIdSource=${BUILD_ID_SOURCE} root=${ROOT} cwd=${process.cwd()}`)
 })
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

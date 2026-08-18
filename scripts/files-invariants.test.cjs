@@ -80,10 +80,38 @@ for (const [name, source] of lateOwners) {
   assert.doesNotMatch(source, /^\s*rescueUpdateMediaLabel\s*=/m, `${name} must not take over the count label`)
 }
 
-// The persistent index must be monotonic unless a shrink is explicitly allowed.
-assert.match(p0, /async function teleP0v2WriteIndex \(chatId, snapshot, options = \{\}\)/, 'the persistent write must accept options')
-assert.match(p0, /options\.allowShrink/, 'shrinking the persistent index must be opt-in')
-assert.match(p0, /if \(storedCount > snapshot\.items\.length\) return/, 'a smaller snapshot must not overwrite a larger stored index')
+/* The persistence boundary is UNCONDITIONAL, and the protection moved to the
+ * owner's two commit functions.
+ *
+ * This file used to assert the opposite: that `teleP0v2WriteIndex` refused any
+ * snapshot smaller than the stored record unless a caller passed `allowShrink`. No
+ * production caller ever passed it, so an on-screen prune was never durable and the
+ * next restore unioned the untouched record straight back in - and this suite
+ * actively pinned that in place, which is why the two assertions below replace it
+ * rather than sit beside it.
+ *
+ * What must hold now: the owner's `writePersistent` writes what the owner decided,
+ * including an index of zero items, and the only two functions that may reach it
+ * are `commitDiscovery` (additive, unions, cannot lower a count) and
+ * `commitAuthoritative` (from a confirmed truth pass, a permanent Telegram delete
+ * or temporary-id retirement, and may lower it to zero). A partial scan therefore
+ * still has no route to replace a larger index - clause 3.2's protection is
+ * enforced where the decision is made instead of at the storage boundary.
+ *
+ * The per-line source invariants for the boundary live in
+ * scripts/files-reconcile.test.cjs; these are the ownership assertions that belong
+ * with the rest of the Files invariants. */
+assert.match(stability, /async function writePersistent \(chatId, snapshot, options = \{\}\)/, 'the owner must own the persistence boundary')
+assert.match(stability, /function commitDiscovery/, 'the additive commit must exist')
+assert.match(stability, /async function commitAuthoritative/, 'the subtractive commit must exist')
+const writePersistentBoundary = stability.slice(
+  stability.indexOf('async function writePersistent'),
+  stability.indexOf('/* Legacy readers')
+)
+assert.doesNotMatch(writePersistentBoundary, /allowShrink/, 'the persistence boundary must have no shrink escape hatch')
+assert.doesNotMatch(writePersistentBoundary, /storedCount/, 'the persistence boundary must not read the stored count')
+assert.doesNotMatch(writePersistentBoundary, /items\.length\s*[<>]/, 'the persistence boundary must not compare counts')
+assert.match(stability, /previous \? union\(chatId, previous, snapshot\) : normalize\(chatId, snapshot\)/, 'commitDiscovery must union rather than replace')
 
 /* Filtered and page counts must stay out of the header. The pager owns them. */
 assert.match(filesView, /filegram-page-summary/, 'the pager owns the filtered/page summary')

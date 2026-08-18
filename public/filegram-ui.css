@@ -2187,52 +2187,108 @@ li.chat-item.active {
   width: 100% !important;
 }
 
-#dl-dir {
+/* ---------- Save to: the ONLY rule in the tree that styles this control ----------
+ *
+ * Both parents are addressed in one selector list because `management.js` moves the
+ * `.downloads` panel's children into `#mg-downloads-pane` at run time, so the
+ * control's real parent depends on whether that has happened yet. Two ID selectors
+ * plus a class, so it outranks anything an ID-plus-class rule could say - which is
+ * the whole reason the previous fixes were invisible: three separate
+ * `width: 100% !important` rules at one ID plus one class all lost to
+ * `#mg-downloads-pane #set-dir { width: 54px !important }` in daily-driver-p1.css at
+ * two IDs, and the button rendered 54px wide inside a 361px row.
+ *
+ * That rule and every other `#set-dir`, `#dl-dir`, `#dl-dir-current` and
+ * `.dir-current` declaration has been deleted from all eight stylesheets and from
+ * both injected style elements, so nothing here needs `!important`. The absence of
+ * the competitors is asserted at the source level by
+ * scripts/download-folder.test.cjs, not trusted.
+ *
+ * The path ellipsises only when it genuinely overflows: `min-width: 0` on the flex
+ * child is what makes that true rather than nominal, since a flex item's default
+ * `min-width: auto` refuses to shrink below its content and pushes the overflow
+ * onto the parent instead. */
+#mg-downloads-pane #set-dir.fg-save-to,
+.downloads #set-dir.fg-save-to {
+  display: flex;
+  align-items: center;
+  gap: var(--fg-space-3);
   width: 100%;
-  height: 30px;
-  padding: 0 var(--fg-space-2);
-  background: var(--fg-surface-2);
-  border: 1px solid var(--fg-border);
-  border-radius: var(--fg-radius-sm);
-  color: var(--fg-text);
-  font-size: var(--fg-text-xs);
-  font-family: var(--fg-font-mono);
-  outline: none;
-  transition: border-color var(--fg-duration-fast) var(--fg-ease);
-}
-
-#dl-dir:focus {
-  border-color: var(--fg-accent);
-}
-
-#set-dir {
-  flex-shrink: 0;
-  height: 30px;
-  min-width: 56px;
+  min-width: 0;
+  height: 46px;
   padding: 0 var(--fg-space-3);
   background: var(--fg-surface-2);
   border: 1px solid var(--fg-border);
-  border-radius: var(--fg-radius-sm);
-  color: var(--fg-text-secondary);
-  font-size: var(--fg-text-sm);
-  font-weight: var(--fg-weight-medium);
+  border-radius: var(--fg-radius-md);
+  color: var(--fg-text);
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  transition: background var(--fg-duration-fast) var(--fg-ease), border-color var(--fg-duration-fast) var(--fg-ease);
 }
 
-#set-dir:hover {
+#mg-downloads-pane #set-dir.fg-save-to:hover,
+.downloads #set-dir.fg-save-to:hover {
   background: var(--fg-surface-hover);
-  color: var(--fg-text);
   border-color: var(--fg-border-strong);
 }
 
-.dir-current,
-#dl-dir-current {
-  font-size: var(--fg-text-xs);
+#mg-downloads-pane #set-dir.fg-save-to:focus-visible,
+.downloads #set-dir.fg-save-to:focus-visible {
+  outline: 2px solid var(--fg-accent);
+  outline-offset: 1px;
+}
+
+#mg-downloads-pane #set-dir.fg-save-to[disabled],
+.downloads #set-dir.fg-save-to[disabled] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+#mg-downloads-pane #set-dir.fg-save-to .fg-save-to-icon,
+.downloads #set-dir.fg-save-to .fg-save-to-icon {
+  flex: 0 0 auto;
+  font-size: 16px;
+  line-height: 1;
+}
+
+#mg-downloads-pane #set-dir.fg-save-to .fg-save-to-copy,
+.downloads #set-dir.fg-save-to .fg-save-to-copy {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+#mg-downloads-pane #set-dir.fg-save-to .fg-save-to-label,
+.downloads #set-dir.fg-save-to .fg-save-to-label {
+  font-size: 10px;
+  line-height: 1.1;
   color: var(--fg-text-muted);
-  padding: 0;
-  white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: var(--fg-weight-medium);
+}
+
+#mg-downloads-pane #set-dir.fg-save-to .fg-save-to-path,
+.downloads #set-dir.fg-save-to .fg-save-to-path {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fg-text-xs);
+  line-height: 1.3;
   font-family: var(--fg-font-mono);
+  color: var(--fg-text);
+}
+
+#mg-downloads-pane #set-dir.fg-save-to .fg-save-to-chevron,
+.downloads #set-dir.fg-save-to .fg-save-to-chevron {
+  flex: 0 0 auto;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--fg-text-muted);
 }
 
 /* ---------- Parallel files slider ----------

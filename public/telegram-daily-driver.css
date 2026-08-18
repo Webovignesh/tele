@@ -377,14 +377,9 @@
   text-transform: uppercase;
 }
 #mg-downloads-pane .conc .row { gap: 8px !important; }
-#mg-downloads-pane #dl-dir { min-height: 36px; padding: 7px 10px; }
-#mg-downloads-pane #set-dir { min-width: 48px; min-height: 36px; }
-#mg-downloads-pane .dir-current {
-  margin-top: -6px;
-  padding: 0 1px 2px !important;
-  color: #72889d;
-  font-size: 9px !important;
-}
+/* The `#dl-dir`, `#set-dir` (min-width 48px) and `.dir-current` rules that were here
+   are gone. filegram-ui.css is the only stylesheet that styles the Save-to control,
+   and the two nodes the other two rules addressed no longer exist. */
 #mg-downloads-pane #concurrency { flex: 1; min-width: 0; }
 #mg-downloads-pane #concurrency-val { min-width: 22px; text-align: right; color: #b8c8d8; }
 #mg-downloads-pane .dl-controls > .row {

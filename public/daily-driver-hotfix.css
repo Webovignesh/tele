@@ -100,15 +100,8 @@
   gap: 9px !important;
   flex-wrap: wrap !important;
 }
-.downloads #dl-dir {
-  min-width: 0 !important;
-  width: 100% !important;
-}
-.downloads .dir-current {
-  margin-top: -8px !important;
-  overflow-wrap: anywhere;
-  line-height: 1.4;
-}
+/* `.downloads #dl-dir` and `.downloads .dir-current` are gone with the nodes they
+   addressed. */
 .downloads #concurrency { flex: 1 1 140px !important; min-width: 100px; }
 .downloads #download-list {
   padding: 4px 14px 18px !important;

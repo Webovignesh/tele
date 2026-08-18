@@ -1,4 +1,4 @@
-'use strict'
+﻿'use strict'
 
 /* Keep the login screen synchronized with TDLib even when the authorization
  * transition happened before the browser websocket connected. Also owns the
@@ -101,17 +101,19 @@
     try { localStorage.setItem(DOWNLOAD_DIR_STORAGE_KEY, value) } catch {}
   }
 
+  /* Paints the remembered folder through the single painter instead of writing the
+   * DOM itself. It used to set `#dl-dir.value` and `#dl-dir-current.textContent`
+   * directly, and both nodes are gone: the Save-to control is one button and
+   * `setDirLabel` in app.js is the only routine that writes it. */
   function restoreDownloadDirHint () {
     let value = ''
     try { value = localStorage.getItem(DOWNLOAD_DIR_STORAGE_KEY) || '' } catch {}
     if (!value) return
-    const input = document.querySelector('#dl-dir')
-    const current = document.querySelector('#dl-dir-current')
-    if (input && !input.value) input.value = value
-    if (current && !current.textContent) {
-      current.textContent = `Saving to: ${value}`
-      current.title = value
-    }
+    // Still a hint: it fills the control before `get-status` answers, and never
+    // overwrites a folder the server has already reported.
+    const button = document.querySelector('#set-dir')
+    if (button && button.dataset.fgFolderPath) return
+    if (typeof setDirLabel === 'function') setDirLabel(value)
   }
 
   const originalSetDirLabel = setDirLabel
@@ -193,12 +195,7 @@
       link.dataset.teleStability = '1'
       document.head.appendChild(link)
     }
-    if (!document.querySelector('script[data-tele-files-stability]')) {
-      const script = document.createElement('script')
-      script.src = 'files-stability.js?v=2'
-      script.dataset.teleFilesStability = '1'
-      document.body.appendChild(script)
-    }
+    // files-stability.js is now in index.html, loaded before daily-driver layers
     if (!document.querySelector('script[data-filegram-files-view]')) {
       const view = document.createElement('script')
       view.src = 'files-view.js?v=2'
@@ -209,13 +206,21 @@
     loadMediaPolicy()
   }
 
+  /* The Files index owner has to load AFTER the legacy layers, so it can wrap the
+   * globals they install rather than be wrapped by them.
+   *
+   * The gate used to wait for `teleP0v2ReadIndex` and `teleP0v2WriteIndex`, the legacy
+   * persistence boundary in `daily-driver-p0-v2.js`. Those are gone - the owner owns
+   * IndexedDB now - so waiting for them would spin 500 macrotasks and then load anyway,
+   * delaying the owner for no reason. It waits for the two globals that still mark "the
+   * legacy stack has finished installing itself": the shared cache and
+   * `rescueEnsureAllFiles`. */
   function scheduleFinalStabilityLayer () {
     let tries = 0
     const attempt = () => {
       tries++
       const ready = typeof window.rescueFileCache !== 'undefined' || (typeof rescueFileCache !== 'undefined' && rescueFileCache)
-      const indexReady = typeof teleP0v2ReadIndex === 'function' && typeof teleP0v2WriteIndex === 'function'
-      if (ready && indexReady && typeof rescueEnsureAllFiles === 'function') {
+      if (ready && typeof rescueEnsureAllFiles === 'function') {
         loadFinalStabilityLayer()
         return
       }
