@@ -62,8 +62,9 @@ assert.match(stability, /if \(snapshot\.done !== false\) rememberTotalFloor/, 'o
 assert.match(stability, /done = done \|\| snapshot\.done !== false/, 'union must OR the completeness flag, not AND it')
 assert.doesNotMatch(stability, /done = done && snapshot\.done !== false/, 'the AND form must not come back')
 
-/* One source of truth for every total. */
-assert.match(stability, /snapshot: chatId => committed\.get/, 'the index owner must expose its snapshot')
+/* One source of truth for every total. Exposed snapshots are defensive copies so
+ * compatibility layers cannot mutate the owner's commit base in place. */
+assert.match(stability, /snapshot: chatId => cloneSnapshot\(committed\.get/, 'the index owner must expose a private-copy snapshot')
 assert.match(filesView, /window\.teleFilesIndex/, 'the Files list must read the index owner')
 assert.match(filesView, /index\.snapshot\(state\.activeChatId\)/, 'the Files list must derive from the owned snapshot')
 
@@ -75,32 +76,13 @@ const lateOwners = [
   ['filegram-shell.js', shell]
 ]
 for (const [name, source] of lateOwners) {
-  if (name === 'daily-driver-final-guard.js') continue // loads BEFORE files-stability.js
+  if (name === 'daily-driver-final-guard.js') continue
   assert.doesNotMatch(source, /^\s*updateMediaCountLabel\s*=/m, `${name} must not take over the count label`)
   assert.doesNotMatch(source, /^\s*rescueUpdateMediaLabel\s*=/m, `${name} must not take over the count label`)
 }
 
 /* The persistence boundary is UNCONDITIONAL, and the protection moved to the
- * owner's two commit functions.
- *
- * This file used to assert the opposite: that `teleP0v2WriteIndex` refused any
- * snapshot smaller than the stored record unless a caller passed `allowShrink`. No
- * production caller ever passed it, so an on-screen prune was never durable and the
- * next restore unioned the untouched record straight back in - and this suite
- * actively pinned that in place, which is why the two assertions below replace it
- * rather than sit beside it.
- *
- * What must hold now: the owner's `writePersistent` writes what the owner decided,
- * including an index of zero items, and the only two functions that may reach it
- * are `commitDiscovery` (additive, unions, cannot lower a count) and
- * `commitAuthoritative` (from a confirmed truth pass, a permanent Telegram delete
- * or temporary-id retirement, and may lower it to zero). A partial scan therefore
- * still has no route to replace a larger index - clause 3.2's protection is
- * enforced where the decision is made instead of at the storage boundary.
- *
- * The per-line source invariants for the boundary live in
- * scripts/files-reconcile.test.cjs; these are the ownership assertions that belong
- * with the rest of the Files invariants. */
+ * owner's two commit functions. */
 assert.match(stability, /async function writePersistent \(chatId, snapshot, options = \{\}\)/, 'the owner must own the persistence boundary')
 assert.match(stability, /function commitDiscovery/, 'the additive commit must exist')
 assert.match(stability, /async function commitAuthoritative/, 'the subtractive commit must exist')
@@ -133,10 +115,6 @@ for (const [name, source] of [['daily-driver-final-ui-fix.js', uiFix], ['daily-d
   assert.doesNotMatch(source, /renderFilesVirtual/, `${name} must not reference the virtual files renderer`)
 }
 assert.doesNotMatch(uiFix, /function spacer/, 'the spacer factory must be gone')
-// No layer may compute a scroll height. The grid's height must come only from the
-// rows actually mounted, which is what makes the page bottom the real bottom.
-// rescue-runtime.js is excluded: its only style.height is the message composer
-// textarea auto-grow, which has nothing to do with the files grid.
 for (const [name, source] of [['daily-driver-final-ui-fix.js', uiFix], ['daily-driver-final.js', final], ['files-view.js', filesView]]) {
   assert.doesNotMatch(source, /style\.height = /, `${name} must not set synthetic element heights in the files grid`)
 }
