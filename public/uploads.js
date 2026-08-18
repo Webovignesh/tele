@@ -8,9 +8,9 @@
 
   /* uploads.css is intentionally loaded after the main design system. Keep the
    * upload-stat geometry from that layer, but make the download drawer contract
-   * explicit here. The design system has a high-specificity
-   * `.dl-controls .conc:has(#concurrency)` rule, so this selector must target the
-   * same element (with the drawer id) rather than relying on source order alone. */
+   * explicit here. The concurrency control is intentionally FLEX, not grid: the
+   * generic `.dl-controls .row` rule is a two-column grid and can otherwise give
+   * the range only half of the drawer. */
   if (!document.getElementById('fg-drawer-layout-fix')) {
     const style = document.createElement('style')
     style.id = 'fg-drawer-layout-fix'
@@ -37,7 +37,8 @@
       }
       #mg-downloads-pane .dl-controls .conc:has(#concurrency),
       .downloads .dl-controls .conc:has(#concurrency) {
-        display:grid!important;
+        display:flex!important;
+        flex-direction:column!important;
         width:100%!important;
         min-width:0!important;
         align-self:stretch!important;
@@ -49,10 +50,11 @@
       }
       #mg-downloads-pane .dl-controls .conc:has(#concurrency)>.row,
       .downloads .dl-controls .conc:has(#concurrency)>.row {
-        display:grid!important;
-        grid-template-columns:minmax(0,1fr) auto!important;
+        display:flex!important;
+        flex-direction:row!important;
         width:100%!important;
         min-width:0!important;
+        max-width:none!important;
         margin:0!important;
         min-height:24px!important;
         align-items:center!important;
@@ -61,16 +63,19 @@
       #mg-downloads-pane #concurrency,
       .downloads #concurrency {
         display:block!important;
-        width:100%!important;
+        flex:1 1 0!important;
+        width:auto!important;
         min-width:0!important;
         max-width:none!important;
-        justify-self:stretch!important;
         margin:0!important;
       }
       #mg-downloads-pane #concurrency-val,
       .downloads #concurrency-val {
+        display:block!important;
+        flex:0 0 auto!important;
+        width:auto!important;
         min-width:2ch!important;
-        justify-self:end!important;
+        margin:0!important;
         text-align:right!important;
       }
     `
