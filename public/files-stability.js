@@ -123,6 +123,9 @@
     if (current && Number(current.count || 0) >= value) return
     map[key] = { count: value, at: Date.now() }; writeHighWater(map)
   }
+  function clearTotalFloor (chatId) {
+    const map = readHighWater(); delete map[idOf(chatId)]; writeHighWater(map)
+  }
   function setTotalFloor (chatId, count, at) {
     const value = Math.max(0, Number(count || 0)); const map = readHighWater(); const key = idOf(chatId)
     if (!value) delete map[key]; else map[key] = { count: value, at: Number(at || Date.now()) }
@@ -349,7 +352,7 @@
       const result = await commitAuthoritative(chatId, { ...previous, items: nextItems, savedAt: Date.now(), done: previous.done !== false }, { at: Date.now(), truth: { count: Math.max(0, Number(previous.truthCount || previous.items.length) - (previous.items.length - nextItems.length)) }, presentIds: new Set(nextItems.map(item => idOf(item.messageId))), removedIds: [] }); return result.snapshot
     })
   }
-  async function hardRefresh (chatId) { const snapshot = await ensure(chatId, { hardRefresh: true }); await reconcile(chatId, { force: true }); return committed.get(idOf(chatId)) || snapshot || null }
+  async function hardRefresh (chatId) { clearTotalFloor(chatId); const snapshot = await ensure(chatId, { hardRefresh: true }); await reconcile(chatId, { force: true }); return committed.get(idOf(chatId)) || snapshot || null }
 
   function flushProgress (chatId, done) { const key = idOf(chatId); const c = candidates.get(key); if (!c) { if (done) progressInFlight.delete(key); return }; if (done) c.done = c.done && c.historyComplete !== false; if (c.items.length) commitDiscovery(chatId, c, { source: 'progress' }).catch(() => {}); candidates.delete(key); if (done) progressInFlight.delete(key) }
   function scheduleProgressFlush (chatId) { const key = idOf(chatId); if (flushTimers.has(key)) return; flushTimers.set(key, setTimeout(() => { flushTimers.delete(key); flushProgress(chatId, false) }, PROGRESS_FLUSH_MS)) }
