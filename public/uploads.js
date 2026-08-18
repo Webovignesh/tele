@@ -82,6 +82,17 @@
     document.head.appendChild(style)
   }
 
+  function loadOwnedBulkDelete () {
+    if (window.__fileGramOwnedBulkDeleteInstalled || document.querySelector('script[data-filegram-owned-bulk-delete]')) return
+    const ownedDelete = document.createElement('script')
+    ownedDelete.src = 'owned-bulk-delete.js?v=1'
+    ownedDelete.dataset.filegramOwnedBulkDelete = '1'
+    ownedDelete.async = false
+    document.body.appendChild(ownedDelete)
+  }
+
+  loadOwnedBulkDelete()
+
   /* The chain used to end with a third link, `file-consistency-v2.js?v=3`, appended
    * on this script's load event. That file is deleted: it duplicated Files
    * reconciliation, the folder-picker handler and the Save-to paint, and being last
