@@ -356,15 +356,16 @@
       current = recovery.current
       if (recovery.missingMetadata.length) {
         const incompleteAt = Date.now()
-        const incomplete = { ...current, done: false, truthCount: reportedCount, savedAt: incompleteAt }
-        committed.set(key, incomplete)
-        publishShared(chatId, incomplete)
-        setTotalFloor(chatId, reportedCount, incompleteAt)
-        updateCountUi(chatId)
-        const persistence = await writePersistent(chatId, incomplete, { source: 'truth-metadata-incomplete' })
-        const persisted = persistence && persistence.written ? 'written' : `skipped(reason=${persistence && persistence.reason || 'unknown'})`
+        const partial = await commitAuthoritative(chatId, { ...current, done: false, truthCount: reportedCount, savedAt: incompleteAt }, {
+          at: incompleteAt,
+          truth: { count: reportedCount },
+          presentIds: new Set(current.items.map(item => idOf(item.messageId))),
+          removedIds: []
+        })
+        current = partial.snapshot || current
+        const persisted = partial.persisted && partial.persisted.written ? 'written' : `skipped(reason=${partial.persisted && partial.persisted.reason || 'unknown'})`
         scheduleBackoff(chatId); try { setLoadState('File metadata is incomplete. Retrying automatically.') } catch {}
-        logReconcile({ chatId, cached: incomplete.items.length, live: liveIds.size, missing: [], remaining: incomplete.items.length, persisted, truth: truth.source || 'unknown', complete: true, accessible: true })
+        logReconcile({ chatId, cached: current.items.length, live: liveIds.size, missing: [], remaining: current.items.length, persisted, truth: truth.source || 'unknown', complete: true, accessible: true })
         return { status: 'unchanged', reason: 'metadata-incomplete', missingMetadata: recovery.missingMetadata.length }
       }
 
