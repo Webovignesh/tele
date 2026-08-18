@@ -200,6 +200,62 @@ test('failed or incomplete truth is unknown: it never shrinks and retries with b
   expect(diagnostics.states.some(text => /Could not verify against Telegram/i.test(text))).toBe(true)
 })
 
+test('truth count and truth ids must agree before any authoritative shrink', async ({ page }) => {
+  await serveFixture(page, LOGIC_DOM)
+  await installGlobals(page, 'fixture-neutral')
+  const chatId = chatFor(21)
+  await seedSnapshot(page, chatId, 64)
+  await page.evaluate(chatId => {
+    window.__truthByChat = { [String(chatId)]: { ok: true, ids: [], count: 10, complete: true, accessible: true, source: 'fixture-inconsistent' } }
+  }, chatId)
+  await bootOwner(page)
+  await page.evaluate(chatId => { window.state.activeChatId = chatId }, chatId)
+  await page.evaluate(chatId => window.teleFilesIndex.ensure(chatId), chatId)
+
+  const result = await page.evaluate(chatId => window.teleFilesIndex.reconcile(chatId, { force: true }), chatId)
+  expect(result).toMatchObject({ status: 'unknown', reason: 'truth-inconsistent' })
+  const state = await readOwnerState(page, chatId)
+  expect(state.count).toBe(64)
+  expect(state.persisted).toBe(64)
+})
+
+test('unseen live ids recover metadata before stale rows are pruned', async ({ page }) => {
+  await serveFixture(page, LOGIC_DOM)
+  await installGlobals(page, 'fixture-neutral')
+  const chatId = chatFor(22)
+  const oldIds = await seedSnapshot(page, chatId, 5)
+  await bootOwner(page)
+
+  const liveItems = await page.evaluate(chatId => {
+    const all = window.__itemsRange(chatId, 0, 12)
+    return [all[0], all[1], all[10], all[11]]
+  }, chatId)
+  const liveIds = liveItems.map(item => String(item.messageId))
+  expect(liveIds.some(id => !oldIds.includes(id))).toBe(true)
+
+  await page.evaluate(({ chatId, liveItems, liveIds }) => {
+    window.state.activeChatId = chatId
+    window.__truthByChat = { [String(chatId)]: window.__truthAnswer(liveIds) }
+    window.__scanResponse = {
+      ...window.__snapshotFrom(chatId, liveItems, true),
+      found: liveItems.length,
+      scanned: liveItems.length,
+      historyComplete: true,
+      fromCache: false
+    }
+  }, { chatId, liveItems, liveIds })
+  await page.evaluate(chatId => window.teleFilesIndex.ensure(chatId), chatId)
+
+  const result = await page.evaluate(chatId => window.teleFilesIndex.reconcile(chatId, { force: true }), chatId)
+  expect(result.status).toBe('pruned')
+  const state = await readOwnerState(page, chatId)
+  expect(state.count).toBe(liveIds.length)
+  expect(state.persisted).toBe(liveIds.length)
+  expect(sortedIds(state.ids)).toEqual(sortedIds(liveIds))
+  const scans = await page.evaluate(() => window.__ws.filter(entry => entry.type === 'scan-media-v3').length)
+  expect(scans).toBeGreaterThanOrEqual(1)
+})
+
 test('TDLib cache eviction is ignored while permanent Telegram deletion is persisted', async ({ page }) => {
   await serveFixture(page, LOGIC_DOM)
   await installGlobals(page, 'fixture-neutral')
