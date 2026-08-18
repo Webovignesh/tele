@@ -316,7 +316,7 @@
       let truth = null
       try { truth = await request('media-truth-v1', { chatId }) } catch (error) { truth = { ok: false, complete: false, accessible: true, error: String(error && error.message ? error.message : error), source: 'request' } }
       if (!(truth && truth.complete && truth.accessible !== false)) {
-        scheduleBackoff(chatId); try { setLoadState('Could not verify files against Telegram. Retrying automatically.') } catch {}
+        scheduleBackoff(chatId); try { setLoadState('Could not verify against Telegram. Retrying automatically.') } catch {}
         logReconcile({ chatId, cached: current.items.length, live: null, missing: [], remaining: current.items.length, persisted: `skipped(reason=${truth && truth.error ? 'truth-error' : truth && truth.accessible === false ? 'chat-inaccessible' : 'truth-incomplete'})`, truth: truth && truth.source || 'unknown', complete: !!(truth && truth.complete), accessible: truth && truth.accessible })
         return { status: 'unknown', reason: truth && truth.error ? 'truth-error' : 'truth-incomplete' }
       }
