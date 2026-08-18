@@ -1,4 +1,4 @@
-'use strict'
+﻿'use strict'
 
 /* Cache-first rescue runtime.
  * Keeps the proven legacy downloader/forwarder intact while making chat browsing
@@ -208,62 +208,35 @@ function rescueApplyCompleteFiles (chatId, snapshot) {
     const bb = BigInt(String(b.id || 0))
     return aa === bb ? 0 : (aa < bb ? 1 : -1)
   })
-  state.mediaCount = snapshot.found == null ? snapshot.items.length : snapshot.found
+  // state.mediaCount = snapshot.found == null ? snapshot.items.length : snapshot.found // REMOVED: owner is files-stability.js
   state.typeCounts = snapshot.typeCounts || null
   state.hasMore = false
 }
 
+/* A thin delegate to the Files index owner, with no cache write of its own.
+ *
+ * This was the original whole-chat file loader: it called the legacy `scan-media`
+ * request, polled it while it answered `busy`, and wrote the result straight into
+ * `rescueFileCache`. Five later layers each replaced this global with their own
+ * version, so which implementation ran depended on load order, and every one of them
+ * wrote the shared cache.
+ *
+ * `public/files-stability.js` assigns `rescueEnsureAllFiles = ensure` when it loads, so
+ * in the running application this body is superseded within a tick. It is kept as a
+ * delegate rather than deleted because `rescue-runtime.js` declares the symbol that
+ * `setView` and several layers call, and because a delegate cannot resurrect anything:
+ * it holds no state, writes no cache and issues no scan.
+ *
+ * `rescueFileCache` stays declared in this file. Many layers still READ it, and the
+ * owner writes it on every commit so those readers see the committed index. */
 async function rescueEnsureAllFiles (chatId) {
-  if (chatId == null) return
-  const key = rescueChatKey(chatId)
-  const cached = rescueFileCache.get(key)
-  if (cached) {
-    if (rescueChatKey(state.activeChatId) !== key) return
-    rescueApplyCompleteFiles(chatId, cached)
-    renderFiles()
-    rescueUpdateMediaLabel()
-    setLoadState(`Loaded all ${cached.items.length} files`)
-    return
-  }
-  if (rescueFileInflight.has(key)) return rescueFileInflight.get(key)
-
-  if (rescueChatKey(state.activeChatId) === key) {
-    $('#media-grid').innerHTML = ''
-    setLoadState('Loading all files…')
-  }
-
-  const generation = rescueOpenGeneration
-  const work = (async () => {
-    try {
-      let data = await request('scan-media', { chatId, includeItems: true })
-      while (data && data.busy) {
-        await new Promise(resolve => setTimeout(resolve, 750))
-        if (rescueChatKey(state.activeChatId) !== key || generation !== rescueOpenGeneration) return
-        data = await request('scan-media', { chatId, includeItems: true })
-      }
-      const snapshot = {
-        items: (data && data.items) || [],
-        found: data && data.found,
-        typeCounts: data && data.typeCounts,
-        savedAt: Date.now()
-      }
-      rescueFileCache.set(key, snapshot)
-      if (rescueChatKey(state.activeChatId) !== key || generation !== rescueOpenGeneration || state.view !== 'files') return
-      rescueApplyCompleteFiles(chatId, snapshot)
-      renderFiles()
-      rescueUpdateMediaLabel()
-      setLoadState(`Loaded all ${snapshot.items.length} files`)
-    } catch (e) {
-      if (rescueChatKey(state.activeChatId) === key && state.view === 'files') {
-        setLoadState('Failed to load all files. Try Files again.')
-        toast(String(e && e.message ? e.message : e), 'error')
-      }
-    } finally {
-      rescueFileInflight.delete(key)
+  if (chatId == null) return null
+  try {
+    if (window.teleFilesIndex && typeof window.teleFilesIndex.ensure === 'function') {
+      return await window.teleFilesIndex.ensure(chatId)
     }
-  })()
-  rescueFileInflight.set(key, work)
-  return work
+  } catch {}
+  return rescueFileCache.get(rescueChatKey(chatId)) || null
 }
 
 loadMessages = async function rescueLoadMessages (chatId, fromMessageId) {
@@ -332,7 +305,7 @@ openChat = async function rescueOpenChat (chatId) {
   state.selection.clear()
   state.selectedMessages.clear()
   state.loadingMore = false
-  state.mediaCount = null
+  // state.mediaCount = null // REMOVED: owner is files-stability.js
   state.typeCounts = null
   state.counting = false
   state.files = { query: '', filter: 'all', sort: 'newest', mode: 'browse', results: [], totalCount: 0, hasMore: false, fromMessageId: 0, searching: false, loadingAll: false }

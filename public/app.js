@@ -1,4 +1,4 @@
-'use strict'
+﻿'use strict'
 
 /* ------------------------------ State ------------------------------ */
 const state = {
@@ -215,14 +215,105 @@ function handleEvent (ev) {
   }
 }
 
+/* The ONE painter for the Save-to control.
+ *
+ * Six routines used to write this area: this one, `restoreDownloadDirHint` in
+ * auth-state-fix.js, `teleP0v2RefreshPath` in daily-driver-p0-v2.js on a 1500 ms
+ * interval, `installDownloadIcons` in filegram-shell.js (which set the text to
+ * "Browse"), `paintFolderButton` in uploads-hardening.js behind a MutationObserver
+ * plus a 25 ms interval, and file-consistency-v2.js, which clone-replaced the node
+ * every 500 ms. Whichever ran last won, and the winner changed with load order, so
+ * the rendered control did not correspond to any one layer's intent. The other five
+ * are gone.
+ *
+ * The full path goes in `title` for the tooltip; the accessible name comes from the
+ * label and path text. `auth-state-fix.js` wraps this to persist the value, so it
+ * stays the single write point for both the DOM and localStorage. */
 function setDirLabel (dir) {
-  if (!dir) return
-  $('#dl-dir').value = dir
-  $('#dl-dir-current').textContent = `Saving to: ${dir}`
-  $('#dl-dir-current').title = dir
+  const value = String(dir == null ? '' : dir).trim()
+  if (!value) return
+  const button = $('#set-dir')
+  const path = $('#dl-dir-path')
+  if (path) path.textContent = value
+  if (button) {
+    button.title = value
+    button.dataset.fgFolderPath = value
+  }
+}
+
+/* Runtime script report.
+ *
+ * Prints one `[FileGram runtime]` line per loaded script comparing the bytes this
+ * browser holds for it against the file on disk, plus the server's build id, pid
+ * and start time. This exists because `?v=` tokens on this branch are reused
+ * across content changes: the browser can keep executing an older copy of a
+ * changed file, so a code fix can be entirely invisible in the UI. Nothing about
+ * behaviour should be judged until this report says the executing bytes match the
+ * working tree and the build id matches the checkout. It reads only; it changes no
+ * behaviour. */
+const runtimeReported = new Set()
+
+async function reportRuntimeScripts (status) {
+  if (runtimeReported.size === 0) {
+    console.info(`[FileGram runtime] server pid=${status && status.serverPid} buildId=${status && status.buildId} buildIdSource=${status && status.buildIdSource} startedAt=${status && status.serverStartedAt}`)
+  }
+  try {
+    const res = await fetch('/api/filegram/asset-hashes', { cache: 'no-store' })
+    const disk = await res.json()
+    if (!disk || !disk.ok) return
+    if (status && status.buildId && disk.buildId && status.buildId !== disk.buildId) {
+      console.warn(`[FileGram runtime] build id mismatch: get-status=${status.buildId} asset-hashes=${disk.buildId}`)
+    }
+    const timings = new Map()
+    try {
+      for (const entry of performance.getEntriesByType('resource')) {
+        if (entry.initiatorType === 'script') timings.set(entry.name, entry)
+      }
+    } catch {}
+    const sources = [...document.scripts].map(s => s.src).filter(Boolean)
+    for (const src of sources) {
+      if (runtimeReported.has(src)) continue
+      runtimeReported.add(src)
+      const url = new URL(src, location.href)
+      const name = url.pathname.replace(/^\/+/, '')
+      const token = url.search.replace(/^\?/, '') || 'none'
+      const expected = disk.assets && disk.assets[name]
+      if (!expected) {
+        console.info(`[FileGram runtime] script=${name} token=${token} servedMatchesDisk=unknown (not a public/ script)`)
+        continue
+      }
+      let match = 'unknown'
+      let bytes = null
+      try {
+        /* cache: 'default' on purpose. A no-store fetch would always pull fresh
+         * bytes from the server and could never observe the stale copy this check
+         * exists to catch, so the request has to be allowed to hit the same HTTP
+         * cache entry the <script> tag used. */
+        const body = await fetch(url.href, { cache: 'default' }).then(r => r.arrayBuffer())
+        bytes = body.byteLength
+        const digest = await crypto.subtle.digest('SHA-256', body)
+        const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+        match = hex === expected.sha256 ? 'yes' : 'no'
+      } catch (e) {
+        match = `error:${e && e.message ? e.message : e}`
+      }
+      const entry = timings.get(url.href)
+      const cached = entry ? (entry.transferSize === 0 ? 'yes' : 'no') : 'unknown'
+      console.info(`[FileGram runtime] script=${name} token=${token} servedMatchesDisk=${match} bytes=${bytes} diskBytes=${expected.bytes} fromBrowserCache=${cached}`)
+    }
+  } catch (e) {
+    console.warn('[FileGram runtime] report failed', e)
+  }
 }
 
 function applyStatus (data) {
+  /* Deliberately not awaited: the report is diagnostic and must not delay boot.
+   * Run twice because five scripts (files-stability, files-view, bulk-uploads,
+   * uploads-hardening, file-consistency-v2) are appended dynamically and are not
+   * in document.scripts yet on the first pass. Already-reported sources are
+   * skipped, so the second pass only adds the late arrivals. */
+  reportRuntimeScripts(data)
+  setTimeout(() => reportRuntimeScripts(data), 6000)
   state.concurrency = data.concurrency || 8
   $('#concurrency').value = state.concurrency
   $('#concurrency-val').textContent = state.concurrency
@@ -424,7 +515,7 @@ async function openChat (chatId) {
   state.selection.clear()
   state.selectedMessages.clear()
   state.hasMore = true
-  state.mediaCount = null
+  // state.mediaCount = null // REMOVED: owner is files-stability.js
   state.typeCounts = null
   state.counting = false
   state.files = { query: '', filter: 'all', sort: 'newest', mode: 'browse', results: [], totalCount: 0, hasMore: false, fromMessageId: 0, searching: false, loadingAll: false }
@@ -701,7 +792,7 @@ async function loadAllFiles (chatId) {
     const data = await request('scan-media', { chatId, includeItems: true })
     if (chatId !== state.activeChatId) return
     if (data.busy) { setTimeout(() => loadAllFiles(chatId), 3000); return }
-    state.mediaCount = data.found
+    // state.mediaCount = data.found // REMOVED: owner is files-stability.js
     state.typeCounts = data.typeCounts
     state.counting = false
     if (data.items && data.items.length) {
@@ -1064,7 +1155,7 @@ function onScanProgress (payload) {
   state.scan = { active: !payload.done, mode: payload.mode }
   if (payload.mode === 'count') {
     if (payload.chatId === state.activeChatId) {
-      state.mediaCount = payload.found
+      // state.mediaCount = payload.found // REMOVED: owner is files-stability.js
       state.typeCounts = payload.typeCounts
       state.counting = !payload.done
       updateMediaCountLabel()
@@ -1422,15 +1513,35 @@ $('#clear-selection').onclick = () => {
   updateSelectionBar()
 }
 
+/* The ONE click handler for the Save-to control.
+ *
+ * Three implementations used to target this node: `installDownloadFolderPicker` in
+ * uploads-hardening.js assigned `button.onclick`, `file-consistency-v2.js` later
+ * clone-replaced the node and added its own listener (silently discarding
+ * hardening's), and the unloaded `file-consistency-fix.js` carried a third. Which
+ * one ran was decided by script load order, not by design. Both are deleted, so
+ * this is the only binding.
+ *
+ * It no longer reads a text field: `#dl-dir` is gone from the markup, and the folder
+ * comes from the native dialog. On `cancelled` nothing happens at all - no request,
+ * no repaint - so the configured folder survives a cancel (clause 3.10). */
 $('#set-dir').onclick = async () => {
-  const dir = $('#dl-dir').value.trim()
-  if (!dir) return toast('Enter a folder path')
+  const button = $('#set-dir')
+  if (button.disabled) return
+  button.disabled = true
   try {
-    const res = await request('set-download-dir', { dir })
-    setDirLabel(res.downloadsDir)
+    const response = await fetch('/api/filegram/pick-download-folder', { method: 'POST', cache: 'no-store' })
+    let payload = {}
+    try { payload = await response.json() } catch {}
+    if (!response.ok || !payload.ok) throw new Error(payload.error || 'The folder picker could not open. Nothing was changed.')
+    if (payload.cancelled || !payload.path) return
+    const result = await request('set-download-dir', { dir: payload.path })
+    setDirLabel(result.downloadsDir || payload.path)
     toast('Download folder changed')
   } catch (e) {
     toast(e.message, 'error')
+  } finally {
+    button.disabled = false
   }
 }
 

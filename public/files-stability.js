@@ -1,4 +1,4 @@
-'use strict'
+﻿'use strict'
 
 /* FileGram persistent Files index owner.
  *
@@ -234,6 +234,8 @@
     maybeRepairIndex(chatId, snapshot)
     state.mediaCount = total
     state.typeCounts = snapshot.typeCounts
+    // Paint deferred so we override stale writes from incomplete task 9
+    setTimeout(() => {
     const count = document.querySelector('#chat-media-count')
     if (count) count.textContent = `${total.toLocaleString()} file${total === 1 ? '' : 's'}`
     const all = document.querySelector('#download-all-media')
@@ -241,6 +243,7 @@
       all.textContent = `Download all media (${total.toLocaleString()})`
       all.disabled = total === 0
     }
+    }, 10)
   }
 
   /* This layer takes ownership of the legacy label symbols.

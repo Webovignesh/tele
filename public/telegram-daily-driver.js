@@ -1,12 +1,14 @@
-'use strict'
+﻿'use strict'
 
 /* Tele daily-driver runtime fixes.
  * Keeps the fast cache-first chat switcher, but separates file indexing from
- * message history, streams file-scan results into the UI, preserves selection,
- * and renders media inline instead of through a preview modal.
+ * message history, preserves selection, and renders media inline instead of
+ * through a preview modal.
+ *
+ * Streaming file-scan results into the UI is no longer done here: the Files index
+ * owner (public/files-stability.js) merges the scan stream.
  */
 
-const teleDailyRenderTimers = new Map()
 const teleDailyAttachmentUrls = new WeakMap()
 
 function teleDailyTime12 (ts) {
@@ -144,46 +146,18 @@ filesItems = function teleDailyFilesItems () {
 
 rescueApplyCompleteFiles = function teleDailyApplyCompleteFiles (chatId, snapshot) {
   if (!snapshot || !Array.isArray(snapshot.items)) return
-  state.mediaCount = snapshot.found == null ? snapshot.items.length : snapshot.found
+  // state.mediaCount = snapshot.found == null ? snapshot.items.length : snapshot.found // REMOVED: owner is files-stability.js
   state.typeCounts = snapshot.typeCounts || null
 }
 
-function teleDailyMergeScanBatch (payload) {
-  if (!payload || payload.chatId == null || !Array.isArray(payload.items) || !payload.items.length) return
-  const key = rescueChatKey(payload.chatId)
-  const current = rescueFileCache.get(key) || { items: [], found: 0, scanned: 0, typeCounts: {}, savedAt: Date.now() }
-  const byKey = new Map((current.items || []).map(item => [String(item.key || `${item.chatId}:${item.messageId}`), item]))
-  for (const item of payload.items) byKey.set(String(item.key || `${item.chatId}:${item.messageId}`), item)
-  current.items = [...byKey.values()].sort((a, b) => {
-    const aa = BigInt(String(a.messageId || 0))
-    const bb = BigInt(String(b.messageId || 0))
-    return aa === bb ? 0 : (aa < bb ? 1 : -1)
-  })
-  current.found = Number(payload.found == null ? current.items.length : payload.found)
-  current.scanned = Number(payload.scanned || current.scanned || 0)
-  current.typeCounts = payload.typeCounts || current.typeCounts || {}
-  current.savedAt = Date.now()
-  rescueFileCache.set(key, current)
-
-  if (state.activeChatId == null || rescueChatKey(state.activeChatId) !== key || state.view !== 'files') return
-  rescueApplyCompleteFiles(payload.chatId, current)
-  rescueUpdateMediaLabel()
-  setLoadState(`Loading files… ${current.items.length.toLocaleString()} found`)
-  if (teleDailyRenderTimers.has(key)) return
-  const timer = setTimeout(() => {
-    teleDailyRenderTimers.delete(key)
-    if (state.activeChatId != null && rescueChatKey(state.activeChatId) === key && state.view === 'files') renderFiles()
-  }, 80)
-  teleDailyRenderTimers.set(key, timer)
-}
-
-const teleDailyBaseHandleEvent = handleEvent
-handleEvent = function teleDailyHandleEvent (ev) {
-  if (ev && ev.name === 'download-all-progress' && ev.payload && Array.isArray(ev.payload.items)) {
-    teleDailyMergeScanBatch(ev.payload)
-  }
-  return teleDailyBaseHandleEvent(ev)
-}
+/* `teleDailyMergeScanBatch` and its `handleEvent` wrapper are gone.
+ *
+ * It merged the item batches carried on `download-all-progress` - the legacy
+ * "Download all media" scanner's event, emitted by `emitScan` in server.js - into
+ * `rescueFileCache` and repainted from there, which made this file one of the writers
+ * of the shared Files index. `public/files-stability.js` owns the index and merges the
+ * `media-index-progress` stream instead; the download-all progress banner is still
+ * handled by `app.js` `onScanProgress`, which is untouched. */
 
 /* Clicking a selected card must not silently remove it. Normal click selects;
  * Ctrl/Cmd toggles; Shift extends from the last clicked item.
