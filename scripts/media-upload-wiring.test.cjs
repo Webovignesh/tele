@@ -19,10 +19,8 @@ assert.ok(bulkAt > reliabilityAt, 'server reliability boundary must load before 
 assert.match(uploads, /filegram-media-preview\.js\?v=1/)
 assert.match(uploads, /upload-reliability\.js\?v=1/)
 assert.match(uploads, /uploads-hardening\.js\?v=3/)
-assert.ok(
-  uploads.indexOf('uploads-hardening.js?v=3') < uploads.indexOf('loadPostHardening'),
-  'post-hardening owners must not replace the upload transport before hardening installs'
-)
+assert.match(uploads, /hardening\.addEventListener\('load',\s*loadPostHardening/)
+assert.match(uploads, /existingHardening\.addEventListener\('load',\s*loadPostHardening/)
 
 assert.match(preload, /\/api\/filegram\/bulk-upload-status\/:uploadId/)
 assert.match(preload, /Cache-Control.*no-store/)
