@@ -1,0 +1,46 @@
+'use strict'
+
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+
+const ROOT = path.join(__dirname, '..')
+const read = name => fs.readFileSync(path.join(ROOT, name), 'utf8')
+
+const vbs = read('FileGram.vbs')
+const launcher = read('scripts/filegram-launch.ps1')
+const installer = read('scripts/install-filegram.ps1')
+const stop = read('scripts/filegram-stop.ps1')
+const uninstall = read('scripts/uninstall-filegram.ps1')
+const cleanup = read('scripts/post-release-cleanup.ps1')
+const installCmd = read('Install FileGram.cmd')
+const cleanupCmd = read('Clean Repo After Release.cmd')
+
+assert.match(vbs, /filegram-launch\.ps1/i)
+assert.match(vbs, /WindowStyle Hidden/i)
+assert.match(launcher, /127\.0\.0\.1:3000\/api\/filegram\/asset-hashes/i)
+assert.match(launcher, /Get-Command npm\.cmd/i)
+assert.match(launcher, /Start-Process[^\n]+npm|Start-Process -FilePath \$npm\.Source/i)
+assert.match(launcher, /\.filegram_state/i)
+assert.match(launcher, /Start-Process \$BaseUrl/i)
+assert.match(stop, /serverPid/i)
+assert.match(stop, /Stop-Process/i)
+
+assert.match(installer, /npm\.cmd/i)
+assert.match(installer, /& \$npm\.Source ci/i)
+assert.match(installer, /FileGram\.lnk/i)
+assert.match(installer, /Start Menu\\Programs\\FileGram/i)
+assert.match(installCmd, /install-filegram\.ps1/i)
+assert.match(uninstall, /Telegram login\/session data/i)
+
+const branchBlock = cleanup.match(/\$DisposableBranches\s*=\s*@\(([\s\S]*?)\)\s*\n/)
+assert.ok(branchBlock, 'cleanup branch allow-list must be explicit')
+assert.match(branchBlock[1], /feature\/bulk-channel-uploads/)
+assert.match(branchBlock[1], /backup\/claude-bf455-20260819/)
+assert.match(branchBlock[1], /rescue\/legacy-modernization/)
+assert.doesNotMatch(branchBlock[1], /agent\/saas-foundation/)
+assert.match(cleanup, /release: FileGram v1\.0\.0 local/)
+assert.match(cleanupCmd, /post-release-cleanup\.ps1/i)
+assert.doesNotMatch(cleanup, /Remove-Item[^\n]*(\.td_database|\.td_files|\.filegram_state|downloads|config\.json|settings\.json)/i)
+
+console.log('local release checks passed')
