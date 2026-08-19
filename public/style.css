@@ -361,8 +361,11 @@ details code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; 
   font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 100; max-width: 80vw; text-align: center;
 }
 #toast.show { opacity: 1; }
-#toast.error { background: var(--danger); color: #fff; border-color: transparent; }
-#toast.ok { background: var(--ok-dark, var(--ok)); color: #07110a; border-color: transparent; }
+/* Status-specific selectors are more specific than the later FileGram base toast.
+ * Keep their background dark so the final success/error text colors can never
+ * collapse into green-on-green or red-on-red unreadable banners. */
+#toast.error { background: var(--bg); color: #fff; border-color: var(--danger); }
+#toast.ok { background: var(--bg); color: #fff; border-color: var(--ok); }
 
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
