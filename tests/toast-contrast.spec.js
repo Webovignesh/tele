@@ -26,10 +26,17 @@ function contrastRatio (foreground, background) {
 }
 
 async function toastStyle (page, kind, message) {
-  return page.evaluate(({ kind, message }) => {
+  await page.evaluate(({ kind, message }) => {
     const toast = document.querySelector('#toast')
     toast.textContent = message
     toast.className = `${kind} show`
+  }, { kind, message })
+  await page.waitForFunction(() => {
+    const toast = document.querySelector('#toast')
+    return toast && getComputedStyle(toast).opacity === '1'
+  })
+  return page.evaluate(() => {
+    const toast = document.querySelector('#toast')
     const style = getComputedStyle(toast)
     return {
       color: style.color,
@@ -38,7 +45,7 @@ async function toastStyle (page, kind, message) {
       opacity: style.opacity,
       text: toast.textContent
     }
-  }, { kind, message })
+  })
 }
 
 test('success and error toasts remain readable through the full CSS cascade', async ({ page }) => {
