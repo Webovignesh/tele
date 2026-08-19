@@ -4,7 +4,7 @@
  *
  * The browser POST has two distinct phases:
  *   1. receive the source bytes into FileGram's local staging directory;
- *   2. TDLib sends that staged file to Telegram and FileGram waits for the final
+ *   2. TDLib sends the staged file to Telegram and FileGram waits for the final
  *      message id.
  *
  * Closing/reloading the browser must abort phase 1, because FileGram no longer
@@ -88,4 +88,8 @@ if (!global.__fileGramBulkUploadReliabilityInstalled) {
   api.createBulkUploadHandler = function createReliableBulkUploadHandler (options) {
     return wrapRequestLifetime(baseCreateBulkUploadHandler(options))
   }
+
+  /* Export a narrow test hook without exposing it to the browser or production
+   * API. Unit tests exercise the phase boundary directly with fake streams. */
+  global.__fileGramBulkUploadReliability = { wrapRequestLifetime }
 }
