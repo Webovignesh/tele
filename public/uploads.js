@@ -91,21 +91,46 @@
     document.body.appendChild(ownedDelete)
   }
 
+  function loadMediaPreview () {
+    if (window.__fileGramMediaPreviewInstalled || document.querySelector('script[data-filegram-media-preview]')) return
+    const preview = document.createElement('script')
+    preview.src = 'filegram-media-preview.js?v=1'
+    preview.dataset.filegramMediaPreview = '1'
+    preview.async = false
+    document.body.appendChild(preview)
+  }
+
+  function loadUploadReliability () {
+    if (window.__fileGramUploadReliabilityInstalled || document.querySelector('script[data-filegram-upload-reliability]')) return
+    const reliability = document.createElement('script')
+    reliability.src = 'upload-reliability.js?v=1'
+    reliability.dataset.filegramUploadReliability = '1'
+    reliability.async = false
+    document.body.appendChild(reliability)
+  }
+
+  function loadPostHardening () {
+    loadMediaPreview()
+    loadUploadReliability()
+  }
+
   loadOwnedBulkDelete()
 
-  /* The chain used to end with a third link, `file-consistency-v2.js?v=3`, appended
-   * on this script's load event. That file is deleted: it duplicated Files
-   * reconciliation, the folder-picker handler and the Save-to paint, and being last
-   * in the chain it won `#set-dir` by accident of load order. Its concerns belong to
-   * `files-stability.js`, `app.js` and `index.html` + `filegram-ui.css` now. The
-   * chain keeps its shape - bulk-uploads, then hardening on its load event - so
-   * nothing about the upload path changes. */
+  /* The upload chain is intentionally ordered. bulk-uploads owns the UI/queue,
+   * uploads-hardening installs the transport/integrity boundary, and only then do
+   * the refresh-recovery layer and independent on-demand media viewer install. */
   function loadHardening () {
-    if (document.querySelector('script[data-filegram-upload-hardening]')) return
+    const existingHardening = document.querySelector('script[data-filegram-upload-hardening]')
+    if (existingHardening) {
+      if (window.__fileGramUploadsHardeningInstalled) loadPostHardening()
+      else existingHardening.addEventListener('load', loadPostHardening, { once: true })
+      return
+    }
     const hardening = document.createElement('script')
     hardening.src = 'uploads-hardening.js?v=3'
     hardening.dataset.filegramUploadHardening = '3'
     hardening.async = false
+    hardening.addEventListener('load', loadPostHardening, { once: true })
     document.body.appendChild(hardening)
   }
 
