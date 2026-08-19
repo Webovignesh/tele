@@ -60,6 +60,7 @@ async function uploadQueueFixture (page, statuses = []) {
   }, statuses)
   await page.addScriptTag({ path: UPLOAD_RELIABILITY })
   await expect.poll(() => page.evaluate(() => !!window.__fileGramUploadReliabilityInstalled)).toBe(true)
+  await expect.poll(() => page.evaluate(() => !!window.FileGramUploads.queue.__fileGramUploadReliability)).toBe(true)
 }
 
 test('loopback staging completion never leaves a fake Telegram speed displayed', async ({ page }) => {
