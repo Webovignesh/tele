@@ -1,33 +1,39 @@
 'use strict'
 
 /*
+ * Storage cleanup that runs before server.js creates the TDLib client.
+ *
  * TDLib owns .td_files and requires its temp directory while the client is
  * running. The temp contents are not durable application data, though, and can
- * survive an unclean shutdown or an interrupted download.
+ * survive an unclean shutdown or interrupted transfer.
  *
- * This preload runs before server.js creates the TDLib client, which is the one
- * safe point where FileGram can remove stale temp contents without racing an
- * active TDLib file operation. TDLib may recreate .td_files/temp during the
- * session; those live files must be left alone until the next startup.
+ * FileGram's /api/chat-attachment route also stages browser uploads inside
+ * .management_uploads. A server crash can strand a partial staging directory.
+ * The browser upload queue is authoritative and will retry from the original
+ * File/FileSystemHandle, so those stranded staging copies are disposable too.
+ *
+ * Startup is the one safe point to purge both locations: no TDLib file operation
+ * or attachment request can be using them yet.
  */
 
 const fs = require('node:fs')
 const path = require('node:path')
 
 const root = __dirname
-const filesDir = path.join(root, '.td_files')
-const tempDir = path.join(filesDir, 'temp')
+const tempDir = path.join(root, '.td_files', 'temp')
+const managementUploadDir = path.join(root, '.management_uploads')
 
-function purgeTdlibTemp () {
+function purgeDisposableDir (dir, label) {
   try {
-    fs.rmSync(tempDir, { recursive: true, force: true })
+    fs.rmSync(dir, { recursive: true, force: true })
   } catch (error) {
-    // Startup must never fail because a stale cache file is locked. TDLib can
-    // reuse/recreate the directory and the next launch will try again.
+    // Startup must never fail because antivirus or another process still has a
+    // stale file open. The next launch will try again.
     if (process.env.FILEGRAM_STORAGE_DEBUG === '1') {
-      console.warn('[storage] could not purge TDLib temp:', error && error.message ? error.message : error)
+      console.warn(`[storage] could not purge ${label}:`, error && error.message ? error.message : error)
     }
   }
 }
 
-purgeTdlibTemp()
+purgeDisposableDir(tempDir, 'TDLib temp')
+purgeDisposableDir(managementUploadDir, 'stale attachment staging')

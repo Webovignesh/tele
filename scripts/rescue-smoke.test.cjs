@@ -15,6 +15,23 @@ const dailyDriver = fs.readFileSync('public/telegram-daily-driver.js', 'utf8')
 const dailyDriverCss = fs.readFileSync('public/telegram-daily-driver.css', 'utf8')
 const dailyHotfix = fs.readFileSync('public/daily-driver-hotfix.js', 'utf8')
 
+/* Comments must not satisfy or break an assertion. The deletions this fix makes leave
+ * comments explaining what was removed and why, and those comments necessarily name the
+ * removed code, so every check by ABSENCE reads comment-stripped source. Line-based
+ * rather than character-based: a character scanner has to tell a regex literal from a
+ * division operator to know whether a quote inside `/[&<>"']/` opens a string, and
+ * getting that wrong desynchronises the rest of the file silently. */
+const stripComments = source => source
+  .split('\n')
+  .filter(line => {
+    const trimmed = line.trim()
+    return !(trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*/') || trimmed.startsWith('*'))
+  })
+  .join('\n')
+
+const dailyDriverCode = stripComments(dailyDriver)
+const dailyHotfixCode = stripComments(dailyHotfix)
+
 assert.match(server, /_:\s*'forwardMessages'/, 'native TDLib forwardMessages must be present')
 assert.match(server, /send_copy:\s*false/, 'forwarding must preserve native forwarded-message semantics')
 assert.match(server, /case 'forward-messages'/, 'websocket forwarding command must be present')
@@ -87,7 +104,15 @@ assert.match(server, /batchItems/, 'file scans must stream progressive item batc
 assert.match(server, /Accept-Ranges/, 'inline media endpoint must support byte ranges')
 assert.match(dailyDriver, /teleDailyFilesItems/, 'files must use a separate per-chat index')
 assert.match(dailyDriver, /hour12:\s*true/, 'message time must use 12-hour display')
-assert.match(dailyDriver, /teleDailyMergeScanBatch/, 'file UI must merge scan batches')
+/* INVERTED, deliberately. This used to require `teleDailyMergeScanBatch` to exist -
+ * "file UI must merge scan batches" - which made a second writer of the shared Files
+ * index a passing requirement. It merged the item batches on `download-all-progress`
+ * into `rescueFileCache` and repainted from there. `public/files-stability.js` is the
+ * single owner of the index and of the scan stream now, so this layer must NOT merge
+ * batches. Called out in the task 7/8/9 evidence so a reviewer does not read it as a
+ * weakened test. */
+assert.doesNotMatch(dailyDriverCode, /teleDailyMergeScanBatch/, 'this layer must not merge scan batches into the shared Files index')
+assert.doesNotMatch(dailyDriverCode, /rescueFileCache\.set/, 'the Files index owner must be the only writer of the shared cache')
 assert.match(dailyDriver, /teleDailyBuildGridCard/, 'file selection/media hotfix must be active')
 assert.match(dailyDriverCss, /#toggle-drawer\s*\{\s*display:\s*none/, 'download Hide control must be removed from the UI')
 assert.match(html, /telegram-daily-driver\.js/, 'daily-driver runtime must be loaded')
@@ -102,7 +127,12 @@ assert.doesNotMatch(html, /telegram-daily-driver-v3\.js/, 'removed v3 experiment
 assert.doesNotMatch(html, /telegram-daily-driver-v3\.css/, 'removed v3 experiment stylesheet must not be loaded')
 assert.match(html, /id="boot-status"/, 'bootstrap must expose a visible connecting state instead of a blank page')
 
-assert.match(dailyHotfix, /scan-media-v3/, 'stable runtime must use the chat-scoped media index engine')
+/* INVERTED. This required the hotfix layer to issue `scan-media-v3` itself. Five layers
+ * did, each with its own force policy, retry count and cache write, and which one ran
+ * was decided by load order. `public/files-stability.js` owns discovery; the hotfix
+ * keeps the count label, the preview modal and the thumbnail helpers. */
+assert.doesNotMatch(dailyHotfixCode, /scan-media-v3/, 'only the Files index owner may run the chat-scoped media scan')
+assert.doesNotMatch(dailyHotfixCode, /rescueFileCache\.set/, 'the Files index owner must be the only writer of the shared cache')
 assert.match(dailyHotfix, /teleHotfixSnapshotBelongsToChat/, 'stale cross-chat file snapshots must be rejected')
 assert.match(dailyHotfix, /messageId/, 'preview requests must carry message identity for Telegram file rehydration')
 assert.match(dailyHotfix, /rescueDownloadedMarks\.delete/, 'unmark must clear persisted Downloaded labels')

@@ -5,6 +5,7 @@ node_modules/
 .td_database/
 .td_files/
 .management_uploads/
+.filegram_state/
 downloads/
 .thumbs/
 

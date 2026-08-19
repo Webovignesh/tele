@@ -43,39 +43,27 @@
   text-transform: uppercase;
 }
 
-#mg-downloads-pane .dl-controls .conc:first-of-type > .row {
-  width: 100%;
-  display: grid !important;
-  grid-template-columns: minmax(0, 1fr) 54px !important;
-  gap: 8px !important;
-  align-items: center !important;
-}
-
-#mg-downloads-pane #dl-dir {
-  width: 100% !important;
-  min-width: 0 !important;
-  height: 38px !important;
-  padding: 0 10px !important;
-  border-radius: 10px !important;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace !important;
-  font-size: 11px !important;
-  text-overflow: ellipsis;
-}
-
-#mg-downloads-pane #set-dir {
-  width: 54px !important;
-  min-width: 54px !important;
-  height: 38px !important;
-  padding: 0 !important;
-  border-radius: 10px !important;
-}
-
-/* The editable field is the single source of truth. Remove the duplicated path card. */
-#mg-downloads-pane .dir-current {
-  display: none !important;
-}
-
-#mg-downloads-pane .dl-controls .conc:nth-of-type(2) > .row {
+/* THE 54px RULE WAS HERE, and it is the reason every previous Save-to fix was
+ * invisible.
+ *
+ *   #mg-downloads-pane #set-dir { width: 54px !important; min-width: 54px !important }
+ *
+ * Two ID selectors. The three JS layers that tried to widen the control used
+ * `#set-dir.fg-download-folder-picker`, `#set-dir.fg-folder-v2` and
+ * `.downloads #set-dir` - one ID plus one class each - so all three lost the cascade
+ * and the button computed 54px inside a 361px row, clipping "Save to" to `SAV...`
+ * with the path wrapped underneath. Measured in the running app, in the Playwright
+ * fixture and in the CDP matched-rules list.
+ *
+ * It is deleted rather than overridden, along with the `:first-of-type > .row` grid
+ * that reserved the 54px track, `#mg-downloads-pane #dl-dir` and
+ * `#mg-downloads-pane .dir-current`. filegram-ui.css styles the control once.
+ *
+ * The Parallel-files row below was selected by `.conc:nth-of-type(2)`, counting
+ * `label` siblings. With the Save-to label deleted, Parallel became the first label
+ * and that selector would have stopped matching, changing the slider geometry that
+ * clause 3.11 pins at 275/305/325/335. It now selects on content. */
+#mg-downloads-pane .dl-controls .conc:has(#concurrency) > .row {
   width: 100%;
   display: grid !important;
   grid-template-columns: minmax(0, 1fr) auto !important;

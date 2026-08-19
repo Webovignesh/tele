@@ -10,192 +10,82 @@
  */
 
 ;(function teleFinalGuard () {
-  const guardBaseRequest = request
   const guardBaseHandleEvent = handleEvent
   const guardBaseSetLoadState = setLoadState
   const guardBaseOpenChat = openChat
-  const guardScanFlights = new Map()
   const guardAvatarRetries = new Map()
-  const GUARD_HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
-  const GUARD_MAX_SCAN_ROUNDS = 5
 
-  let guardHighWater = {}
-  try { guardHighWater = JSON.parse(localStorage.getItem(GUARD_HIGH_WATER_KEY) || '{}') || {} } catch { guardHighWater = {} }
-
+  /* THE CLIENT CACHE THAT OUTRANKED TELEGRAM WAS HERE, and it is the answer to
+   * clause 2.24 item (2).
+   *
+   * This layer replaced the global `request` with `teleGuardRequest`, intercepted
+   * `scan-media-v3`, and ran the server's answer through `guardStableMediaScan`. When
+   * the truthful result came back smaller than a client-side floor - the persisted
+   * IndexedDB record's item count, or this layer's own copy of the high-water mark -
+   * it discarded the server's answer and returned `guardSnapshotAsResponse(known)`:
+   * the stale snapshot, stamped `done: true, fromCache: true,
+   * protectedByClientCache: true`, indistinguishable to the caller from a completed
+   * scan.
+   *
+   * Measured on the running application for chat TEST: the server answered
+   * `found=0 items=0` on ws request ids 31, 32 and 33; the caller received
+   * `{"found":22,...,"protectedByClientCache":true}`. `teleFilesIndex.hardRefresh()`
+   * did not escape it either, because `clearTotalFloor` dropped the localStorage
+   * floor while `guardBestKnownSnapshot` read the IndexedDB record directly, and each
+   * pass re-stamped the floor from the stale snapshot it had just served. That is why
+   * every previous fix to this defect was invisible: no matter what the server said,
+   * this function answered 22.
+   *
+   * Everything that made it work is gone: `guardStableMediaScan`, the `request`
+   * interception, `guardBestKnownSnapshot`, `guardSnapshotAsResponse`,
+   * `guardScanShape`, `guardMemorySnapshot`, `guardIsCompleteSnapshot`,
+   * `GUARD_MAX_SCAN_ROUNDS` and the flight map. `scan-media-v3` now reaches its
+   * caller unmodified.
+   *
+   * The protection it was standing in for has not been dropped, it has moved to where
+   * the decision is made: `public/files-stability.js` commits discoveries through
+   * `commitDiscovery`, which unions and therefore cannot lower a count, and only
+   * `commitAuthoritative` - reached solely from a confirmed, complete truth pass - may
+   * remove anything. A partial or cancelled scan still cannot replace a larger index
+   * (clauses 3.2, 3.3), and it can no longer replace a smaller one either.
+   *
+   * The count-label takeover went with it. `guardUpdateMediaLabel` painted the header,
+   * Download all and Select all from `rescueFileCache`, which every legacy layer
+   * writes, so the number on screen came from whichever layer wrote that cache last
+   * rather than from the committed index. `files-stability.js` `ownCountLabel()` owns
+   * `updateMediaCountLabel` and `rescueUpdateMediaLabel` now and paints from the
+   * committed index; `files-view.js` paints Select all from the same source. */
   function guardKey (value) { return String(value) }
-
-  function guardIsCompleteSnapshot (chatId, snapshot) {
-    if (!snapshot || snapshot.done === false || !Array.isArray(snapshot.items)) return false
-    const key = guardKey(chatId)
-    return snapshot.items.every(item => item && guardKey(item.chatId) === key)
-  }
-
-  function guardMemorySnapshot (chatId) {
-    const snapshot = rescueFileCache.get(guardKey(chatId))
-    return guardIsCompleteSnapshot(chatId, snapshot) ? snapshot : null
-  }
-
-  function guardRememberHighWater (chatId, count) {
-    const key = guardKey(chatId)
-    const value = Math.max(0, Number(count || 0))
-    const current = guardHighWater[key] && Number(guardHighWater[key].count || 0)
-    if (value <= current) return
-    guardHighWater[key] = { count: value, at: Date.now() }
-    try { localStorage.setItem(GUARD_HIGH_WATER_KEY, JSON.stringify(guardHighWater)) } catch {}
-  }
-
-  function guardHighWaterCount (chatId) {
-    const entry = guardHighWater[guardKey(chatId)]
-    if (!entry) return 0
-    const age = Date.now() - Number(entry.at || 0)
-    // High-water protection is for transient scan collapse, not permanent
-    // historical truth. Let very old values expire naturally.
-    if (age > 14 * 24 * 60 * 60 * 1000) return 0
-    return Math.max(0, Number(entry.count || 0))
-  }
-
-  async function guardBestKnownSnapshot (chatId) {
-    let best = guardMemorySnapshot(chatId)
-    try {
-      const disk = await teleP0v2ReadIndex(chatId)
-      if (guardIsCompleteSnapshot(chatId, disk) && (!best || disk.items.length > best.items.length)) best = disk
-    } catch {}
-    if (best) guardRememberHighWater(chatId, best.items.length)
-    return best
-  }
-
-  function guardScanShape (result) {
-    return {
-      count: Array.isArray(result && result.items) ? result.items.length : Number(result && result.found || 0),
-      scanned: Number(result && result.scanned || 0),
-      done: !result || result.done !== false,
-      fromCache: !!(result && result.fromCache)
-    }
-  }
-
-  function guardSnapshotAsResponse (snapshot) {
-    return {
-      found: snapshot.items.length,
-      scanned: Number(snapshot.scanned || 0),
-      typeCounts: snapshot.typeCounts || {},
-      items: snapshot.items.map(item => ({ ...item })),
-      cancelled: false,
-      done: true,
-      fromCache: true,
-      protectedByClientCache: true
-    }
-  }
-
-  async function guardStableMediaScan (payload) {
-    const chatId = payload && payload.chatId
-    if (chatId == null) return guardBaseRequest('scan-media-v3', payload)
-    const key = guardKey(chatId)
-    if (guardScanFlights.has(key)) return guardScanFlights.get(key)
-
-    const flight = (async () => {
-      const known = await guardBestKnownSnapshot(chatId)
-      const floor = Math.max(known ? known.items.length : 0, guardHighWaterCount(chatId))
-      let best = null
-      let bestShape = { count: 0, scanned: 0 }
-      let previousShape = null
-
-      for (let round = 0; round < GUARD_MAX_SCAN_ROUNDS; round++) {
-        const result = await guardBaseRequest('scan-media-v3', {
-          ...payload,
-          // A second pass must bypass a possibly-short in-memory server index.
-          force: round === 0 ? !!payload.force : true
-        })
-        const shape = guardScanShape(result)
-        if (!shape.done) continue
-
-        if (!best || shape.count > bestShape.count || (shape.count === bestShape.count && shape.scanned > bestShape.scanned)) {
-          best = result
-          bestShape = shape
-        }
-        if (shape.count) guardRememberHighWater(chatId, shape.count)
-
-        const belowKnownFloor = floor > 0 && shape.count < floor
-        const firstPassNeedsVerification = round === 0 && (
-          belowKnownFloor ||
-          shape.fromCache ||
-          (shape.count < 5000 && shape.scanned < 5000)
-        )
-
-        if (!firstPassNeedsVerification && round === 0) return result
-
-        if (round > 0 && !belowKnownFloor) {
-          const improved = previousShape && (shape.count > previousShape.count || shape.scanned > previousShape.scanned)
-          // Once a forced pass stops growing, it is stable. Large completed
-          // passes are also accepted immediately so 20k+ channels are not rescanned.
-          if (!improved || shape.count >= 5000 || shape.scanned >= 5000) return best || result
-        }
-
-        previousShape = shape
-        if (round < GUARD_MAX_SCAN_ROUNDS - 1) {
-          await new Promise(resolve => setTimeout(resolve, 650 + round * 350))
-        }
-      }
-
-      // Never let a transient 9/51/1000-item scan destroy a previously complete
-      // per-chat index. The next background reconciliation can try again.
-      if (known && (!best || bestShape.count < floor)) return guardSnapshotAsResponse(known)
-      return best || guardSnapshotAsResponse(known || { items: [], scanned: 0, typeCounts: {} })
-    })().finally(() => guardScanFlights.delete(key))
-
-    guardScanFlights.set(key, flight)
-    return flight
-  }
-
-  request = function teleGuardRequest (type, payload = {}) {
-    if (type === 'scan-media-v3') return guardStableMediaScan(payload)
-    return guardBaseRequest(type, payload)
-  }
 
   /* ------------------------------ Stable Files presentation ------------------------------ */
 
-  function guardUpdateMediaLabel () {
-    const chatId = state.activeChatId
-    const label = document.querySelector('#chat-media-count')
-    const downloadAll = document.querySelector('#download-all-media')
-    const selectAll = document.querySelector('#select-all-media')
-    if (chatId == null) {
-      if (label) label.textContent = ''
-      if (downloadAll) { downloadAll.textContent = 'Download all media'; downloadAll.disabled = true }
-      if (selectAll) { selectAll.textContent = 'Select all'; selectAll.disabled = true }
-      return
-    }
-
-    const snapshot = guardMemorySnapshot(chatId)
-    if (!snapshot) {
-      if (label) label.textContent = state.view === 'files' ? 'Indexing files…' : ''
-      if (downloadAll) { downloadAll.textContent = 'Download all media'; downloadAll.disabled = true }
-      if (selectAll) { selectAll.textContent = 'Select all'; selectAll.disabled = true }
-      return
-    }
-
-    const count = snapshot.items.length
-    guardRememberHighWater(chatId, count)
-    if (label) label.textContent = `${count.toLocaleString()} file${count === 1 ? '' : 's'}`
-    if (downloadAll) { downloadAll.textContent = `Download all media (${count.toLocaleString()})`; downloadAll.disabled = count === 0 }
-    if (selectAll) { selectAll.textContent = `Select all (${count.toLocaleString()})`; selectAll.disabled = count === 0 }
+  /* Kept: the load-state smoothing. It suppresses the transient
+   * "syncing / counting / Loaded N" chatter in the Files footer that made the status
+   * line flicker while a scan streamed, and it is purely presentational.
+   *
+   * It now asks the index OWNER whether a snapshot exists instead of reading
+   * `rescueFileCache` through the deleted `guardMemorySnapshot`. Same behaviour, one
+   * source: the shared cache is written by several legacy layers, so a partial write
+   * there could clear the footer while the committed index was still empty. Failures
+   * still pass through unchanged, which is what lets the reconciliation's "Could not
+   * verify against Telegram" notice reach the user (clause 2.10). */
+  function guardOwnedSnapshot (chatId) {
+    if (chatId == null) return null
+    try {
+      if (window.teleFilesIndex && typeof window.teleFilesIndex.snapshot === 'function') {
+        const snapshot = window.teleFilesIndex.snapshot(chatId)
+        if (snapshot && Array.isArray(snapshot.items) && snapshot.done !== false) return snapshot
+      }
+    } catch {}
+    return null
   }
-
-  updateMediaCountLabel = guardUpdateMediaLabel
-  rescueUpdateMediaLabel = guardUpdateMediaLabel
 
   setLoadState = function teleGuardSetLoadState (text) {
     if (state.view !== 'files') return guardBaseSetLoadState(text)
     const value = String(text || '')
     if (/failed|could not|error/i.test(value)) return guardBaseSetLoadState(value)
-    if (guardMemorySnapshot(state.activeChatId)) return guardBaseSetLoadState('')
+    if (guardOwnedSnapshot(state.activeChatId)) return guardBaseSetLoadState('')
     return guardBaseSetLoadState('Indexing files…')
-  }
-
-  const mediaLabel = document.querySelector('#chat-media-count')
-  if (mediaLabel) {
-    new MutationObserver(() => {
-      if (/syncing|refreshing|counting/i.test(mediaLabel.textContent || '')) guardUpdateMediaLabel()
-    }).observe(mediaLabel, { childList: true, characterData: true, subtree: true })
   }
 
   /* ------------------------------ Keyed chat list ------------------------------ */
@@ -445,14 +335,14 @@
   }
 
   handleEvent = function teleFinalGuardHandleEvent (event) {
-    if (event && event.name === 'media-index-progress') {
-      const payload = event.payload || {}
-      if (state.activeChatId != null && guardKey(payload.chatId) === guardKey(state.activeChatId) && state.view === 'files') {
-        guardUpdateMediaLabel()
-        setLoadState(guardMemorySnapshot(state.activeChatId) ? '' : 'Indexing files…')
-      }
-      return
-    }
+    /* `media-index-progress` is not handled here any more, and the event is no longer
+     * swallowed. This branch repainted the count from the shared cache and returned
+     * WITHOUT calling the base chain, so it was one of the layers competing to own the
+     * progress stream. `public/files-stability.js` is the sole owner of that event now:
+     * it batches the batches (PROGRESS_FLUSH_MS 350, PROGRESS_FLUSH_ITEMS 800), commits
+     * through `commitDiscovery`, and repaints from the committed index. Its wrapper is
+     * installed later in the load order than this one, so the event never reaches this
+     * function in the first place. */
     if (event && event.name === 'chat-upsert') {
       guardUpsertChat(event.chat)
       return
@@ -470,7 +360,9 @@
     // Only counts as read if the messages are actually on screen.
     if (state.view === 'messages') guardMarkChatRead(chatId)
     guardRepaintChats()
-    guardUpdateMediaLabel()
+    // The count label is repainted by its owner (files-stability.js), through the
+    // symbol this layer used to overwrite.
+    if (typeof updateMediaCountLabel === 'function') updateMediaCountLabel()
     guardPaintHeaderAvatar()
     return result
   }
@@ -488,6 +380,5 @@
 
   guardRebindFilters()
   guardRenderChats()
-  guardUpdateMediaLabel()
   guardPaintHeaderAvatar()
 })()

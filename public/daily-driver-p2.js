@@ -7,112 +7,26 @@
  * - keep the full dedupe report visible instead of truncating after 100 rows
  */
 
-const teleP2FileInflight = new Map()
 const teleP2AvatarFailures = new Set()
 
 function teleP2Key (value) { return String(value) }
 
-function teleP2ValidSnapshot (chatId, snapshot) {
-  if (!snapshot || !Array.isArray(snapshot.items)) return false
-  const key = teleP2Key(chatId)
-  return snapshot.items.every(item => item && teleP2Key(item.chatId) === key)
-}
-
-function teleP2ApplySnapshot (chatId, snapshot, label) {
-  if (!teleP2ValidSnapshot(chatId, snapshot)) return false
-  const key = teleP2Key(chatId)
-  rescueFileCache.set(key, snapshot)
-  try { teleHotfixValidatedChats.add(key) } catch {}
-  if (state.activeChatId != null && teleP2Key(state.activeChatId) === key && state.view === 'files') {
-    rescueApplyCompleteFiles(chatId, snapshot)
-    renderFiles()
-    updateMediaCountLabel()
-    if (label) setLoadState(label)
-  }
-  return true
-}
-
-async function teleP2ReadPersistentFiles (chatId) {
-  try {
-    const snapshot = await teleP0v2ReadIndex(chatId)
-    if (!teleP2ValidSnapshot(chatId, snapshot)) return null
-    teleP2ApplySnapshot(chatId, snapshot, `Cached ${snapshot.items.length.toLocaleString()} files`)
-    return snapshot
-  } catch { return null }
-}
-
-async function teleP2EnsureFilesReady (chatId, allowRetry = true) {
-  if (chatId == null) return null
-  const key = teleP2Key(chatId)
-  const memory = rescueFileCache.get(key)
-  if (teleP2ValidSnapshot(chatId, memory) && memory.done !== false) {
-    teleP2ApplySnapshot(chatId, memory, `Loaded ${memory.items.length.toLocaleString()} files`)
-    return memory
-  }
-  if (teleP2FileInflight.has(key)) return teleP2FileInflight.get(key)
-
-  const work = (async () => {
-    const persisted = await teleP2ReadPersistentFiles(chatId)
-    if (persisted && persisted.done !== false) return persisted
-    try {
-      const data = await request('scan-media-v3', { chatId, force: false })
-      const snapshot = {
-        chatId,
-        items: ((data && data.items) || []).filter(item => item && teleP2Key(item.chatId) === key),
-        found: 0,
-        scanned: Number((data && data.scanned) || 0),
-        typeCounts: (data && data.typeCounts) || {},
-        savedAt: Date.now(),
-        done: data ? data.done !== false : true
-      }
-      snapshot.found = snapshot.items.length
-      try { teleP1SortMediaItems(snapshot.items) } catch {}
-      teleP2ApplySnapshot(chatId, snapshot, `Loaded ${snapshot.items.length.toLocaleString()} files`)
-      if (snapshot.done) {
-        try { await teleP0v2WriteIndex(chatId, snapshot) } catch {}
-      }
-      return snapshot
-    } catch (error) {
-      if (allowRetry) {
-        await new Promise(resolve => setTimeout(resolve, 650))
-        return teleP2EnsureFilesReady(chatId, false)
-      }
-      if (state.activeChatId != null && teleP2Key(state.activeChatId) === key && state.view === 'files') {
-        setLoadState('Files did not load. Reopen Files to retry.')
-      }
-      throw error
-    }
-  })().finally(() => teleP2FileInflight.delete(key))
-
-  teleP2FileInflight.set(key, work)
-  return work
-}
-
-// P1 starts the IndexedDB restore asynchronously, while the older hotfix below
-// it may delete an unvalidated memory snapshot. Resolve that race before the
-// existing openChat stack executes.
-const teleP2BaseOpenChat = openChat
-openChat = async function teleP2OpenChat (chatId) {
-  const key = teleP2Key(chatId)
-  const memory = rescueFileCache.get(key)
-  if (teleP2ValidSnapshot(chatId, memory)) {
-    try { teleHotfixValidatedChats.add(key) } catch {}
-  } else {
-    await teleP2ReadPersistentFiles(chatId)
-  }
-  const result = await teleP2BaseOpenChat(chatId)
-  if (state.view === 'files') teleP2EnsureFilesReady(chatId).catch(() => {})
-  return result
-}
-
-const teleP2BaseSetView = setView
-setView = function teleP2SetView (view) {
-  const result = teleP2BaseSetView(view)
-  if (view === 'files' && state.activeChatId != null) {
-    teleP2EnsureFilesReady(state.activeChatId).catch(() => {})
-  }
-  return result
-}
+/* This layer's Files-index code is gone: `teleP2ApplySnapshot`,
+ * `teleP2ReadPersistentFiles`, `teleP2EnsureFilesReady`, `teleP2ValidSnapshot`,
+ * `teleP2FileInflight`, the `openChat` restore and the `setView` hydration.
+ *
+ * It existed to resolve a race between P1's asynchronous IndexedDB restore and the
+ * older hotfix's deletion of unvalidated memory snapshots - a race that only existed
+ * because three layers were restoring the same index independently. With one owner
+ * (`public/files-stability.js`) there is nothing to race: `ensure` dedupes per chat
+ * and its `restore` is the only reader of the persistent record.
+ *
+ * `teleP2ApplySnapshot` was observed in Phase 0 writing the stale 22 into
+ * `rescueFileCache` on a single chat open, via
+ * `teleP2SetView -> teleP2EnsureFilesReady -> teleP2ApplySnapshot`.
+ *
+ * Kept: direct thumbnail streaming from the TDLib cache, chat avatars and the chat
+ * list, and the full dedupe report. None of them own index state. */
 
 /* ------------------------------ Direct thumbnail streaming ------------------------------ */
 

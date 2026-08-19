@@ -62,8 +62,9 @@ assert.match(stability, /if \(snapshot\.done !== false\) rememberTotalFloor/, 'o
 assert.match(stability, /done = done \|\| snapshot\.done !== false/, 'union must OR the completeness flag, not AND it')
 assert.doesNotMatch(stability, /done = done && snapshot\.done !== false/, 'the AND form must not come back')
 
-/* One source of truth for every total. */
-assert.match(stability, /snapshot: chatId => committed\.get/, 'the index owner must expose its snapshot')
+/* One source of truth for every total. Exposed snapshots are defensive copies so
+ * compatibility layers cannot mutate the owner's commit base in place. */
+assert.match(stability, /snapshot: chatId => cloneSnapshot\(committed\.get/, 'the index owner must expose a private-copy snapshot')
 assert.match(filesView, /window\.teleFilesIndex/, 'the Files list must read the index owner')
 assert.match(filesView, /index\.snapshot\(state\.activeChatId\)/, 'the Files list must derive from the owned snapshot')
 
@@ -75,15 +76,24 @@ const lateOwners = [
   ['filegram-shell.js', shell]
 ]
 for (const [name, source] of lateOwners) {
-  if (name === 'daily-driver-final-guard.js') continue // loads BEFORE files-stability.js
+  if (name === 'daily-driver-final-guard.js') continue
   assert.doesNotMatch(source, /^\s*updateMediaCountLabel\s*=/m, `${name} must not take over the count label`)
   assert.doesNotMatch(source, /^\s*rescueUpdateMediaLabel\s*=/m, `${name} must not take over the count label`)
 }
 
-// The persistent index must be monotonic unless a shrink is explicitly allowed.
-assert.match(p0, /async function teleP0v2WriteIndex \(chatId, snapshot, options = \{\}\)/, 'the persistent write must accept options')
-assert.match(p0, /options\.allowShrink/, 'shrinking the persistent index must be opt-in')
-assert.match(p0, /if \(storedCount > snapshot\.items\.length\) return/, 'a smaller snapshot must not overwrite a larger stored index')
+/* The persistence boundary is UNCONDITIONAL, and the protection moved to the
+ * owner's two commit functions. */
+assert.match(stability, /async function writePersistent \(chatId, snapshot, options = \{\}\)/, 'the owner must own the persistence boundary')
+assert.match(stability, /function commitDiscovery/, 'the additive commit must exist')
+assert.match(stability, /async function commitAuthoritative/, 'the subtractive commit must exist')
+const writePersistentBoundary = stability.slice(
+  stability.indexOf('async function writePersistent'),
+  stability.indexOf('/* Legacy readers')
+)
+assert.doesNotMatch(writePersistentBoundary, /allowShrink/, 'the persistence boundary must have no shrink escape hatch')
+assert.doesNotMatch(writePersistentBoundary, /storedCount/, 'the persistence boundary must not read the stored count')
+assert.doesNotMatch(writePersistentBoundary, /items\.length\s*[<>]/, 'the persistence boundary must not compare counts')
+assert.match(stability, /previous \? union\(chatId, previous, snapshot\) : normalize\(chatId, snapshot\)/, 'commitDiscovery must union rather than replace')
 
 /* Filtered and page counts must stay out of the header. The pager owns them. */
 assert.match(filesView, /filegram-page-summary/, 'the pager owns the filtered/page summary')
@@ -105,10 +115,6 @@ for (const [name, source] of [['daily-driver-final-ui-fix.js', uiFix], ['daily-d
   assert.doesNotMatch(source, /renderFilesVirtual/, `${name} must not reference the virtual files renderer`)
 }
 assert.doesNotMatch(uiFix, /function spacer/, 'the spacer factory must be gone')
-// No layer may compute a scroll height. The grid's height must come only from the
-// rows actually mounted, which is what makes the page bottom the real bottom.
-// rescue-runtime.js is excluded: its only style.height is the message composer
-// textarea auto-grow, which has nothing to do with the files grid.
 for (const [name, source] of [['daily-driver-final-ui-fix.js', uiFix], ['daily-driver-final.js', final], ['files-view.js', filesView]]) {
   assert.doesNotMatch(source, /style\.height = /, `${name} must not set synthetic element heights in the files grid`)
 }

@@ -1,4 +1,4 @@
-'use strict'
+﻿'use strict'
 
 /* Daily-driver acceptance hotfix v2.
  * Stable v2 UI, chat-scoped file indexes, non-destructive message state,
@@ -14,11 +14,11 @@ function teleHotfixSnapshotBelongsToChat (chatId, snapshot) {
   return snapshot.items.every(item => item && teleHotfixChatKey(item.chatId) === wanted)
 }
 
-function teleHotfixDropContaminatedSnapshot (chatId) {
-  const key = teleHotfixChatKey(chatId)
-  const snapshot = rescueFileCache.get(key)
-  if (snapshot && !teleHotfixSnapshotBelongsToChat(chatId, snapshot)) rescueFileCache.delete(key)
-}
+/* `teleHotfixDropContaminatedSnapshot` is gone with its two callers. It dropped a
+ * shared-cache entry whose items belonged to a different chat - a symptom of the old
+ * `rescueApplyCompleteFiles`, which copied a whole file index into `state.messages`
+ * and could leak one chat's index into the next. That copy stopped happening long ago
+ * (see below), and the owner scopes every commit to its chat with `belongsToChat`. */
 
 function teleHotfixSortFileItems (items) {
   return items.sort((a, b) => {
@@ -35,7 +35,7 @@ function teleHotfixSortFileItems (items) {
 rescueApplyCompleteFiles = function teleHotfixApplyFileSnapshot (chatId, snapshot) {
   if (!snapshot || !Array.isArray(snapshot.items)) return
   if (!teleHotfixSnapshotBelongsToChat(chatId, snapshot)) return
-  state.mediaCount = snapshot.items.length
+  // state.mediaCount = snapshot.items.length // REMOVED: owner is files-stability.js
   state.typeCounts = snapshot.typeCounts || null
 }
 
@@ -97,111 +97,26 @@ function teleHotfixUpdateScopedMediaLabel () {
 rescueUpdateMediaLabel = teleHotfixUpdateScopedMediaLabel
 updateMediaCountLabel = teleHotfixUpdateScopedMediaLabel
 
+/* The `openChat` index handling is gone, and with it `teleHotfixApplyProgress`, the
+ * `media-index-progress` wrapper and this layer's `rescueEnsureAllFiles` override.
+ *
+ * The removal worth explaining is the `rescueFileCache.delete(key)` this wrapper did
+ * for any chat not yet validated in the current page session. It was there to stop an
+ * unvalidated whole-chat count showing on first entry, but it discarded the restored
+ * index of a chat whose record had just been read by another layer, forcing a rescan -
+ * which is precisely the race `daily-driver-p2.js` then added more code to work
+ * around. With one owner there is no unvalidated count to hide: `files-stability.js`
+ * paints only what it has committed, and its `isCompleteSnapshot` decides
+ * completeness.
+ *
+ * Kept: `teleHotfixSortFileItems` and `teleHotfixValidatedChats` (other layers call
+ * and read them), `teleHotfixSnapshotBelongsToChat`, the count label, the preview
+ * modal and the thumbnail helpers. */
 const teleHotfixBaseOpenChat = openChat
 openChat = async function teleHotfixOpenChat (chatId) {
-  const key = teleHotfixChatKey(chatId)
-  teleHotfixDropContaminatedSnapshot(chatId)
-  /* Do not show an unvalidated whole-chat count on first entry in this page
-   * session. Force one scoped scan, then revisits are instant. */
-  if (!teleHotfixValidatedChats.has(key)) rescueFileCache.delete(key)
   const result = await teleHotfixBaseOpenChat(chatId)
   teleHotfixUpdateScopedMediaLabel()
   return result
-}
-
-function teleHotfixApplyProgress (payload) {
-  if (!payload || payload.chatId == null) return
-  const key = teleHotfixChatKey(payload.chatId)
-  const current = rescueFileCache.get(key)
-  const snapshot = current && teleHotfixSnapshotBelongsToChat(payload.chatId, current)
-    ? current
-    : { chatId: payload.chatId, items: [], found: 0, scanned: 0, typeCounts: {}, savedAt: Date.now(), done: false }
-
-  const byKey = new Map((snapshot.items || []).map(item => [String(item.key || `${item.chatId}:${item.messageId}`), item]))
-  for (const item of payload.items || []) {
-    if (!item || teleHotfixChatKey(item.chatId) !== key) continue
-    byKey.set(String(item.key || `${item.chatId}:${item.messageId}`), item)
-  }
-  snapshot.chatId = payload.chatId
-  snapshot.items = teleHotfixSortFileItems([...byKey.values()])
-  /* item count is authoritative; never trust a transient/global found count */
-  snapshot.found = snapshot.items.length
-  snapshot.scanned = Number(payload.scanned || snapshot.scanned || 0)
-  snapshot.typeCounts = payload.typeCounts || snapshot.typeCounts || {}
-  snapshot.savedAt = Date.now()
-  snapshot.done = !!payload.done
-  rescueFileCache.set(key, snapshot)
-  if (payload.done) teleHotfixValidatedChats.add(key)
-
-  if (state.activeChatId == null || teleHotfixChatKey(state.activeChatId) !== key || state.view !== 'files') return
-  rescueApplyCompleteFiles(payload.chatId, snapshot)
-  teleHotfixUpdateScopedMediaLabel()
-  setLoadState(payload.done
-    ? `Loaded all ${snapshot.items.length.toLocaleString()} files`
-    : `Loading files… ${snapshot.items.length.toLocaleString()} found`)
-  renderFiles()
-}
-
-const teleHotfixBaseHandleEvent = handleEvent
-handleEvent = function teleHotfixHandleEvent (ev) {
-  if (ev && ev.name === 'media-index-progress') {
-    teleHotfixApplyProgress(ev.payload || {})
-    return
-  }
-  return teleHotfixBaseHandleEvent(ev)
-}
-
-rescueEnsureAllFiles = async function teleHotfixEnsureAllFiles (chatId) {
-  if (chatId == null) return
-  const key = teleHotfixChatKey(chatId)
-  teleHotfixDropContaminatedSnapshot(chatId)
-  const cached = rescueFileCache.get(key)
-  if (cached && cached.done && teleHotfixValidatedChats.has(key)) {
-    if (state.activeChatId != null && teleHotfixChatKey(state.activeChatId) === key && state.view === 'files') {
-      rescueApplyCompleteFiles(chatId, cached)
-      renderFiles()
-      teleHotfixUpdateScopedMediaLabel()
-      setLoadState(`Loaded all ${cached.items.length.toLocaleString()} files`)
-    }
-    return cached
-  }
-  if (rescueFileInflight.has(key)) return rescueFileInflight.get(key)
-
-  const generation = rescueOpenGeneration
-  const work = (async () => {
-    try {
-      const force = !teleHotfixValidatedChats.has(key)
-      const data = await request('scan-media-v3', { chatId, force })
-      const snapshot = {
-        chatId,
-        items: teleHotfixSortFileItems(((data && data.items) || []).filter(item => item && teleHotfixChatKey(item.chatId) === key)),
-        found: 0,
-        scanned: Number((data && data.scanned) || 0),
-        typeCounts: (data && data.typeCounts) || {},
-        savedAt: Date.now(),
-        done: data ? data.done !== false : true
-      }
-      snapshot.found = snapshot.items.length
-      rescueFileCache.set(key, snapshot)
-      if (snapshot.done) teleHotfixValidatedChats.add(key)
-      if (state.activeChatId == null || teleHotfixChatKey(state.activeChatId) !== key || generation !== rescueOpenGeneration || state.view !== 'files') return snapshot
-      rescueApplyCompleteFiles(chatId, snapshot)
-      renderFiles()
-      teleHotfixUpdateScopedMediaLabel()
-      setLoadState(`Loaded all ${snapshot.items.length.toLocaleString()} files`)
-      return snapshot
-    } catch (error) {
-      if (state.activeChatId != null && teleHotfixChatKey(state.activeChatId) === key && state.view === 'files') {
-        setLoadState('Failed to load files. Reopen Files to retry.')
-        toast(String(error && error.message ? error.message : error), 'error')
-      }
-      throw error
-    } finally {
-      rescueFileInflight.delete(key)
-    }
-  })()
-  rescueFileInflight.set(key, work)
-  return work
 }
 
 function teleHotfixMediaUrl (item, retryToken) {

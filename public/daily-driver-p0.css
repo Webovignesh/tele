@@ -24,46 +24,18 @@
   letter-spacing: .08em !important;
   opacity: .9;
 }
-/* Folder path gets a full row. The Set button deliberately sits below it so a
- * normal Windows path is readable instead of being crushed into ~100px. */
-.downloads .dl-controls .conc:first-of-type > .row {
-  display: grid !important;
-  grid-template-columns: 1fr !important;
-  gap: 9px !important;
-  width: 100%;
-}
-.downloads #dl-dir {
-  width: 100% !important;
-  min-width: 0 !important;
-  height: 42px !important;
-  padding: 0 12px !important;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace !important;
-  font-size: 11px !important;
-  text-overflow: ellipsis;
-}
-.downloads #set-dir {
-  width: 100% !important;
-  min-width: 0 !important;
-  height: 38px;
-  padding-inline: 13px !important;
-}
-.downloads .dir-current {
-  display: block !important;
-  margin: -9px 0 0 !important;
-  padding: 10px 12px !important;
-  min-height: 38px;
-  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, #071019 72%, transparent);
-  color: var(--muted) !important;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px !important;
-  line-height: 1.45 !important;
-  overflow-wrap: anywhere !important;
-  word-break: break-word !important;
-  white-space: normal !important;
-}
-.downloads .dl-controls .conc:nth-of-type(2) > .row {
+/* The Save-to block that used to live here is gone: the `:first-of-type > .row`
+   grid, `.downloads #dl-dir`, `.downloads #set-dir` (one of the three
+   `width: 100% !important` rules that lost on specificity to the 54px rule in
+   daily-driver-p1.css) and `.downloads .dir-current`. The control is now one button
+   styled once, in filegram-ui.css.
+ *
+ * The Parallel-files row selector below was `.conc:nth-of-type(2)`, which counted
+ * `label` siblings. Deleting the Save-to `label.conc` from the markup made Parallel
+ * the FIRST label, so an index-based selector would have silently stopped matching
+ * it and changed the slider geometry that clause 3.11 pins. It is addressed by what
+ * it contains instead, which no sibling change can move. */
+.downloads .dl-controls .conc:has(#concurrency) > .row {
   display: grid !important;
   grid-template-columns: minmax(110px, 1fr) 40px !important;
   gap: 12px !important;

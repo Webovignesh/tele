@@ -5,154 +5,45 @@
  * remains isolated.
  */
 
-const teleP0v2DbName = 'tele-daily-driver-cache-v1'
-const teleP0v2Store = 'file-indexes'
-const teleP0v2Sync = new Map()
-const teleP0v2PersistTimers = new Map()
 const teleP0v2Upload = new WeakMap()
 
 function teleP0v2Key (value) { return String(value) }
-function teleP0v2ValidSnapshot (chatId, snapshot) {
-  if (!snapshot || !Array.isArray(snapshot.items) || snapshot.done === false) return false
-  const wanted = teleP0v2Key(chatId)
-  return snapshot.items.every(item => item && teleP0v2Key(item.chatId) === wanted)
-}
 
-function teleP0v2Db () {
-  return new Promise((resolve, reject) => {
-    if (!window.indexedDB) return resolve(null)
-    const req = indexedDB.open(teleP0v2DbName, 1)
-    req.onupgradeneeded = () => {
-      if (!req.result.objectStoreNames.contains(teleP0v2Store)) req.result.createObjectStore(teleP0v2Store, { keyPath: 'chatId' })
-    }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error || new Error('IndexedDB unavailable'))
-  })
-}
-
-async function teleP0v2ReadIndex (chatId) {
-  const db = await teleP0v2Db().catch(() => null)
-  if (!db) return null
-  return new Promise(resolve => {
-    const tx = db.transaction(teleP0v2Store, 'readonly')
-    const req = tx.objectStore(teleP0v2Store).get(teleP0v2Key(chatId))
-    req.onsuccess = () => resolve(req.result || null)
-    req.onerror = () => resolve(null)
-    tx.oncomplete = () => db.close()
-    tx.onerror = () => { try { db.close() } catch {} }
-  })
-}
-
-/* The persistent index is monotonic. A snapshot may only replace a stored record
- * that is the same size or smaller.
+/* THE PERSISTENCE BOUNDARY THAT DISCARDED LEGITIMATE SHRINKS WAS HERE.
  *
- * teleP0v2ValidSnapshot only checks the done flag and chat ownership, so a short
- * scan stamped done:true used to overwrite a larger committed index on disk. The
- * next reload then restored the short version and the header shrank until a full
- * rescan grew it back. Shrinking requires an explicit hard refresh, which passes
- * allowShrink. */
-async function teleP0v2WriteIndex (chatId, snapshot, options = {}) {
-  if (!teleP0v2ValidSnapshot(chatId, snapshot)) return
-  if (!options.allowShrink) {
-    const existing = await teleP0v2ReadIndex(chatId).catch(() => null)
-    const storedCount = existing && Array.isArray(existing.items) ? existing.items.length : 0
-    if (storedCount > snapshot.items.length) return
-  }
-  const db = await teleP0v2Db().catch(() => null)
-  if (!db) return
-  const record = {
-    chatId: teleP0v2Key(chatId),
-    found: snapshot.items.length,
-    scanned: Number(snapshot.scanned || 0),
-    typeCounts: snapshot.typeCounts || {},
-    items: snapshot.items,
-    savedAt: Date.now(),
-    done: true
-  }
-  await new Promise(resolve => {
-    const tx = db.transaction(teleP0v2Store, 'readwrite')
-    tx.objectStore(teleP0v2Store).put(record)
-    tx.oncomplete = resolve
-    tx.onerror = resolve
-    tx.onabort = resolve
-  })
-  db.close()
-}
-
-function teleP0v2PersistSoon (chatId, delay = 600) {
-  const key = teleP0v2Key(chatId)
-  clearTimeout(teleP0v2PersistTimers.get(key))
-  teleP0v2PersistTimers.set(key, setTimeout(() => {
-    teleP0v2PersistTimers.delete(key)
-    const snapshot = rescueFileCache.get(key)
-    if (teleP0v2ValidSnapshot(chatId, snapshot)) teleP0v2WriteIndex(chatId, snapshot).catch(() => {})
-  }, delay))
-}
-
-function teleP0v2PaintIndex (chatId, snapshot, cached) {
-  if (!teleP0v2ValidSnapshot(chatId, snapshot)) return false
-  const key = teleP0v2Key(chatId)
-  rescueFileCache.set(key, snapshot)
-  try { teleHotfixValidatedChats.add(key) } catch {}
-  if (state.activeChatId != null && teleP0v2Key(state.activeChatId) === key && state.view === 'files') {
-    rescueApplyCompleteFiles(chatId, snapshot)
-    renderFiles()
-    rescueUpdateMediaLabel()
-    setLoadState(`${cached ? 'Cached' : 'Loaded'} ${snapshot.items.length.toLocaleString()} files${cached ? ' · syncing…' : ''}`)
-  }
-  return true
-}
-
-/* Never force a 22k-file rescan just because Chrome refreshed. A finished index
- * is restored from IndexedDB in one shot and server reconciliation uses the
- * chat-scoped memory cache with force:false. */
-rescueEnsureAllFiles = async function teleP0v2EnsureAllFiles (chatId) {
-  if (chatId == null) return null
-  const key = teleP0v2Key(chatId)
-  const memory = rescueFileCache.get(key)
-  if (teleP0v2ValidSnapshot(chatId, memory)) {
-    teleP0v2PaintIndex(chatId, memory, false)
-    teleP0v2PersistSoon(chatId)
-    return memory
-  }
-
-  const disk = await teleP0v2ReadIndex(chatId)
-  if (teleP0v2ValidSnapshot(chatId, disk)) teleP0v2PaintIndex(chatId, disk, true)
-  if (teleP0v2Sync.has(key)) return disk || teleP0v2Sync.get(key)
-
-  const generation = rescueOpenGeneration
-  const promise = (async () => {
-    try {
-      const data = await request('scan-media-v3', { chatId, force: false })
-      const items = ((data && data.items) || []).filter(item => item && teleP0v2Key(item.chatId) === key)
-      const snapshot = {
-        chatId,
-        items: typeof teleHotfixSortFileItems === 'function' ? teleHotfixSortFileItems(items) : items,
-        found: items.length,
-        scanned: Number((data && data.scanned) || 0),
-        typeCounts: (data && data.typeCounts) || {},
-        savedAt: Date.now(),
-        done: data ? data.done !== false : true
-      }
-      if (snapshot.done) {
-        teleP0v2PaintIndex(chatId, snapshot, false)
-        teleP0v2WriteIndex(chatId, snapshot).catch(() => {})
-      }
-      return snapshot
-    } catch (error) {
-      if (!disk && state.activeChatId != null && teleP0v2Key(state.activeChatId) === key && state.view === 'files') {
-        setLoadState('Could not sync files. Reopen Files to retry.')
-        toast(String(error && error.message ? error.message : error), 'error')
-      }
-      return disk || null
-    } finally {
-      teleP0v2Sync.delete(key)
-      if (state.activeChatId != null && teleP0v2Key(state.activeChatId) === key && generation === rescueOpenGeneration) rescueUpdateMediaLabel()
-    }
-  })()
-  teleP0v2Sync.set(key, promise)
-  return disk || promise
-}
+ * `teleP0v2DbName`, `teleP0v2Store`, `teleP0v2Db`, `teleP0v2ReadIndex`,
+ * `teleP0v2WriteIndex`, `teleP0v2PersistTimers`, `teleP0v2PersistSoon`,
+ * `teleP0v2ValidSnapshot`, `teleP0v2PaintIndex`, `teleP0v2Sync`, the
+ * `rescueEnsureAllFiles` override and the `media-index-progress` branch of this file's
+ * `handleEvent` wrapper are all removed.
+ *
+ * `teleP0v2WriteIndex` opened with:
+ *
+ *     if (!options.allowShrink) {
+ *       const existing = await teleP0v2ReadIndex(chatId)
+ *       const storedCount = existing ? existing.items.length : 0
+ *       if (storedCount > snapshot.items.length) return
+ *     }
+ *
+ * and no production caller anywhere in the repository passed `allowShrink` - the flag
+ * appeared only in this file and in `scripts/files-invariants.test.cjs`, which asserted
+ * that the guard existed. Ten call sites across nine files routed every prune through
+ * this function, so a prune that emptied the list on screen returned before writing and
+ * the next `restore()` unioned the untouched record straight back in. Proven in the
+ * page against the real record: a 0-item write left `{"items":22}` unchanged, and the
+ * same write with `allowShrink: true` produced `{"items":0}`.
+ *
+ * The rule itself was not wrong, it was in the wrong place. Growth was never the case
+ * it needed to refuse, so as a size check at the storage boundary it could not tell a
+ * partial scan from a truthful shrink, and it therefore refused both. The protection
+ * has moved to where the decision is actually made, in `public/files-stability.js`:
+ * `commitDiscovery` unions, so it cannot lower a count no matter what a partial scan
+ * reports, and `commitAuthoritative` - reachable only from a complete, accessible truth
+ * pass - may lower it, to zero if that is what Telegram says. Its `writePersistent`
+ * contains no count comparison at all, which `scripts/files-reconcile.test.cjs` asserts.
+ *
+ * Kept in this file: the search rebind, the unified media viewer
+ * (`rescuePreviewFile`), the grid card hook and the attachment/composer code. */
 
 /* app.js captured its original renderChats function when it registered the
  * search listener. Replace only the input DOM node to drop that obsolete
@@ -169,18 +60,10 @@ function teleP0v2BindSearch () {
 }
 teleP0v2BindSearch()
 
-const teleP0v2BaseHandleEvent = handleEvent
-handleEvent = function teleP0v2HandleEvent (event) {
-  const result = teleP0v2BaseHandleEvent(event)
-  if (event && event.name === 'media-index-progress') {
-    const payload = event.payload || {}
-    if (payload.chatId != null) {
-      if (payload.done) teleP0v2PersistSoon(payload.chatId, 30)
-      else if (Number(payload.found || 0) % 1000 < 100) teleP0v2PersistSoon(payload.chatId, 1000)
-    }
-  }
-  return result
-}
+/* The `handleEvent` wrapper is gone with its only branch. It scheduled a persist on
+ * `media-index-progress`, reading the shared cache and writing it through the boundary
+ * above, so it was a fifth writer of the persistent record on the progress stream.
+ * `public/files-stability.js` persists from its own commit paths. */
 
 /* ---------- Unified media viewer ---------- */
 function teleP0v2PreviewFailure (body, item, message) {
@@ -419,20 +302,9 @@ rescueSendComposer = async function teleP0v2SendComposer () {
 const teleP0v2SendButton = document.querySelector('#tele-compose-send')
 if (teleP0v2SendButton) teleP0v2SendButton.onclick = () => rescueSendComposer()
 
-/* Full path remains readable even if older download rendering rewrites the
- * helper label. This intentionally avoids a MutationObserver feedback loop. */
-function teleP0v2RefreshPath () {
-  const input = document.querySelector('#dl-dir')
-  const current = document.querySelector('#dl-dir-current')
-  if (!input || !current) return
-  const helper = current.textContent.replace(/^Saving to:\s*/i, '').trim()
-  const value = input.value || helper
-  const display = value || 'Default download folder'
-  input.title = value
-  current.title = value
-  if (current.textContent !== display) current.textContent = display
-}
-document.querySelector('#dl-dir')?.addEventListener('input', teleP0v2RefreshPath)
-document.querySelector('#set-dir')?.addEventListener('click', () => setTimeout(teleP0v2RefreshPath, 80))
-setInterval(teleP0v2RefreshPath, 1500)
-teleP0v2RefreshPath()
+/* `teleP0v2RefreshPath` was here, with an `#dl-dir` input listener, a `#set-dir`
+ * click listener, a 1500 ms interval and an initial call. It copied `#dl-dir.value`
+ * into `#dl-dir-current` and stripped app.js's `Saving to: ` prefix, which is why the
+ * baseline observed the bare path on that line rather than what `setDirLabel`
+ * actually wrote: this interval overwrote it four times a second... and both nodes it
+ * addressed have been deleted. `setDirLabel` in app.js is the only painter now. */

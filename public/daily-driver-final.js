@@ -7,15 +7,15 @@
  */
 
 ;(function teleFinalRuntime () {
-  const teleFinalSyncs = new Map()
-  const teleFinalSyncState = new Map()
-  const teleFinalPartial = new Map()
-  const teleFinalLastSync = new Map()
   const teleFinalAvatarRetries = new Map()
   const teleFinalThumbTargets = new WeakMap()
 
-  const TELE_FINAL_SYNC_TTL = 120000
-
+  /* `teleFinalSyncs`, `teleFinalSyncState`, `teleFinalPartial`, `teleFinalLastSync`,
+   * `TELE_FINAL_SYNC_TTL`, `teleFinalNormalizeSnapshot`, `teleFinalSortItems` and
+   * `teleFinalSyncInfo` went with the index code below: they were the bookkeeping for
+   * this layer's own scan lifecycle, and it no longer runs scans. `teleFinalSnapshot`
+   * stays as a READER of the shared cache for the renderer and the count label - the
+   * owner writes that cache so legacy readers see the committed index. */
   function teleFinalKey (value) { return String(value) }
 
   function teleFinalValidSnapshot (chatId, snapshot) {
@@ -24,74 +24,47 @@
     return snapshot.items.every(item => item && teleFinalKey(item.chatId) === wanted)
   }
 
-  function teleFinalSortItems (items) {
-    return items.sort((a, b) => {
-      const aa = BigInt(String((a && a.messageId) || 0))
-      const bb = BigInt(String((b && b.messageId) || 0))
-      return aa === bb ? 0 : (aa < bb ? 1 : -1)
-    })
-  }
-
-  function teleFinalNormalizeSnapshot (chatId, source) {
-    const key = teleFinalKey(chatId)
-    const items = teleFinalSortItems(((source && source.items) || [])
-      .filter(item => item && teleFinalKey(item.chatId) === key)
-      .map(item => ({ ...item, chatId })))
-    return {
-      chatId,
-      items,
-      found: items.length,
-      scanned: Number((source && source.scanned) || 0),
-      typeCounts: (source && source.typeCounts) || {},
-      savedAt: Number((source && source.savedAt) || Date.now()),
-      done: source ? source.done !== false : true
-    }
-  }
-
   function teleFinalSnapshot (chatId) {
     const snapshot = rescueFileCache.get(teleFinalKey(chatId))
     return teleFinalValidSnapshot(chatId, snapshot) ? snapshot : null
   }
 
-  function teleFinalSyncInfo (chatId) {
-    return teleFinalSyncState.get(teleFinalKey(chatId)) || { active: false, partialFound: 0, scanned: 0 }
-  }
-
-  function teleFinalApplySnapshot (chatId, source, options = {}) {
-    const snapshot = teleFinalNormalizeSnapshot(chatId, source)
-    if (!teleFinalValidSnapshot(chatId, snapshot)) return null
-    const key = teleFinalKey(chatId)
-    rescueFileCache.set(key, snapshot)
-    try { teleHotfixValidatedChats.add(key) } catch {}
-    state.mediaCount = snapshot.items.length
-    state.typeCounts = snapshot.typeCounts || null
-
-    if (options.persist !== false && snapshot.done) {
-      try { teleP0v2WriteIndex(chatId, snapshot).catch(() => {}) } catch {}
-    }
-
-    if (state.activeChatId != null && teleFinalKey(state.activeChatId) === key) {
-      teleFinalUpdateMediaCountLabel()
-      if (state.view === 'files' && options.render !== false) {
-        try { renderFiles() } catch {}
-      }
-      if (options.status) setLoadState(options.status)
-    }
-    return snapshot
-  }
-
-  async function teleFinalRestorePersistent (chatId) {
-    const memory = teleFinalSnapshot(chatId)
-    if (memory && memory.done !== false) return memory
-    try {
-      const disk = await teleP0v2ReadIndex(chatId)
-      if (!teleFinalValidSnapshot(chatId, disk) || disk.done === false) return null
-      return teleFinalApplySnapshot(chatId, disk, { persist: false, render: false })
-    } catch {
-      return null
-    }
-  }
-
+  /* THE OTHER END OF THE RE-INFLATION CHAIN WAS HERE.
+   *
+   * `teleFinalApplySnapshot` and `teleFinalRestorePersistent` are gone, and with them
+   * `teleFinalMergePartial` (the partial paint path), `teleFinalEnsureFiles`,
+   * `teleFinalPatchRealtimeMedia` and the `openChat` restore hook.
+   *
+   * Measured on the running application after the owner had already reconciled chat
+   * TEST to zero and written a zero-item record:
+   *
+   *   teleFinalEnsureFiles (daily-driver-final.js:199)
+   *     -> request('scan-media-v3')  ->  guardStableMediaScan substitutes the stale 22
+   *     -> teleFinalApplySnapshot
+   *          :64  rescueFileCache.set(key, stale 22)
+   *          :66  state.mediaCount = 22
+   *          :70  teleP0v2WriteIndex(chatId, stale 22)   <- record 0 -> 22, and the
+   *               monotonic guard ALLOWED it because growth was never the case it
+   *               refused
+   *          :74  teleFinalUpdateMediaCountLabel()       <- header back to "22 files"
+   *
+   * So the owner pruned, this layer un-pruned, and the user saw 22 either way. Both
+   * ends of that chain had to go, and both have. The guard's interception is deleted
+   * in daily-driver-final-guard.js; this is the consumer that turned its answer into a
+   * durable write.
+   *
+   * It also wrote the LEGACY record shape, which silently dropped `reconciledAt`,
+   * `truthCount` and `removedIds` from the stored row, so the durable half of the
+   * removal record survived only until the next legacy write.
+   *
+   * What replaces it: `public/files-stability.js` restores through `ensure` ->
+   * `restore`, commits discoveries through `commitDiscovery` (additive) and removals
+   * through `commitAuthoritative` (truth pass only), and persists through its own
+   * unconditional boundary. Restore-without-rescan still short-circuits in `ensure`
+   * (clause 3.4) and a partial scan still cannot replace a larger index (clause 3.2).
+   *
+   * Kept in this file: the Files renderer helpers, `buildGridCard`, the preview modal,
+   * thumbnails, the chat list, the dedupe report - none of which own index state. */
   function teleFinalUpdateMediaCountLabel () {
     const chatId = state.activeChatId
     const label = document.querySelector('#chat-media-count')
@@ -105,16 +78,15 @@
     }
 
     const snapshot = teleFinalSnapshot(chatId)
-    const sync = teleFinalSyncInfo(chatId)
     if (snapshot) {
       const count = snapshot.items.length
-      if (label) label.textContent = `${count.toLocaleString()} file${count === 1 ? '' : 's'}${sync.active ? ' · syncing' : ''}`
+      if (label) label.textContent = `${count.toLocaleString()} file${count === 1 ? '' : 's'}`
       if (downloadAll) { downloadAll.textContent = `Download all media (${count.toLocaleString()})`; downloadAll.disabled = count === 0 }
       if (selectAll) { selectAll.textContent = `Select all (${count.toLocaleString()})`; selectAll.disabled = count === 0 }
       return
     }
 
-    if (label) label.textContent = sync.active ? 'Indexing files…' : (state.view === 'files' ? 'Loading files…' : '')
+    if (label) label.textContent = state.view === 'files' ? 'Loading files…' : ''
     if (downloadAll) { downloadAll.textContent = 'Download all media'; downloadAll.disabled = true }
     if (selectAll) { selectAll.textContent = 'Select all'; selectAll.disabled = true }
   }
@@ -122,175 +94,23 @@
   rescueUpdateMediaLabel = teleFinalUpdateMediaCountLabel
   updateMediaCountLabel = teleFinalUpdateMediaCountLabel
 
-  function teleFinalMergePartial (payload) {
-    if (!payload || payload.chatId == null) return
-    const chatId = payload.chatId
-    const key = teleFinalKey(chatId)
-    const stable = teleFinalSnapshot(chatId)
-    const sync = teleFinalSyncInfo(chatId)
-    sync.active = !payload.done
-    sync.partialFound = Number(payload.found || sync.partialFound || 0)
-    sync.scanned = Number(payload.scanned || sync.scanned || 0)
-    teleFinalSyncState.set(key, sync)
-
-    // A completed cache is authoritative while reconciliation runs. Never let
-    // 100-message scan batches replace its count or rows.
-    if (stable) {
-      if (state.activeChatId != null && teleFinalKey(state.activeChatId) === key) {
-        teleFinalUpdateMediaCountLabel()
-        if (state.view === 'files' && sync.active) setLoadState(`Cached ${stable.items.length.toLocaleString()} files · syncing in background`)
-      }
-      return
-    }
-
-    let partial = teleFinalPartial.get(key)
-    if (!partial) partial = { chatId, items: [], scanned: 0, typeCounts: {}, done: false }
-    const byMessage = new Map(partial.items.map(item => [teleFinalKey(item.messageId), item]))
-    for (const item of payload.items || []) {
-      if (!item || teleFinalKey(item.chatId) !== key) continue
-      byMessage.set(teleFinalKey(item.messageId), item)
-    }
-    partial.items = teleFinalSortItems([...byMessage.values()])
-    partial.scanned = Number(payload.scanned || partial.scanned || 0)
-    partial.typeCounts = payload.typeCounts || partial.typeCounts || {}
-    partial.done = false
-    teleFinalPartial.set(key, partial)
-
-    if (state.activeChatId != null && teleFinalKey(state.activeChatId) === key && state.view === 'files') {
-      rescueFileCache.set(key, partial)
-      state.mediaCount = null
-      teleFinalUpdateMediaCountLabel()
-      if (!teleFinalMergePartial.paintTimer) {
-        teleFinalMergePartial.paintTimer = setTimeout(() => {
-          teleFinalMergePartial.paintTimer = null
-          if (state.activeChatId != null && teleFinalKey(state.activeChatId) === key && state.view === 'files') {
-            try { renderFiles() } catch {}
-            setLoadState(`Indexing files… ${partial.items.length.toLocaleString()} found`)
-          }
-        }, 260)
-      }
-    }
-  }
-
-  async function teleFinalEnsureFiles (chatId, options = {}) {
-    if (chatId == null) return null
-    const key = teleFinalKey(chatId)
-    let stable = teleFinalSnapshot(chatId) || await teleFinalRestorePersistent(chatId)
-    if (stable && state.activeChatId != null && teleFinalKey(state.activeChatId) === key && state.view === 'files') {
-      teleFinalApplySnapshot(chatId, stable, { persist: false, status: `Cached ${stable.items.length.toLocaleString()} files` })
-    }
-
-    const lastSync = teleFinalLastSync.get(key) || 0
-    const shouldSync = options.force || !stable || Date.now() - lastSync > TELE_FINAL_SYNC_TTL
-    if (!shouldSync) return stable
-    if (teleFinalSyncs.has(key)) return stable || teleFinalSyncs.get(key)
-
-    const sync = teleFinalSyncInfo(chatId)
-    sync.active = true
-    sync.partialFound = 0
-    sync.scanned = 0
-    teleFinalSyncState.set(key, sync)
-    teleFinalUpdateMediaCountLabel()
-
-    const run = (async () => {
-      let lastError = null
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const data = await request('scan-media-v3', { chatId, force: !!options.force && attempt === 0 })
-          const next = teleFinalNormalizeSnapshot(chatId, data || {})
-          // A zero-message response immediately after reconnect is not allowed
-          // to erase a known complete cache. Keep the cache and retry later.
-          if (stable && stable.items.length && next.items.length === 0 && next.scanned === 0) {
-            throw new Error('Telegram returned an empty transient media index')
-          }
-          next.done = true
-          stable = teleFinalApplySnapshot(chatId, next, {
-            persist: true,
-            status: `Loaded ${next.items.length.toLocaleString()} files`
-          })
-          teleFinalPartial.delete(key)
-          teleFinalLastSync.set(key, Date.now())
-          return stable
-        } catch (error) {
-          lastError = error
-          if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 850))
-        }
-      }
-      if (!stable && state.activeChatId != null && teleFinalKey(state.activeChatId) === key && state.view === 'files') {
-        setLoadState('Files could not sync. Reopen Files to retry.')
-      }
-      return stable || Promise.reject(lastError || new Error('Files could not sync'))
-    })().finally(() => {
-      teleFinalSyncs.delete(key)
-      const current = teleFinalSyncInfo(chatId)
-      current.active = false
-      teleFinalSyncState.set(key, current)
-      teleFinalUpdateMediaCountLabel()
-      if (state.activeChatId != null && teleFinalKey(state.activeChatId) === key && state.view === 'files') {
-        const finalSnapshot = teleFinalSnapshot(chatId)
-        if (finalSnapshot) setLoadState(`Loaded ${finalSnapshot.items.length.toLocaleString()} files`)
-      }
-    })
-
-    teleFinalSyncs.set(key, run)
-    return stable || run
-  }
-
-  rescueEnsureAllFiles = teleFinalEnsureFiles
-
-  function teleFinalPatchRealtimeMedia (event) {
-    if (!event) return
-    if (event.name === 'message-upsert') {
-      const payload = event.payload || event
-      const chatId = payload.chatId
-      const message = payload.message
-      if (chatId == null || !message) return
-      const snapshot = teleFinalSnapshot(chatId)
-      if (!snapshot) return
-      const id = teleFinalKey(message.id)
-      const byMessage = new Map(snapshot.items.map(item => [teleFinalKey(item.messageId), item]))
-      if (message.media && message.media.fileId) {
-        const media = message.media
-        byMessage.set(id, {
-          ...media,
-          key: `${chatId}:${message.id}`,
-          chatId,
-          messageId: message.id,
-          date: message.date || media.date || 0,
-          fileId: media.fileId || (media.file && media.file.id),
-          fileSize: media.fileSize || (media.file && (media.file.size || media.file.expected_size)) || 0
-        })
-      } else {
-        byMessage.delete(id)
-      }
-      snapshot.items = teleFinalSortItems([...byMessage.values()])
-      snapshot.found = snapshot.items.length
-      snapshot.savedAt = Date.now()
-      snapshot.done = true
-      teleFinalApplySnapshot(chatId, snapshot, { persist: true, render: state.view === 'files' })
-    }
-
-    if (event.name === 'message-delete') {
-      const payload = event.payload || event
-      const chatId = payload.chatId
-      const ids = new Set((payload.messageIds || []).map(teleFinalKey))
-      const snapshot = teleFinalSnapshot(chatId)
-      if (!snapshot || !ids.size) return
-      snapshot.items = snapshot.items.filter(item => !ids.has(teleFinalKey(item.messageId)))
-      snapshot.found = snapshot.items.length
-      snapshot.savedAt = Date.now()
-      teleFinalApplySnapshot(chatId, snapshot, { persist: true, render: state.view === 'files' })
-    }
-  }
-
   const teleFinalBaseHandleEvent = handleEvent
   handleEvent = function teleFinalHandleEvent (event) {
-    if (event && event.name === 'media-index-progress') {
-      teleFinalMergePartial(event.payload || {})
-      return
-    }
+    /* `media-index-progress`, `message-upsert` and `message-delete` no longer touch the
+     * index here.
+     *
+     * The progress branch ran `teleFinalMergePartial`, which wrote partial scan
+     * snapshots into `rescueFileCache` and returned without calling the base chain, so
+     * it both competed for the progress stream and swallowed the event for everyone
+     * below it. `teleFinalPatchRealtimeMedia` mutated the shared snapshot in place on
+     * every upsert and delete and persisted the result. Both are the owner's job now:
+     * `files-stability.js` merges progress (batched), merges upserts through
+     * `mergeRealtimeUpsert` (which will not re-add a removed id) and handles
+     * `message-delete` in `handleRealtimeDelete`, gated on `isPermanent` so a TDLib
+     * local-cache eviction is not mistaken for a deletion.
+     *
+     * The chat-list repaint stays: it owns no index state. */
     const result = teleFinalBaseHandleEvent(event)
-    if (event && (event.name === 'message-upsert' || event.name === 'message-delete')) teleFinalPatchRealtimeMedia(event)
     if (event && ['chat-upsert', 'chat-remove'].includes(event.name)) queueMicrotask(teleFinalRenderChats)
     return result
   }
@@ -713,20 +533,22 @@
 
   /* ------------------------------ Open/view ownership ------------------------------ */
 
+  /* The `openChat` index restore hook is gone. It awaited `teleFinalRestorePersistent`
+   * BEFORE the base chain, so this layer read the IndexedDB record and pushed it into
+   * the shared cache ahead of the owner - one of the several independent restores that
+   * let a single surviving stale copy repopulate everything (six shared-cache writes of
+   * the stale 22 were recorded on a single chat open in Phase 0). Restoring is
+   * `files-stability.js` `ensure` -> `restore`, and its own `openChat` wrapper schedules
+   * the truth pass.
+   *
+   * Both wrappers keep only what they own: repainting through the CURRENT renderFiles
+   * owner (files-view.js, which is paged) and the count label through its owner. */
   const teleFinalBaseOpenChat = openChat
   openChat = async function teleFinalOpenChat (chatId) {
-    await teleFinalRestorePersistent(chatId)
     const result = await teleFinalBaseOpenChat(chatId)
     if (state.activeChatId != null && teleFinalKey(state.activeChatId) === teleFinalKey(chatId)) {
-      const snapshot = teleFinalSnapshot(chatId)
-      if (snapshot) teleFinalApplySnapshot(chatId, snapshot, { persist: false, render: state.view === 'files' })
-      teleFinalUpdateMediaCountLabel()
-      // Paint through the current renderFiles owner. The renderer this layer used
-      // to call mounted a growing 240-row window and restored the previous
-      // scrollTop, which fought pagination and left the grid scrollable well past
-      // its 100 rows.
+      if (typeof updateMediaCountLabel === 'function') updateMediaCountLabel()
       if (state.view === 'files') { try { renderFiles() } catch {} }
-      teleFinalEnsureFiles(chatId).catch(() => {})
     }
     return result
   }
@@ -735,9 +557,8 @@
   setView = function teleFinalSetView (view) {
     const result = teleFinalBaseSetView(view)
     if (view === 'files' && state.activeChatId != null) {
-      if (teleFinalSnapshot(state.activeChatId)) { try { renderFiles() } catch {} }
-      teleFinalUpdateMediaCountLabel()
-      teleFinalEnsureFiles(state.activeChatId).catch(() => {})
+      if (typeof updateMediaCountLabel === 'function') updateMediaCountLabel()
+      try { renderFiles() } catch {}
     }
     return result
   }
@@ -891,11 +712,11 @@
     })
   }
 
-  // Final paint after every script has installed its wrappers.
+  // Final paint after every script has installed its wrappers. The index is not
+  // hydrated from here any more; the owner's own queueMicrotask does that.
   queueMicrotask(() => {
     teleFinalRebindChatFilters()
     teleFinalRenderChats()
-    teleFinalUpdateMediaCountLabel()
-    if (state.activeChatId != null && state.view === 'files') teleFinalEnsureFiles(state.activeChatId).catch(() => {})
+    if (typeof updateMediaCountLabel === 'function') updateMediaCountLabel()
   })
 })()

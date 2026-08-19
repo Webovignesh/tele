@@ -1,4 +1,4 @@
-'use strict'
+﻿'use strict'
 
 /* Telegram management workspace.
  * Adds channel/group creation plus a permission-aware Chat Info drawer without
@@ -127,6 +127,11 @@
     infoPane.appendChild(emptyInfoState())
 
     drawer.append(tabs, downloadsPane, infoPane)
+
+    // Force layout stabilization after moving nodes
+    void downloadsPane.offsetHeight
+    requestAnimationFrame(() => void downloadsPane.offsetHeight)
+
     showDrawer(ui.drawerMode, false)
   }
 

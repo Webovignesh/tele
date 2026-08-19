@@ -176,160 +176,50 @@
     }
   }
 
-  const canonicalIndexes = new Map()
-  const indexLoads = new Map()
-  const scanBatches = new Map()
-  const lastFullSync = new Map()
-  const FILE_SYNC_TTL = 5 * 60 * 1000
-
+  /* A THIRD private copy of the Files index lived here, and it is gone.
+   *
+   * `canonicalIndexes`, `normalizeIndex`, `mergeIndexes`, `currentCanonical`,
+   * `paintCanonical`, `restoreCanonical`, `robustEnsureFiles`, `mergeProgressBatch`,
+   * `sortIndexItems`, `validIndex`, the `rescueEnsureAllFiles` override, the
+   * `media-index-progress` branch and both `teleP0v2WriteIndex` calls are all removed.
+   *
+   * The mechanism worth recording: `currentCanonical` merged its own map with whatever
+   * `rescueFileCache` held whenever the shared cache was LARGER, and `paintCanonical`
+   * then wrote the merged result back to both the shared cache and IndexedDB. So a
+   * stale row surviving in either place was copied into the other and made durable,
+   * and because the merge only ever grew, a prune could not propagate through it in
+   * the other direction. That is one of the seven resurrection paths clause 2.7
+   * enumerates.
+   *
+   * This layer keeps what it is actually for: the download list reconciliation, the
+   * throttled download painter, the stats card, the queue action buttons, the dedupe
+   * report and the chat-list repaint. None of those own index state.
+   *
+   * The Files LIST is read from the owner: `filesItems` below reads the committed index
+   * through the shared cache the owner writes, and `files-stability.js` replaces this
+   * definition anyway - it loads later. It is left in place, reading one source, so the
+   * file still works if it is ever loaded on its own. */
   function validIndex (chatId, snapshot) {
     if (!snapshot || !Array.isArray(snapshot.items)) return false
     const wanted = key(chatId)
     return snapshot.items.every(item => item && key(item.chatId) === wanted)
   }
 
-  function sortIndexItems (items) {
-    return items.sort((a, b) => {
-      let aa = 0n; let bb = 0n
-      try { aa = BigInt(String((a && a.messageId) || 0)) } catch {}
-      try { bb = BigInt(String((b && b.messageId) || 0)) } catch {}
-      return aa === bb ? 0 : (aa < bb ? 1 : -1)
-    })
-  }
-
-  function normalizeIndex (chatId, snapshot) {
-    const wanted = key(chatId)
-    const byId = new Map()
-    for (const item of (snapshot && snapshot.items) || []) {
-      if (!item || key(item.chatId) !== wanted) continue
-      byId.set(key(item.messageId), { ...item, chatId })
-    }
-    const items = sortIndexItems([...byId.values()])
-    const typeCounts = {}
-    for (const item of items) typeCounts[item.type] = (typeCounts[item.type] || 0) + 1
-    return { chatId, items, found: items.length, scanned: Math.max(Number(snapshot && snapshot.scanned || 0), items.length), typeCounts, savedAt: Number(snapshot && snapshot.savedAt || Date.now()), done: true }
-  }
-
-  function mergeIndexes (chatId, ...sources) {
-    const wanted = key(chatId)
-    const byId = new Map()
-    let scanned = 0
-    let savedAt = 0
-    for (const source of sources) {
-      if (!validIndex(chatId, source)) continue
-      scanned = Math.max(scanned, Number(source.scanned || 0))
-      savedAt = Math.max(savedAt, Number(source.savedAt || 0))
-      for (const item of source.items) {
-        if (!item || key(item.chatId) !== wanted) continue
-        byId.set(key(item.messageId), { ...item, chatId })
-      }
-    }
-    return normalizeIndex(chatId, { items: [...byId.values()], scanned, savedAt: savedAt || Date.now() })
-  }
-
-  function currentCanonical (chatId) {
-    const id = key(chatId)
-    const owned = canonicalIndexes.get(id)
-    const rescue = rescueFileCache && rescueFileCache.get ? rescueFileCache.get(id) : null
-    if (owned && rescue && validIndex(chatId, rescue) && rescue.items.length > owned.items.length) {
-      const merged = mergeIndexes(chatId, owned, rescue)
-      canonicalIndexes.set(id, merged)
-      return merged
-    }
-    return owned || (validIndex(chatId, rescue) ? normalizeIndex(chatId, rescue) : null)
-  }
-
-  function paintCanonical (chatId, snapshot, options = {}) {
-    if (!validIndex(chatId, snapshot)) return null
-    const id = key(chatId)
-    const previous = currentCanonical(chatId)
-    const next = previous ? mergeIndexes(chatId, previous, snapshot) : normalizeIndex(chatId, snapshot)
-    canonicalIndexes.set(id, next)
-    rescueFileCache.set(id, next)
-    try { teleHotfixValidatedChats.add(id) } catch {}
-    if (state.activeChatId != null && key(state.activeChatId) === id) {
-      state.mediaCount = next.items.length
-      state.typeCounts = next.typeCounts
-      updateCanonicalCount()
-      if (state.view === 'files' && options.render !== false) renderFiles()
-    }
-    if (options.persist !== false && typeof teleP0v2WriteIndex === 'function') Promise.resolve(teleP0v2WriteIndex(chatId, next)).catch(() => {})
-    return next
-  }
-
-  async function restoreCanonical (chatId) {
+  function ownedIndex (chatId) {
     if (chatId == null) return null
-    let best = currentCanonical(chatId)
-    if (typeof teleP0v2ReadIndex === 'function') {
-      const disk = await teleP0v2ReadIndex(chatId).catch(() => null)
-      if (validIndex(chatId, disk)) best = best ? mergeIndexes(chatId, best, disk) : normalizeIndex(chatId, disk)
-    }
-    if (best) paintCanonical(chatId, best, { persist: false, render: false })
-    return best
-  }
-
-  async function robustEnsureFiles (chatId, options = {}) {
-    if (chatId == null) return null
-    const id = key(chatId)
-    if (indexLoads.has(id)) return indexLoads.get(id)
-    const work = (async () => {
-      let stable = await restoreCanonical(chatId)
-      if (stable && state.activeChatId != null && key(state.activeChatId) === id && state.view === 'files') {
-        updateCanonicalCount()
-        renderFiles()
-        setLoadState(`Cached ${stable.items.length.toLocaleString()} files · checking for updates`)
+    try {
+      if (window.teleFilesIndex && typeof window.teleFilesIndex.snapshot === 'function') {
+        const snapshot = window.teleFilesIndex.snapshot(chatId)
+        if (validIndex(chatId, snapshot)) return snapshot
       }
-      const shouldSync = options.force || !stable || Date.now() - (lastFullSync.get(id) || 0) > FILE_SYNC_TTL
-      if (!shouldSync) return stable
-      try {
-        const fresh = await request('scan-media-v3', { chatId, force: !!stable || !!options.force })
-        if (fresh && fresh.done !== false && validIndex(chatId, fresh)) {
-          stable = paintCanonical(chatId, stable ? mergeIndexes(chatId, stable, fresh) : fresh, { persist: true })
-          lastFullSync.set(id, Date.now())
-        }
-      } catch (error) {
-        if (!stable && state.activeChatId != null && key(state.activeChatId) === id && state.view === 'files') setLoadState('Files could not sync. Reopen Files to retry.')
-      }
-      if (stable && state.activeChatId != null && key(state.activeChatId) === id && state.view === 'files') setLoadState(`Loaded ${stable.items.length.toLocaleString()} files`)
-      return stable
-    })().finally(() => indexLoads.delete(id))
-    indexLoads.set(id, work)
-    return work
-  }
-  rescueEnsureAllFiles = robustEnsureFiles
-
-  function mergeProgressBatch (payload) {
-    if (!payload || payload.chatId == null) return
-    const chatId = payload.chatId
-    const id = key(chatId)
-    let batch = scanBatches.get(id)
-    if (!batch) batch = { chatId, items: [], scanned: 0, done: false }
-    if (Array.isArray(payload.items) && payload.items.length) batch = mergeIndexes(chatId, batch, { chatId, items: payload.items, scanned: payload.scanned, done: false })
-    batch.scanned = Math.max(Number(batch.scanned || 0), Number(payload.scanned || 0))
-    batch.done = !!payload.done
-    scanBatches.set(id, batch)
-    const stable = currentCanonical(chatId)
-    if (stable) {
-      if (payload.items && payload.items.length) paintCanonical(chatId, mergeIndexes(chatId, stable, batch), { persist: false })
-      if (state.activeChatId != null && key(state.activeChatId) === id) {
-        updateCanonicalCount()
-        if (state.view === 'files') setLoadState(`Cached ${currentCanonical(chatId).items.length.toLocaleString()} files · syncing in background`)
-      }
-    } else if (batch.items.length) {
-      paintCanonical(chatId, batch, { persist: false })
-      if (state.activeChatId != null && key(state.activeChatId) === id && state.view === 'files') setLoadState(`Indexing files… ${batch.items.length.toLocaleString()} found`)
-    }
-    if (payload.done) {
-      const final = currentCanonical(chatId)
-      if (final && typeof teleP0v2WriteIndex === 'function') Promise.resolve(teleP0v2WriteIndex(chatId, final)).catch(() => {})
-      scanBatches.delete(id)
-      lastFullSync.set(id, Date.now())
-    }
+    } catch {}
+    const shared = rescueFileCache && rescueFileCache.get ? rescueFileCache.get(key(chatId)) : null
+    return validIndex(chatId, shared) ? shared : null
   }
 
   function updateCanonicalCount () {
     const chatId = state.activeChatId
-    const snapshot = chatId == null ? null : currentCanonical(chatId)
+    const snapshot = chatId == null ? null : ownedIndex(chatId)
     const total = snapshot ? snapshot.items.length : 0
     const label = document.querySelector('#chat-media-count')
     const downloadAll = document.querySelector('#download-all-media')
@@ -344,7 +234,7 @@
     let list
     if (state.files.mode === 'search') list = Array.isArray(state.files.results) ? state.files.results.slice() : []
     else {
-      const snapshot = state.activeChatId == null ? null : currentCanonical(state.activeChatId)
+      const snapshot = state.activeChatId == null ? null : ownedIndex(state.activeChatId)
       list = snapshot ? snapshot.items.slice() : []
     }
     const q = String(state.files.query || '').trim().toLowerCase()
@@ -378,10 +268,10 @@
 
   const baseHandleEvent = handleEvent
   handleEvent = function teleUiHandleEvent (event) {
-    if (event && event.name === 'media-index-progress') {
-      mergeProgressBatch(event.payload || {})
-      return
-    }
+    /* The `media-index-progress` branch is gone. It ran `mergeProgressBatch`, which
+     * merged every batch into this layer's private index, wrote it to the shared cache,
+     * persisted it on the final event, and returned without calling the base chain.
+     * `public/files-stability.js` owns that event. */
     if (event && event.name === 'chat-upsert' && event.chat) {
       const chat = event.chat
       if (chat.lastMessage && chat.lastMessage._ === 'messageText') chat.lastText = chat.lastMessage.text && chat.lastMessage.text.text ? chat.lastMessage.text.text : ''
@@ -398,16 +288,15 @@
     const result = baseHandleEvent(event)
     if (event && event.name === 'chat-remove') repaintChats()
     if (event && (event.name === 'message-upsert' || event.name === 'message-delete')) {
-      const payload = event.payload || event
-      const chatId = payload.chatId
-      if (chatId != null) {
-        const rescue = rescueFileCache.get(key(chatId))
-        if (validIndex(chatId, rescue)) paintCanonical(chatId, rescue, { persist: true, render: false })
-      }
-      // Repaint through the current renderFiles owner (files-view.js, which is
-      // paged). Painting here directly used to bypass pagination and mount a
-      // window of ~20 rows under a spacer sized for the whole index, which is
-      // what let the Files list scroll far past its 100 rows into blank space.
+      /* The `paintCanonical(chatId, rescue, { persist: true })` that used to run here is
+       * gone. On every upsert and delete it read the shared cache and wrote it back to
+       * IndexedDB, which is how a stale row that survived anywhere became durable again.
+       *
+       * The repaint stays, and stays a repaint only: through the CURRENT renderFiles
+       * owner (files-view.js, which is paged). Painting here directly used to bypass
+       * pagination and mount a window of ~20 rows under a spacer sized for the whole
+       * index, which is what let the Files list scroll far past its 100 rows into blank
+       * space. */
       if (state.view === 'files') queueMicrotask(() => { try { renderFiles() } catch {} })
     }
     return result
@@ -929,9 +818,9 @@
   installClearAll()
   ensureDownloadSummary()
   repaintChats()
-  restoreCanonical(state.activeChatId).then(() => {
-    updateCanonicalCount()
-    try { renderFiles() } catch {}
-  }).catch(() => {})
+  // The index is not restored from here any more; `files-stability.js` hydrates it.
+  // This layer only repaints what it can already see.
+  updateCanonicalCount()
+  try { renderFiles() } catch {}
   renderDownloadsNow()
 })()

@@ -554,7 +554,9 @@ test('stats card aligns with the download controls and is spaced from them', asy
     const label = [...document.querySelectorAll('.dl-controls .conc')]
       .map(c => c.querySelector('span'))
       .find(Boolean)
-    const field = document.querySelector('#dl-dir')
+    // The download destination is one control now, so its own left edge is what the
+    // card has to line up with; `#dl-dir` no longer exists (task 8).
+    const field = document.querySelector('#set-dir')
     if (!card || !label || !field) return null
     const cb = card.getBoundingClientRect()
     return {
@@ -562,15 +564,15 @@ test('stats card aligns with the download controls and is spaced from them', asy
       cardRight: Math.round(cb.right),
       labelLeft: Math.round(label.getBoundingClientRect().left),
       fieldLeft: Math.round(field.getBoundingClientRect().left),
-      gap: Math.round(label.getBoundingClientRect().top - cb.bottom)
+      gap: Math.round(field.getBoundingClientRect().top - cb.bottom)
     }
   })
-  expect(layout, 'the stats card and Save to row must exist').not.toBeNull()
+  expect(layout, 'the stats card and the Save-to control must exist').not.toBeNull()
   // The card used to carry its own 14px side margin on top of .dl-controls'
   // padding, so it sat indented relative to the controls beneath it.
   expect(layout.cardLeft, 'the card must share the controls left edge').toBe(layout.labelLeft)
-  expect(layout.cardLeft, 'the card must line up with the path field').toBe(layout.fieldLeft)
-  expect(layout.gap, `only ${layout.gap}px between the stats card and "Save to"`).toBeGreaterThanOrEqual(10)
+  expect(layout.cardLeft, 'the card must line up with the Save-to control').toBe(layout.fieldLeft)
+  expect(layout.gap, `only ${layout.gap}px between the stats card and the Save-to control`).toBeGreaterThanOrEqual(10)
 })
 
 /* The thumb was pinned inside a 6px-tall input, so it rendered high and clipped,
@@ -728,58 +730,203 @@ test('header avatar initials follow the active chat', async ({ page }) => {
 })
 
 
-test('Save to and Parallel files labels share a left edge', async ({ page }) => {
+/* ==========================================================================
+ * Save to: ONE control
+ *
+ * This live suite is the authority on the Save-to layout, which is how the clause
+ * 1.23 contradiction is resolved. `tests/file-consistency.spec.js` used to require
+ * `#dl-dir` HIDDEN with `#set-dir.fg-folder-v2`, while the tests here used to
+ * require `#dl-dir` VISIBLE beside a matching Browse button. Both cannot be right,
+ * and neither described the intended UI. The tests below describe the single control
+ * from the design: one `button#set-dir.fg-save-to` filling its parent, one path
+ * display, and `#dl-dir` / `#dl-dir-current` absent from the DOM entirely rather
+ * than hidden.
+ *
+ * ORDERING, stated plainly: that markup and its one stylesheet block land in TASK 8.
+ * These assertions are written first so task 8 has an executable target and so no
+ * green test in this tree describes a UI that is being deleted. Until task 8 lands
+ * they FAIL, and they are meant to - a failure here before task 8 is the target, not
+ * a regression.
+ * ========================================================================== */
+
+test('Save to and Parallel files share a left edge', async ({ page }) => {
   if (!await boot(page)) return
-  const labels = await page.evaluate(() => {
+  const edges = await page.evaluate(() => {
+    const saveTo = document.querySelector('#set-dir')
+    const parallel = [...document.querySelectorAll('.dl-controls .conc')]
+      .map(conc => conc.querySelector('span'))
+      .find(span => span && /parallel/i.test(span.textContent || ''))
+    if (!saveTo || !parallel) return null
+    const saveToBox = saveTo.getBoundingClientRect()
+    const parallelBox = parallel.getBoundingClientRect()
+    return {
+      saveToLeft: Math.round(saveToBox.left),
+      parallelLeft: Math.round(parallelBox.left),
+      parallelAlignSelf: getComputedStyle(parallel).alignSelf,
+      saveToIsOnlyControl: document.querySelectorAll('.dl-controls #set-dir').length
+    }
+  })
+  expect(edges, 'the Save-to control and the Parallel files row must both exist').not.toBeNull()
+  expect(edges.parallelAlignSelf, 'the Parallel files label must stay left aligned, not centred').toBe('flex-start')
+  expect(edges.saveToLeft, 'the Save-to control must share the Parallel files left edge').toBe(edges.parallelLeft)
+  expect(edges.saveToIsOnlyControl, 'exactly one Save-to control may sit in the download controls').toBe(1)
+})
+
+test('Save to is exactly one control, with no legacy path nodes in the DOM', async ({ page }) => {
+  if (!await boot(page)) return
+  const shape = await page.evaluate(() => {
+    const button = document.querySelector('#set-dir')
+    const pane = document.querySelector('#mg-downloads-pane') || document.querySelector('.downloads')
+    const visible = node => {
+      if (!node) return false
+      const box = node.getBoundingClientRect()
+      return box.width > 0 && box.height > 0 && getComputedStyle(node).display !== 'none'
+    }
+    return {
+      hasControl: !!button,
+      controlClasses: button ? button.className : null,
+      isSaveTo: !!(button && button.classList.contains('fg-save-to')),
+      tagName: button ? button.tagName : null,
+      legacyInput: !!document.querySelector('#dl-dir'),
+      legacyLine: !!document.querySelector('#dl-dir-current'),
+      clickTargets: pane ? pane.querySelectorAll('#set-dir, .fg-save-to').length : -1,
+      pathDisplays: pane
+        ? [...pane.querySelectorAll('#dl-dir-path, .fg-save-to-path, #dl-dir, #dl-dir-current, .dir-current')].filter(visible).length
+        : -1,
+      nestedButtons: button ? button.querySelectorAll('button').length : -1,
+      parts: button
+        ? {
+            icon: !!button.querySelector('.fg-save-to-icon'),
+            label: !!button.querySelector('.fg-save-to-label'),
+            path: !!button.querySelector('#dl-dir-path, .fg-save-to-path'),
+            chevron: !!button.querySelector('.fg-save-to-chevron')
+          }
+        : null
+    }
+  })
+
+  expect(shape.hasControl, 'the Save-to control must exist').toBe(true)
+  expect(shape.tagName, 'the Save-to control is a button').toBe('BUTTON')
+  expect(shape.isSaveTo, `the control must carry the single Save-to class, saw "${shape.controlClasses}"`).toBe(true)
+  expect(shape.legacyInput, '#dl-dir must be removed from the markup, not hidden').toBe(false)
+  expect(shape.legacyLine, '#dl-dir-current must be removed from the markup, not hidden').toBe(false)
+  expect(shape.clickTargets, 'exactly one click target may exist for the download destination').toBe(1)
+  expect(shape.pathDisplays, 'exactly one visible path display may exist').toBe(1)
+  expect(shape.nestedButtons, 'the control must not nest a second button').toBe(0)
+  expect(shape.parts, 'the control must be one row of icon, copy and chevron').toEqual({ icon: true, label: true, path: true, chevron: true })
+})
+
+test('Save to fills the sidebar width and ellipsises only on genuine overflow', async ({ page }) => {
+  if (!await boot(page)) return
+  const measured = []
+  for (const width of [1280, 1366, 1600, 1920]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.waitForTimeout(250)
+    measured.push({
+      viewport: width,
+      ...(await page.evaluate(() => {
+        const button = document.querySelector('#set-dir')
+        if (!button) return { present: false }
+        const parent = button.parentElement
+        const path = button.querySelector('#dl-dir-path, .fg-save-to-path')
+        const box = button.getBoundingClientRect()
+        const style = getComputedStyle(button)
+        /* "Available width" is the parent's CONTENT box, not its border box.
+         * `.dl-controls` carries 14px of horizontal padding, so an assertion against
+         * `parent.getBoundingClientRect().width` demands the control overflow its own
+         * parent's padding - which nothing can do and which is not what clause 2.19
+         * asks for. The Parallel files row is measured alongside it as the reference:
+         * that sibling has always filled the pane, so "the control is exactly as wide
+         * as the row beside it" is the same claim, checkable against a known-good
+         * value (the task 3 baseline pins that row at 311/341/361/371 px). */
+        const parentStyle = getComputedStyle(parent)
+        const parentContentWidth = Math.round(parent.clientWidth - parseFloat(parentStyle.paddingLeft || '0') - parseFloat(parentStyle.paddingRight || '0'))
+        const siblingRow = document.querySelector('#mg-downloads-pane .dl-controls .conc > .row, .downloads .dl-controls .conc > .row')
+        return {
+          present: true,
+          width: Math.round(box.width),
+          parentWidth: parentContentWidth,
+          parentBorderBoxWidth: Math.round(parent.getBoundingClientRect().width),
+          siblingRowWidth: siblingRow ? Math.round(siblingRow.getBoundingClientRect().width) : -1,
+          height: Math.round(box.height),
+          display: style.display,
+          textAlign: style.textAlign,
+          title: button.title,
+          pathText: path ? (path.textContent || '').trim() : null,
+          pathClientWidth: path ? path.clientWidth : -1,
+          pathScrollWidth: path ? path.scrollWidth : -1,
+          pathOverflow: path ? getComputedStyle(path).textOverflow : null
+        }
+      }))
+    })
+  }
+  await page.setViewportSize({ width: 1600, height: 900 })
+
+  for (const item of measured) {
+    const where = `viewport ${item.viewport}px`
+    expect(item.present, `${where}: the Save-to control must exist`).toBe(true)
+    expect(item.display, `${where}: the control is one flex row`).toBe('flex')
+    expect(item.textAlign, `${where}: the control reads left to right`).toBe('left')
+    expect(item.width, `${where}: the control must fill the available width (${item.parentWidth}px content box, parent border box ${item.parentBorderBoxWidth}px)`).toBeGreaterThanOrEqual(item.parentWidth - 2)
+    if (item.siblingRowWidth > 0) {
+      expect(Math.abs(item.width - item.siblingRowWidth), `${where}: the control must be as wide as the Parallel files row beside it (${item.siblingRowWidth}px)`).toBeLessThanOrEqual(2)
+    }
+    expect(item.height, `${where}: the control must be comfortably tall`).toBeGreaterThanOrEqual(40)
+    /* Ellipsis is allowed only when the path genuinely exceeds the width it was
+     * given. `SAV...` on a 54px control is the defect, so both the mechanism
+     * (text-overflow) and the condition (real overflow) are asserted. */
+    if (item.pathText) {
+      expect(item.pathOverflow, `${where}: the path must ellipsise rather than clip`).toBe('ellipsis')
+      expect(item.title, `${where}: the full path must be available as a tooltip`).toBeTruthy()
+      if (item.pathScrollWidth <= item.pathClientWidth + 1) {
+        expect(item.pathText, `${where}: a path that fits must be shown in full`).toBe(item.title)
+      }
+    }
+  }
+})
+
+test('exactly one stylesheet rule decides the Save-to width', async ({ page }) => {
+  if (!await boot(page)) return
+  const rules = await page.evaluate(() => {
     const out = []
-    for (const conc of document.querySelectorAll('.dl-controls .conc')) {
-      const span = conc.querySelector('span')
-      if (!span) continue
-      const cs = getComputedStyle(span)
-      out.push({
-        text: (span.textContent || '').trim(),
-        left: Math.round(span.getBoundingClientRect().left),
-        alignSelf: cs.alignSelf,
-        textAlign: cs.textAlign
-      })
+    const specificity = selector => {
+      const ids = (selector.match(/#[\w-]+/g) || []).length
+      const classes = (selector.match(/\.[\w-]+|\[[^\]]*\]|:[\w-]+/g) || []).length
+      const types = (selector.match(/(^|[\s>+~])[a-z][\w-]*/gi) || []).length
+      return `${ids},${classes},${types}`
+    }
+    for (const sheet of document.styleSheets) {
+      let cssRules = []
+      try { cssRules = [...sheet.cssRules] } catch { continue }
+      for (const rule of cssRules) {
+        if (!rule.selectorText || !/set-dir|dl-dir|dir-current/.test(rule.selectorText)) continue
+        const width = rule.style && rule.style.getPropertyValue('width')
+        out.push({
+          sheet: String(sheet.href || `<injected ${(sheet.ownerNode && sheet.ownerNode.id) || 'style'}>`).replace(/^.*\//, ''),
+          selector: rule.selectorText,
+          specificity: specificity(rule.selectorText),
+          width: width ? width + (rule.style.getPropertyPriority('width') ? ' !important' : '') : ''
+        })
+      }
     }
     return out
   })
-  expect(labels.length, 'both control sections must be present').toBeGreaterThanOrEqual(2)
-  // Neither label may be centred over the panel.
-  for (const label of labels) {
-    expect(label.alignSelf, `"${label.text}" must be left aligned, not centred`).toBe('flex-start')
-  }
-  const lefts = [...new Set(labels.map(l => l.left))]
-  expect(lefts.length, `labels must share one left edge, got ${JSON.stringify(labels.map(l => [l.text, l.left]))}`).toBe(1)
-})
 
-test('Save to path is one line with a full-path tooltip and a matching Browse button', async ({ page }) => {
-  if (!await boot(page)) return
-  const row = await page.evaluate(() => {
-    const input = document.querySelector('#dl-dir')
-    const button = document.querySelector('#set-dir')
-    const duplicate = document.querySelector('#dl-dir-current')
-    if (!input || !button) return null
-    const ib = input.getBoundingClientRect()
-    const bb = button.getBoundingClientRect()
-    return {
-      value: input.value,
-      title: input.title,
-      inputHeight: Math.round(ib.height),
-      buttonHeight: Math.round(bb.height),
-      sameRow: Math.abs(ib.top - bb.top) <= 1,
-      noOverlap: bb.left >= ib.right - 1,
-      duplicateVisible: duplicate ? getComputedStyle(duplicate).display !== 'none' : false,
-      buttonText: (button.textContent || '').trim()
-    }
-  })
-  expect(row, 'the Save to row must exist').not.toBeNull()
-  expect(row.inputHeight, 'Browse must match the path field height').toBe(row.buttonHeight)
-  expect(row.sameRow, 'the path field and Browse must sit on one line').toBeTruthy()
-  expect(row.noOverlap, 'Browse must not overlap the path field').toBeTruthy()
-  expect(row.duplicateVisible, 'the duplicated path line must stay hidden').toBeFalsy()
-  if (row.value) expect(row.title, 'the full path must be available as a tooltip').toBe(row.value)
+  const widthRules = rules.filter(rule => rule.width)
+  expect(
+    widthRules.length,
+    `exactly one rule may declare a width for the Save-to control, saw ${JSON.stringify(widthRules, null, 2)}`
+  ).toBe(1)
+  expect(widthRules[0].selector, 'the surviving rule must address the single control by class').toMatch(/#set-dir\.fg-save-to/)
+  const removedNodeRules = rules.filter(rule => /dl-dir(?!-path)|dir-current/.test(rule.selector))
+  expect(
+    removedNodeRules.length,
+    `no rule may target a removed node, saw ${JSON.stringify(removedNodeRules, null, 2)}`
+  ).toBe(0)
+  expect(
+    await page.evaluate(() => !!document.querySelector('#fg-hardening-style, #fg-download-folder-v2-style')),
+    'no second stylesheet may be injected for the same node'
+  ).toBe(false)
 })
 
 test('Parallel files slider fills its row and drives concurrency', async ({ page }) => {

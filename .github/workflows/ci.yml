@@ -24,15 +24,40 @@ jobs:
       - name: Syntax checks
         run: |
           node --check server.js
+          node --check bulk-upload-server.js
+          node --check bulk-upload-ledger.js
+          node --check owned-bulk-delete-server.js
+          node --check bulk-upload-preload.js
           node --check public/app.js
           node --check public/rescue-runtime.js
           node --check public/daily-driver-final.js
           node --check public/daily-driver-final-guard.js
           node --check public/daily-driver-final-ui-fix.js
+          node --check public/upload-queue-core.js
+          node --check public/uploads.js
+          node --check public/bulk-uploads.js
+          node --check public/uploads-hardening.js
+          node --check public/owned-bulk-delete.js
       - run: npm run verify
+      - name: Install Chromium for upload behavior tests
+        run: npx playwright install --with-deps chromium
+      - name: Upload and owned-delete user-behavior tests
+        run: npm run test:uploads-ui
       - name: Runtime wiring
         shell: bash
         run: |
           grep -q 'rescue-runtime.js' public/index.html
           grep -q 'daily-driver-final-ui-fix.js' public/index.html
+          grep -q 'upload-queue-core.js' public/index.html
+          grep -q 'uploads.js' public/index.html
+          grep -q 'uploads.css' public/index.html
+          grep -q 'bulk-uploads.js' public/uploads.js
+          grep -q 'uploads-hardening.js' public/uploads.js
+          grep -q 'owned-bulk-delete.js' public/uploads.js
+          grep -q 'bulk-upload-preload.js' package.json
+          grep -q 'bulk-upload-ledger.js' package.json
+          grep -q 'owned-bulk-delete-server.js' package.json
+          grep -q 'bulk-upload-server.test.cjs' package.json
+          grep -q 'bulk-upload-ledger.test.cjs' package.json
+          grep -q 'owned-bulk-delete-server.test.cjs' package.json
           grep -q 'photoFileId' server.js

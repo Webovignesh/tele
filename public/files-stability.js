@@ -1,626 +1,461 @@
 'use strict'
 
-/* FileGram persistent Files index owner.
- *
- * Rules:
- * - restore the committed per-chat index before doing network work;
- * - a refresh/revisit never starts another full-history scan when a committed
- *   index already exists;
- * - after restore, reconcile only messages newer than the last seen message;
- * - progressive scans only add to the committed index and are flushed in
- *   coarse batches so 20k+ indexes do not re-sort on every 100-item event;
- * - one owner handles media-index-progress so legacy layers cannot temporarily
- *   replace a complete count with a partial scan count;
- * - Files data never gets copied into state.messages. Messages and Files are
- *   separate data sets, which keeps chat switching and the Messages tab fast.
- */
+/* FileGram Files owner: discovery only grows; confirmed Telegram truth may shrink. */
 ;(function fileGramFilesStability () {
-  const committed = new Map()
-  const loading = new Map()
-  const reconcileJobs = new Map()
-  const candidates = new Map()
-  const persistTimers = new Map()
-  const paintTimers = new Map()
-  const flushTimers = new Map()
-  const fullScanJobs = new Set()
-  const persistentReadJobs = new Map()
-
+  const DB_NAME = 'tele-daily-driver-cache-v1'
+  const DB_STORE = 'file-indexes'
+  const HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
+  const LEGACY_RECONCILE_MARK_KEY = 'filegram-files-delete-reconcile-v1'
+  const REMOVED_IDS_LIMIT = 5000
+  const REMOVED_IDS_TTL = 30 * 24 * 60 * 60 * 1000
+  const TRUTH_MISSING_LOG_LIMIT = 20
+  const TRUTH_BACKOFF_START_MS = 2000
+  const TRUTH_BACKOFF_MAX_MS = 5 * 60 * 1000
+  const TRUTH_THROTTLE_MS = 60000
   const PROGRESS_FLUSH_MS = 350
   const PROGRESS_FLUSH_ITEMS = 800
   const RECONCILE_PAGE_LIMIT = 100
   const RECONCILE_MAX_PAGES = 2500
 
-  /* Durable per-chat floor for the AUTHORITATIVE TOTAL.
-   *
-   * Same storage the scan guard already maintains, deliberately: one record, no
-   * second source of truth. It exists because a short or partial scan can be
-   * stamped done and land in the shared cache, and the header would then print a
-   * number below one we have already proven (the 22,479 -> 17,484 -> 22,479
-   * shrink). The floor is a total-only concept: FILTERED, CURRENT PAGE, SELECTED
-   * and DOWNLOAD QUEUE counts are never compared against it.
-   *
-   * It expires like the guard's copy so a channel that genuinely loses files is
-   * not pinned high forever, and a hard refresh clears it outright. */
-  const HIGH_WATER_KEY = 'tele-file-index-high-water-v1'
-  const HIGH_WATER_TTL = 14 * 24 * 60 * 60 * 1000
+  const committed = new Map()
+  const loading = new Map()
+  const reconcileJobs = new Map()
+  const recentJobs = new Map()
+  const candidates = new Map()
+  const flushTimers = new Map()
+  const fullScanJobs = new Set()
+  const progressInFlight = new Set()
+  const repairAttempts = new Set()
+  const backoff = new Map()
+  const lastTruthPass = new Map()
+  const autoReconcileTimers = new Map()
+  const removalState = new Map()
+  const handledEvents = new WeakSet()
+  let ownerHandleEvent = null
 
-  function readHighWater () {
-    try { return JSON.parse(localStorage.getItem(HIGH_WATER_KEY) || '{}') || {} } catch { return {} }
-  }
-
-  function writeHighWater (map) {
-    try { localStorage.setItem(HIGH_WATER_KEY, JSON.stringify(map)) } catch {}
-  }
-
-  function totalFloor (chatId) {
-    const entry = readHighWater()[idOf(chatId)]
-    if (!entry) return 0
-    if (Date.now() - Number(entry.at || 0) > HIGH_WATER_TTL) return 0
-    return Math.max(0, Number(entry.count || 0))
-  }
-
-  /* Records a PROVEN-COMPLETE count. Callers must not pass partial scan counts:
-   * the floor gates completeness checks and index repair, so a partial value would
-   * both mask a real regression and trigger phantom rescans. */
-  function rememberTotalFloor (chatId, count) {
-    const value = Math.max(0, Number(count || 0))
-    if (!value) return
-    const map = readHighWater()
-    const key = idOf(chatId)
-    if (map[key] && Number(map[key].count || 0) >= value) return
-    map[key] = { count: value, at: Date.now() }
-    writeHighWater(map)
-  }
-
-  function clearTotalFloor (chatId) {
-    const map = readHighWater()
-    delete map[idOf(chatId)]
-    writeHighWater(map)
-  }
-
-  function idOf (value) { return String(value) }
-
+  function idOf (value) { return String(value == null ? '' : value) }
   function compareIds (a, b) {
     let aa = 0n; let bb = 0n
     try { aa = BigInt(String(a || 0)) } catch {}
     try { bb = BigInt(String(b || 0)) } catch {}
     return aa === bb ? 0 : (aa < bb ? -1 : 1)
   }
-
-  function belongsToChat (chatId, snapshot) {
-    if (!snapshot || !Array.isArray(snapshot.items)) return false
-    const id = idOf(chatId)
-    return snapshot.items.every(item => item && idOf(item.chatId) === id)
-  }
-
-  /* Completeness is a size question as well as a flag question. `done` is set by
-   * whichever layer produced the snapshot, and a partial batch stamped done:true
-   * used to satisfy this check - restore() then adopted it as the committed index
-   * and the header shrank. A snapshot below the proven floor is treated as
-   * incomplete, so restore() falls through to the persistent read and union, and
-   * mergeProgress is allowed to rebuild it upward. */
-  function isCompleteSnapshot (chatId, snapshot) {
-    if (!belongsToChat(chatId, snapshot) || snapshot.done === false || !Array.isArray(snapshot.items)) return false
-    return snapshot.items.length >= totalFloor(chatId)
-  }
-
   function newestItemId (items) {
     let newest = 0
-    for (const item of items || []) {
-      if (item && item.messageId != null && (!newest || compareIds(item.messageId, newest) > 0)) newest = item.messageId
-    }
+    for (const item of items || []) if (item && item.messageId != null && (!newest || compareIds(item.messageId, newest) > 0)) newest = item.messageId
     return newest
   }
-
-  function normalize (chatId, snapshot) {
-    const id = idOf(chatId)
-    const byMessage = new Map()
-    let scanned = 0
-    let savedAt = Date.now()
-    let latestSeenMessageId = snapshot && snapshot.latestSeenMessageId || 0
-    for (const source of [snapshot]) {
-      if (!source || !Array.isArray(source.items)) continue
-      scanned = Math.max(scanned, Number(source.scanned || 0))
-      savedAt = Math.max(savedAt, Number(source.savedAt || 0))
-      if (source.latestSeenMessageId && compareIds(source.latestSeenMessageId, latestSeenMessageId) > 0) latestSeenMessageId = source.latestSeenMessageId
-      for (const item of source.items) {
-        if (!item || idOf(item.chatId) !== id || item.messageId == null) continue
-        byMessage.set(idOf(item.messageId), { ...item, chatId })
-      }
-    }
-    const items = [...byMessage.values()]
-    items.sort((a, b) => compareIds(b.messageId, a.messageId))
-    const typeCounts = {}
-    for (const item of items) typeCounts[item.type] = (typeCounts[item.type] || 0) + 1
-    return {
-      chatId,
-      items,
-      found: items.length,
-      scanned: Math.max(scanned, items.length),
-      typeCounts,
-      newestMessageId: newestItemId(items),
-      latestSeenMessageId,
-      savedAt,
-      done: snapshot ? snapshot.done !== false : true
-    }
+  function belongsToChat (chatId, snapshot) {
+    if (!snapshot || !Array.isArray(snapshot.items)) return false
+    const wanted = idOf(chatId)
+    return snapshot.items.every(item => item && idOf(item.chatId) === wanted)
+  }
+  function countTypes (items) {
+    const out = {}
+    for (const item of items || []) if (item && item.type) out[item.type] = (out[item.type] || 0) + 1
+    return out
+  }
+  function cloneSnapshot (snapshot) {
+    if (!snapshot) return null
+    return { ...snapshot, items: (snapshot.items || []).map(item => ({ ...item })), typeCounts: { ...(snapshot.typeCounts || {}) }, removedIds: (snapshot.removedIds || []).map(item => ({ ...item })) }
   }
 
-  /* Union of item sets. `done` means "this set is known to cover the chat's whole
-   * history", so it is OR across the inputs, not AND.
-   *
-   * It used to be AND, which made incompleteness permanent and was the mechanism
-   * behind every count fluctuation. flushProgress commits progress candidates that
-   * carry done:false, so the first partial flush set the committed index to
-   * done:false; from then on every union ANDed against that false, including the
-   * union with the finished scan-media-v3 result (done:true). The index therefore
-   * stayed flagged incomplete forever, which silently disabled the guard in
-   * mergeProgress that ignores obsolete partial scans, stopped restore() from
-   * fast-pathing, and pinned the status line to "Indexing files...".
-   *
-   * OR is the correct semantic: a complete set plus newer items is still complete,
-   * while two partials remain partial. */
-  function union (chatId, ...snapshots) {
-    const id = idOf(chatId)
-    const byMessage = new Map()
-    let scanned = 0
-    let savedAt = 0
-    let latestSeenMessageId = 0
-    let done = false
-    for (const snapshot of snapshots) {
-      if (!belongsToChat(chatId, snapshot)) continue
-      scanned = Math.max(scanned, Number(snapshot.scanned || 0))
-      savedAt = Math.max(savedAt, Number(snapshot.savedAt || 0))
-      done = done || snapshot.done !== false
-      if (snapshot.latestSeenMessageId && compareIds(snapshot.latestSeenMessageId, latestSeenMessageId) > 0) latestSeenMessageId = snapshot.latestSeenMessageId
-      for (const item of snapshot.items) {
-        if (!item || idOf(item.chatId) !== id || item.messageId == null) continue
-        byMessage.set(idOf(item.messageId), { ...item, chatId })
-      }
-    }
-    return normalize(chatId, { items: [...byMessage.values()], scanned, savedAt: savedAt || Date.now(), latestSeenMessageId, done })
+  function openDb () {
+    return new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined' || !indexedDB) return resolve(null)
+      const req = indexedDB.open(DB_NAME, 1)
+      req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains(DB_STORE)) req.result.createObjectStore(DB_STORE, { keyPath: 'chatId' }) }
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => reject(req.error || new Error('IndexedDB unavailable'))
+    })
   }
-
-  function sharedSnapshot (chatId) {
-    try {
-      if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.get) {
-        const value = rescueFileCache.get(idOf(chatId))
-        if (belongsToChat(chatId, value)) return value
-      }
-    } catch {}
-    return null
-  }
-
-  function setSharedSnapshot (chatId, snapshot) {
-    try {
-      if (typeof rescueFileCache !== 'undefined' && rescueFileCache && rescueFileCache.set) rescueFileCache.set(idOf(chatId), snapshot)
-    } catch {}
-  }
-
-  /* THE authoritative total writer. Only the committed persistent index feeds it,
-   * raised to the durable floor so a partial snapshot can never lower it.
-   *
-   * Never write a FILTERED, CURRENT PAGE, SEARCH RESULT or DOWNLOAD QUEUE count
-   * here. Those belong to the pager (files-view.js), the Select all button and
-   * the downloads panel respectively. */
-  /* If the committed index is smaller than a count we have already PROVEN complete,
-   * the index regressed. Rebuild it instead of printing a number the list cannot
-   * back up: the header used to display max(measured, floor), which is how the
-   * header could read 22,479 while Select all and the pager read 21,045. One
-   * attempt per chat per session, so a channel that genuinely lost files does not
-   * rescan in a loop. */
-  const repairAttempts = new Set()
-
-  function maybeRepairIndex (chatId, snapshot) {
-    const id = idOf(chatId)
-    if (repairAttempts.has(id)) return
-    if (snapshot.done === false) return // a scan is still streaming; it is growing
-    const floor = totalFloor(chatId)
-    if (!floor || snapshot.items.length >= floor) return
-    repairAttempts.add(id)
-    try { setLoadState(`Repairing index (${snapshot.items.length.toLocaleString()} of ${floor.toLocaleString()} known files)`) } catch {}
-    Promise.resolve(ensure(chatId, { hardRefresh: true })).catch(() => {})
-  }
-
-  function updateCountUi (chatId) {
-    if (state.activeChatId == null || idOf(state.activeChatId) !== idOf(chatId)) return
-    const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
-    if (!snapshot) return
-    // The REAL committed count. Never a remembered high-water and never a filtered,
-    // page, search or download-queue figure.
-    const total = snapshot.items.length
-    // Only a snapshot covering the whole history may raise the durable floor, so a
-    // partial scan cannot inflate it and then trigger a phantom repair.
-    if (snapshot.done !== false) rememberTotalFloor(chatId, total)
-    maybeRepairIndex(chatId, snapshot)
-    state.mediaCount = total
-    state.typeCounts = snapshot.typeCounts
-    const count = document.querySelector('#chat-media-count')
-    if (count) count.textContent = `${total.toLocaleString()} file${total === 1 ? '' : 's'}`
-    const all = document.querySelector('#download-all-media')
-    if (all) {
-      all.textContent = `Download all media (${total.toLocaleString()})`
-      all.disabled = total === 0
-    }
-  }
-
-  /* This layer takes ownership of the legacy label symbols.
-   *
-   * They were last assigned by daily-driver-final-guard.js (guardUpdateMediaLabel),
-   * which reads the shared, partial-writable rescueFileCache and applies no floor -
-   * it records a high-water mark and then never consults it when painting. Every
-   * legacy caller (openChat, the P0/P1 layers, the scan handlers) went through
-   * that symbol, so the authoritative index owner was bypassed entirely. */
-  function ownCountLabel () {
-    const paint = function fileGramStableUpdateMediaLabel () {
-      const chatId = state.activeChatId
-      const label = document.querySelector('#chat-media-count')
-      const all = document.querySelector('#download-all-media')
-      if (chatId == null) {
-        if (label) label.textContent = ''
-        if (all) { all.textContent = 'Download all media'; all.disabled = true }
-        return
-      }
-      const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
-      if (!snapshot) {
-        // No index yet. Say so rather than printing a number we cannot defend.
-        if (label) label.textContent = state.view === 'files' ? 'Indexing files\u2026' : ''
-        if (all) { all.textContent = 'Download all media'; all.disabled = true }
-        return
-      }
-      updateCountUi(chatId)
-    }
-    try { updateMediaCountLabel = paint } catch {}
-    try { rescueUpdateMediaLabel = paint } catch {}
-  }
-
-  function schedulePaint (chatId) {
-    const id = idOf(chatId)
-    if (paintTimers.has(id)) return
-    paintTimers.set(id, setTimeout(() => {
-      paintTimers.delete(id)
-      updateCountUi(chatId)
-      if (state.activeChatId != null && idOf(state.activeChatId) === id && state.view === 'files') {
-        try { renderFiles() } catch {}
-      }
-    }, 80))
-  }
-
-  function schedulePersist (chatId, immediate = false) {
-    const id = idOf(chatId)
-    if (persistTimers.has(id)) clearTimeout(persistTimers.get(id))
-    const write = () => {
-      persistTimers.delete(id)
-      const snapshot = committed.get(id)
-      if (!snapshot) return
-      if (typeof teleP0v2WriteIndex === 'function') Promise.resolve(teleP0v2WriteIndex(chatId, snapshot)).catch(() => {})
-    }
-    if (immediate) write()
-    else persistTimers.set(id, setTimeout(write, 700))
-  }
-
-  function commitUnion (chatId, snapshot, options = {}) {
-    if (!belongsToChat(chatId, snapshot)) return committed.get(idOf(chatId)) || null
-    const id = idOf(chatId)
-    const previous = committed.get(id)
-    const next = previous ? union(chatId, previous, snapshot) : normalize(chatId, snapshot)
-    committed.set(id, next)
-    setSharedSnapshot(chatId, next)
-    updateCountUi(chatId)
-    if (options.persist) schedulePersist(chatId, !!options.immediate)
-    if (options.paint !== false) schedulePaint(chatId)
-    return next
-  }
-
-  function installPersistentReadDedupe () {
-    if (typeof teleP0v2ReadIndex !== 'function' || teleP0v2ReadIndex.__fileGramDeduped) return
-    const baseRead = teleP0v2ReadIndex
-    const deduped = function fileGramDedupedPersistentRead (chatId) {
-      const id = idOf(chatId)
-      if (persistentReadJobs.has(id)) return persistentReadJobs.get(id)
-      const job = Promise.resolve(baseRead(chatId)).finally(() => persistentReadJobs.delete(id))
-      persistentReadJobs.set(id, job)
-      return job
-    }
-    deduped.__fileGramDeduped = true
-    teleP0v2ReadIndex = deduped
-  }
-
-  async function restore (chatId) {
-    const id = idOf(chatId)
-    const memory = committed.get(id)
-    if (isCompleteSnapshot(chatId, memory)) {
-      setSharedSnapshot(chatId, memory)
-      updateCountUi(chatId)
-      return memory
-    }
-
-    const shared = sharedSnapshot(chatId)
-    if (isCompleteSnapshot(chatId, shared)) {
-      committed.set(id, shared)
-      updateCountUi(chatId)
-      return shared
-    }
-
-    let best = memory && belongsToChat(chatId, memory) ? memory : null
-    if (shared) best = best ? union(chatId, best, shared) : normalize(chatId, shared)
-    if (typeof teleP0v2ReadIndex === 'function') {
-      const disk = await Promise.resolve(teleP0v2ReadIndex(chatId)).catch(() => null)
-      if (belongsToChat(chatId, disk)) best = best ? union(chatId, best, disk) : normalize(chatId, disk)
-    }
-    if (best) {
-      committed.set(id, best)
-      setSharedSnapshot(chatId, best)
-      updateCountUi(chatId)
-    }
-    return best
-  }
-
-  function mediaItemFromMessage (chatId, message) {
-    if (!message || !message.media) return null
-    const media = message.media
-    if (media.messageId == null) media.messageId = message.id
-    if (media.chatId == null) media.chatId = chatId
-    return media && media.messageId != null ? { ...media, chatId } : null
-  }
-
-  async function reconcileRecent (chatId, snapshot) {
-    const id = idOf(chatId)
-    if (!snapshot || reconcileJobs.has(id)) return reconcileJobs.get(id) || snapshot
-
-    const job = (async () => {
-      const anchor = snapshot.latestSeenMessageId || snapshot.newestMessageId || newestItemId(snapshot.items)
-      let cursor = 0
-      let reachedAnchor = false
-      let latestSeen = snapshot.latestSeenMessageId || 0
-      const additions = []
-
-      for (let page = 0; page < RECONCILE_MAX_PAGES && !reachedAnchor; page++) {
-        const data = await request('get-messages', { chatId, fromMessageId: cursor || 0, limit: RECONCILE_PAGE_LIMIT })
-        const messages = Array.isArray(data && data.messages) ? data.messages : []
-        if (!messages.length) break
-        if (!latestSeen) latestSeen = messages[0] && messages[0].id || 0
-
-        for (const message of messages) {
-          if (anchor && compareIds(message.id, anchor) <= 0) {
-            reachedAnchor = true
-            break
-          }
-          const item = mediaItemFromMessage(chatId, message)
-          if (item) additions.push(item)
-        }
-
-        if (reachedAnchor || !data.hasMore) break
-        const oldest = messages[messages.length - 1]
-        const nextCursor = oldest && oldest.id
-        if (!nextCursor || idOf(nextCursor) === idOf(cursor)) break
-        cursor = nextCursor
-        if (page % 8 === 7) await new Promise(resolve => setTimeout(resolve, 0))
-      }
-
-      const metaSnapshot = {
-        chatId,
-        items: additions,
-        scanned: snapshot.scanned,
-        latestSeenMessageId: latestSeen || anchor,
-        savedAt: Date.now(),
-        done: true
-      }
-      const beforeCount = snapshot.items.length
-      const next = commitUnion(chatId, metaSnapshot, { persist: true, immediate: true, paint: additions.length > 0 }) || snapshot
-      if (state.activeChatId != null && idOf(state.activeChatId) === id && state.view === 'files') {
-        if (next.items.length > beforeCount) {
-          try { setLoadState(`${next.items.length.toLocaleString()} files · ${next.items.length - beforeCount} new`) } catch {}
-        } else {
-          try { setLoadState(`Loaded ${next.items.length.toLocaleString()} indexed files`) } catch {}
-        }
-      }
-      return next
-    })().catch(() => snapshot).finally(() => reconcileJobs.delete(id))
-
-    reconcileJobs.set(id, job)
-    return job
-  }
-
-  function cancelLegacyFullScan (chatId) {
-    Promise.resolve(request('cancel-media-scan-v3', { chatId })).catch(() => {})
-  }
-
-  async function ensure (chatId, options = {}) {
-    if (chatId == null) return null
-    const id = idOf(chatId)
-    if (loading.has(id)) return loading.get(id)
-
-    const task = (async () => {
-      let stable = await restore(chatId)
-      if (stable && stable.items.length && !options.hardRefresh) {
-        // A complete persistent index is authoritative. Kill any older full scan
-        // that may have been started by a legacy startup layer before this owner
-        // installed, then reconcile only the newest delta.
-        cancelLegacyFullScan(chatId)
-        if (state.activeChatId != null && idOf(state.activeChatId) === id && state.view === 'files') {
-          try { setLoadState(`Loaded ${stable.items.length.toLocaleString()} indexed files`) } catch {}
-          schedulePaint(chatId)
-        }
-        reconcileRecent(chatId, stable).catch(() => {})
-        return stable
-      }
-
-      fullScanJobs.add(id)
+  async function readPersistent (chatId) {
+    const db = await openDb().catch(() => null)
+    if (!db) return null
+    return new Promise(resolve => {
+      let done = false
+      const finish = value => { if (done) return; done = true; try { db.close() } catch {}; resolve(value || null) }
       try {
-        const result = await request('scan-media-v3', { chatId, force: !!options.hardRefresh })
-        if (belongsToChat(chatId, result)) {
-          stable = commitUnion(chatId, result, { persist: true, immediate: true })
-          if (stable) reconcileRecent(chatId, stable).catch(() => {})
-        }
-      } catch (error) {
-        if (!stable && state.activeChatId != null && idOf(state.activeChatId) === id) {
-          try { setLoadState('File index sync failed. Reopen Files to retry.') } catch {}
-        }
-      } finally {
-        fullScanJobs.delete(id)
-      }
-      return stable
-    })().finally(() => loading.delete(id))
-
-    loading.set(id, task)
-    return task
+        const tx = db.transaction(DB_STORE, 'readonly')
+        const req = tx.objectStore(DB_STORE).get(idOf(chatId))
+        req.onsuccess = () => finish(req.result)
+        req.onerror = tx.onerror = tx.onabort = () => finish(null)
+      } catch { finish(null) }
+    })
   }
-
-  function flushProgress (chatId, done) {
-    const id = idOf(chatId)
-    const candidate = candidates.get(id)
-    if (!candidate || !candidate.items.length) {
-      if (done) candidates.delete(id)
-      return
+  async function writePersistent (chatId, snapshot, options = {}) {
+    const db = await openDb().catch(() => null)
+    if (!db) return { written: false, reason: 'indexeddb-unavailable' }
+    const record = {
+      chatId: idOf(chatId), found: snapshot.items.length, scanned: Number(snapshot.scanned || 0),
+      typeCounts: snapshot.typeCounts || {}, items: snapshot.items.map(item => ({ ...item })),
+      newestMessageId: snapshot.newestMessageId || 0, latestSeenMessageId: snapshot.latestSeenMessageId || 0,
+      savedAt: Number(snapshot.savedAt || Date.now()), done: snapshot.done !== false,
+      reconciledAt: Number(snapshot.reconciledAt || 0), truthCount: Number(snapshot.truthCount || 0),
+      removedIds: (snapshot.removedIds || []).map(item => ({ ...item }))
     }
-    commitUnion(chatId, candidate, { paint: true, persist: done, immediate: done })
-    candidates.set(id, { chatId, items: [], scanned: candidate.scanned, latestSeenMessageId: candidate.latestSeenMessageId || 0, done: false })
-    if (done) candidates.delete(id)
-  }
-
-  function scheduleProgressFlush (chatId) {
-    const id = idOf(chatId)
-    if (flushTimers.has(id)) return
-    flushTimers.set(id, setTimeout(() => {
-      flushTimers.delete(id)
-      flushProgress(chatId, false)
-    }, PROGRESS_FLUSH_MS))
-  }
-
-  function mergeProgress (payload) {
-    if (!payload || payload.chatId == null) return
-    const chatId = payload.chatId
-    const id = idOf(chatId)
-    const stable = committed.get(id) || sharedSnapshot(chatId)
-
-    // Ignore progress from obsolete full-history scans whenever a complete
-    // persistent index already exists. Those events caused the visible count to
-    // jump 22k -> 6k -> 22k while also re-sorting large arrays in the browser.
-    if (!fullScanJobs.has(id) && isCompleteSnapshot(chatId, stable) && stable.items.length) {
-      if (flushTimers.has(id)) clearTimeout(flushTimers.get(id))
-      flushTimers.delete(id)
-      candidates.delete(id)
-      updateCountUi(chatId)
-      return
-    }
-
-    let candidate = candidates.get(id)
-    if (!candidate) candidate = { chatId, items: [], scanned: 0, latestSeenMessageId: 0, done: false }
-
-    if (Array.isArray(payload.items) && payload.items.length) candidate.items.push(...payload.items)
-    candidate.scanned = Math.max(Number(candidate.scanned || 0), Number(payload.scanned || 0))
-    candidate.done = !!payload.done
-    candidates.set(id, candidate)
-
-    if (candidate.items.length >= PROGRESS_FLUSH_ITEMS || payload.done) {
-      if (flushTimers.has(id)) clearTimeout(flushTimers.get(id))
-      flushTimers.delete(id)
-      flushProgress(chatId, !!payload.done)
-    } else {
-      scheduleProgressFlush(chatId)
-    }
-
-    if (payload.done) {
-      const final = committed.get(id)
-      if (final && state.activeChatId != null && idOf(state.activeChatId) === id) {
-        try { setLoadState(`Indexed ${final.items.length.toLocaleString()} files`) } catch {}
-      }
-    }
-  }
-
-  function syncFromSharedAfterRealtime (chatId) {
-    queueMicrotask(() => {
-      const shared = sharedSnapshot(chatId)
-      if (shared) commitUnion(chatId, shared, { persist: true, paint: true })
+    return new Promise(resolve => {
+      let done = false
+      const finish = value => { if (done) return; done = true; try { db.close() } catch {}; resolve(value) }
+      try {
+        const tx = db.transaction(DB_STORE, 'readwrite')
+        tx.objectStore(DB_STORE).put(record)
+        tx.oncomplete = () => finish({ written: true })
+        tx.onerror = () => finish({ written: false, reason: 'transaction-error' })
+        tx.onabort = () => finish({ written: false, reason: 'transaction-abort' })
+      } catch { finish({ written: false, reason: 'transaction-open-failed' }) }
     })
   }
 
-  // Files must not be copied into state.messages. That old behavior is the main
-  // reason switching back to a 20k/40k chat caused a long main-thread pause and
-  // also contaminated the Messages tab.
-  rescueApplyCompleteFiles = function fileGramApplyFilesMetadataOnly (chatId, snapshot) {
-    if (!snapshot || !Array.isArray(snapshot.items)) return
-    state.mediaCount = snapshot.items.length
-    state.typeCounts = snapshot.typeCounts || null
-    state.hasMore = state.hasMore !== false
+  /* Legacy readers receive a copy; they are never an owned merge base after restore. */
+  function sharedSnapshot (chatId) {
+    try { const value = rescueFileCache.get(idOf(chatId)); return belongsToChat(chatId, value) ? value : null } catch { return null }
+  }
+  function publishShared (chatId, snapshot) { try { rescueFileCache.set(idOf(chatId), cloneSnapshot(snapshot)) } catch {} }
+
+  function readHighWater () { try { return JSON.parse(localStorage.getItem(HIGH_WATER_KEY) || '{}') || {} } catch { return {} } }
+  function writeHighWater (map) { try { localStorage.setItem(HIGH_WATER_KEY, JSON.stringify(map)) } catch {} }
+  function readTotalFloor (chatId) { const e = readHighWater()[idOf(chatId)]; return e ? { count: Math.max(0, Number(e.count || 0)), at: Math.max(0, Number(e.at || 0)) } : null }
+  function totalFloor (chatId) { const e = readTotalFloor(chatId); return e ? e.count : 0 }
+  function rememberTotalFloor (chatId, count) {
+    const value = Math.max(0, Number(count || 0)); if (!value) return
+    const map = readHighWater(); const key = idOf(chatId); const current = map[key]
+    if (current && Number(current.count || 0) >= value) return
+    map[key] = { count: value, at: Date.now() }; writeHighWater(map)
+  }
+  function clearTotalFloor (chatId) {
+    const map = readHighWater(); delete map[idOf(chatId)]; writeHighWater(map)
+  }
+  function setTotalFloor (chatId, count, at) {
+    const value = Math.max(0, Number(count || 0)); const map = readHighWater(); const key = idOf(chatId)
+    if (!value) delete map[key]; else map[key] = { count: value, at: Number(at || Date.now()) }
+    writeHighWater(map)
+  }
+  function migrateLegacyReconcileMark () { try { localStorage.removeItem(LEGACY_RECONCILE_MARK_KEY) } catch {} }
+
+  function cleanRemovedEntries (entries, now = Date.now()) {
+    const cutoff = now - REMOVED_IDS_TTL; const map = new Map()
+    for (const raw of entries || []) {
+      const id = idOf(raw && typeof raw === 'object' ? raw.id : raw); if (!id) continue
+      const at = Number(raw && typeof raw === 'object' ? raw.at : 0) || 0; if (at && at < cutoff) continue
+      if (!map.has(id) || at >= map.get(id).at) map.set(id, { id, at })
+    }
+    return [...map.values()].sort((a, b) => b.at - a.at).slice(0, REMOVED_IDS_LIMIT)
+  }
+  function hydrateRemovalState (chatId, snapshot) {
+    if (!snapshot) return
+    const key = idOf(chatId); const incomingAt = Number(snapshot.reconciledAt || 0); const current = removalState.get(key)
+    if (current && current.reconciledAt > incomingAt) return
+    const entries = cleanRemovedEntries(snapshot.removedIds || [])
+    removalState.set(key, { reconciledAt: Math.max(incomingAt, current ? current.reconciledAt : 0), removedIds: new Map(entries.map(e => [idOf(e.id), Number(e.at || incomingAt || 0)])) })
+  }
+  function currentRemovalMeta (chatId) {
+    const key = idOf(chatId); const current = removalState.get(key) || { reconciledAt: 0, removedIds: new Map() }
+    const entries = cleanRemovedEntries([...current.removedIds.entries()].map(([id, at]) => ({ id, at })))
+    const next = { reconciledAt: Number(current.reconciledAt || 0), removedIds: new Map(entries.map(e => [idOf(e.id), Number(e.at || 0)])) }
+    removalState.set(key, next); return next
+  }
+  function removalBlocks (chatId, messageId, sourceAt) {
+    const meta = currentRemovalMeta(chatId); const removedIds = meta.removedIds; const id = idOf(messageId)
+    if (!removedIds.has(id)) return false
+    const removedAt = Number(removedIds.get(id) || 0); const reconciledAt = Number(meta.reconciledAt || 0)
+    return Number(sourceAt || 0) <= (removedAt || reconciledAt)
+  }
+  function appendRemovedIds (chatId, previous, ids, at, presentIds) {
+    hydrateRemovalState(chatId, previous)
+    const meta = currentRemovalMeta(chatId); const present = presentIds instanceof Set ? presentIds : new Set((presentIds || []).map(idOf))
+    for (const id of present) meta.removedIds.delete(idOf(id))
+    for (const raw of ids || []) { const id = idOf(raw); if (id && !id.startsWith('-')) meta.removedIds.set(id, Number(at || Date.now())) }
+    meta.reconciledAt = Math.max(meta.reconciledAt, Number(at || Date.now()))
+    const entries = cleanRemovedEntries([...meta.removedIds.entries()].map(([id, stamp]) => ({ id, at: stamp })), at)
+    removalState.set(idOf(chatId), { reconciledAt: meta.reconciledAt, removedIds: new Map(entries.map(e => [idOf(e.id), Number(e.at || 0)])) })
+    return entries
   }
 
-  installPersistentReadDedupe()
-  ownCountLabel()
-  rescueEnsureAllFiles = ensure
-
-  // The committed index is already newest-first. Avoid cloning+sorting 40k rows
-  // on every render/scroll. Only derive a new array when a filter/search/sort
-  // actually requires it.
-  filesItems = function fileGramStableFilesItems () {
-    let list
-    if (state.files.mode === 'search') {
-      list = Array.isArray(state.files.results) ? state.files.results.slice() : []
-    } else {
-      const chatId = state.activeChatId
-      const stable = chatId == null ? null : (committed.get(idOf(chatId)) || sharedSnapshot(chatId))
-      list = stable && Array.isArray(stable.items) ? stable.items : []
+  function normalize (chatId, snapshot) {
+    const wanted = idOf(chatId); const at = Number(snapshot && snapshot.savedAt || Date.now()); if (snapshot) hydrateRemovalState(chatId, snapshot)
+    const byMessage = new Map()
+    for (const item of snapshot && Array.isArray(snapshot.items) ? snapshot.items : []) {
+      if (!item || idOf(item.chatId) !== wanted || item.messageId == null) continue
+      if (removalBlocks(chatId, item.messageId, at)) continue
+      byMessage.set(idOf(item.messageId), { ...item, chatId })
     }
-
-    const query = String(state.files.query || '').trim().toLowerCase()
-    const filtered = query || state.files.filter !== 'all'
-    if (query) list = list.filter(item => String(item.name || '').toLowerCase().includes(query) || String(item.caption || '').toLowerCase().includes(query))
-    if (state.files.filter !== 'all') list = list.filter(item => item.type === state.files.filter)
-
-    if (state.files.sort === 'oldest') return list.slice().reverse()
-    if (state.files.sort === 'name') return list.slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
-    if (state.files.sort === 'size') return list.slice().sort((a, b) => Number(b.fileSize || 0) - Number(a.fileSize || 0))
-    if (state.files.mode === 'search' && !filtered) return list.slice().sort((a, b) => compareIds(b.messageId, a.messageId))
-    return list
+    const items = [...byMessage.values()].sort((a, b) => compareIds(b.messageId, a.messageId)); const meta = currentRemovalMeta(chatId)
+    const done = snapshot && snapshot.historyComplete === false ? false : (!snapshot || snapshot.done !== false)
+    return { chatId, items, found: items.length, scanned: Math.max(Number(snapshot && snapshot.scanned || 0), items.length), typeCounts: countTypes(items), newestMessageId: newestItemId(items), latestSeenMessageId: snapshot && snapshot.latestSeenMessageId || 0, savedAt: at, done, reconciledAt: Math.max(Number(snapshot && snapshot.reconciledAt || 0), meta.reconciledAt), truthCount: Math.max(0, Number(snapshot && snapshot.truthCount || 0)), removedIds: cleanRemovedEntries([...meta.removedIds.entries()].map(([id, stamp]) => ({ id, at: stamp })), at) }
+  }
+  function union (chatId, ...snapshots) {
+    const wanted = idOf(chatId); const byMessage = new Map(); let scanned = 0; let savedAt = 0; let latestSeenMessageId = 0; let done = false; let reconciledAt = 0; let truthCount = 0
+    for (const snapshot of snapshots) {
+      if (!belongsToChat(chatId, snapshot)) continue
+      hydrateRemovalState(chatId, snapshot); const at = Number(snapshot.savedAt || Date.now()); savedAt = Math.max(savedAt, at); scanned = Math.max(scanned, Number(snapshot.scanned || 0))
+      if (snapshot.historyComplete !== false) done = done || snapshot.done !== false
+      if (Number(snapshot.reconciledAt || 0) >= reconciledAt) { reconciledAt = Number(snapshot.reconciledAt || 0); truthCount = Math.max(0, Number(snapshot.truthCount || 0)) }
+      if (snapshot.latestSeenMessageId && compareIds(snapshot.latestSeenMessageId, latestSeenMessageId) > 0) latestSeenMessageId = snapshot.latestSeenMessageId
+      for (const item of snapshot.items) {
+        if (!item || idOf(item.chatId) !== wanted || item.messageId == null) continue
+        if (removalBlocks(chatId, item.messageId, at)) continue
+        byMessage.set(idOf(item.messageId), { ...item, chatId })
+      }
+    }
+    return normalize(chatId, { items: [...byMessage.values()], scanned, savedAt: savedAt || Date.now(), latestSeenMessageId, done, reconciledAt, truthCount })
   }
 
-  const baseHandleEvent = handleEvent
-  handleEvent = function fileGramStableHandleEvent (event) {
-    if (!event) return baseHandleEvent(event)
-
-    // This layer is the sole owner of media-index-progress. Do not call the
-    // legacy chain first: older P1/P0 handlers repaint partial scan snapshots
-    // and are the direct cause of the count fluctuation visible in the UI.
-    if (event.name === 'media-index-progress') {
-      mergeProgress(event.payload || {})
-      return
-    }
-
-    const result = baseHandleEvent(event)
-    if (event.name === 'message-upsert' || event.name === 'message-delete') {
-      const payload = event.payload || event
-      if (payload.chatId != null) syncFromSharedAfterRealtime(payload.chatId)
-    }
-    return result
+  function floorAwareComplete (chatId, snapshot) { const floor = readTotalFloor(chatId); return !floor || floor.at <= Number(snapshot.reconciledAt || 0) || snapshot.items.length >= floor.count }
+  function isCompleteSnapshot (chatId, snapshot) {
+    if (!belongsToChat(chatId, snapshot) || snapshot.done === false || !Array.isArray(snapshot.items)) return false
+    return snapshot.items.length >= totalFloor(chatId) || floorAwareComplete(chatId, snapshot)
+  }
+  function isActiveChat (chatId) {
+    try { return !!state && state.activeChatId != null && idOf(state.activeChatId) === idOf(chatId) } catch { return false }
+  }
+  function setLoadStateForChat (chatId, text) {
+    if (!isActiveChat(chatId)) return false
+    try { if (typeof setLoadState === 'function') setLoadState(text); return true } catch { return false }
+  }
+  function paint (chatId, snapshot) {
+    if (!isActiveChat(chatId)) return
+    const total = snapshot.items.length; state.mediaCount = total; state.typeCounts = snapshot.typeCounts || {}
+    const label = document.querySelector('#chat-media-count'); if (label) label.textContent = `${total.toLocaleString()} file${total === 1 ? '' : 's'}`
+    const all = document.querySelector('#download-all-media'); if (all) { all.textContent = `Download all media (${total.toLocaleString()})`; all.disabled = total === 0 }
+    const selectAll = document.querySelector('#select-all-media'); if (selectAll) { selectAll.textContent = total ? `Select all (${total.toLocaleString()})` : 'Select all'; selectAll.disabled = total === 0 }
+    if (state.view === 'files' && typeof renderFiles === 'function') try { renderFiles() } catch {}
+  }
+  function ownCountLabel () {
+    const paintOwned = function fileGramStableUpdateMediaLabel () { const chatId = state && state.activeChatId; const snapshot = committed.get(idOf(chatId)); if (snapshot) paint(chatId, snapshot) }
+    try { updateMediaCountLabel = paintOwned } catch {}; try { rescueUpdateMediaLabel = paintOwned } catch {}
+  }
+  function maybeRepairIndex (chatId, snapshot) {
+    if (!snapshot || snapshot.done === false) return
+    const key = idOf(chatId); if (repairAttempts.has(key)) return
+    const floor = readTotalFloor(chatId); if (!floor || snapshot.items.length >= floor.count) return
+    const reconciledAt = Number(snapshot.reconciledAt || 0); if (floor.at <= reconciledAt) return
+    repairAttempts.add(key); setLoadStateForChat(chatId, `Repairing index (${snapshot.items.length.toLocaleString()} of ${floor.count.toLocaleString()} known files)`); hardRefresh(chatId).catch(() => {})
+  }
+  function updateCountUi (chatId) {
+    const snapshot = committed.get(idOf(chatId)); if (!snapshot) return
+    const total = snapshot.items.length
+    if (snapshot.done !== false) rememberTotalFloor(chatId, total)
+    maybeRepairIndex(chatId, snapshot); paint(chatId, snapshot)
   }
 
-  queueMicrotask(() => {
-    if (state.activeChatId != null) ensure(state.activeChatId).catch(() => {})
-  })
+  async function commitDiscovery (chatId, snapshot, options = {}) {
+    if (!belongsToChat(chatId, snapshot)) return committed.get(idOf(chatId)) || null
+    const key = idOf(chatId); const previous = committed.get(key)
+    const next = previous ? union(chatId, previous, snapshot) : normalize(chatId, snapshot)
+    committed.set(key, next); publishShared(chatId, next); updateCountUi(chatId); await writePersistent(chatId, next, options); return next
+  }
+  async function commitAuthoritative (chatId, snapshot, options = {}) {
+    if (!belongsToChat(chatId, snapshot)) return { snapshot: committed.get(idOf(chatId)) || null, persisted: { written: false, reason: 'invalid-snapshot' } }
+    const key = idOf(chatId); const previous = committed.get(key) || normalize(chatId, { chatId, items: [], done: true, savedAt: snapshot.savedAt || Date.now() }); const at = Number(options.at || Date.now())
+    const presentIds = options.presentIds instanceof Set ? options.presentIds : new Set((options.presentIds || snapshot.items.map(item => idOf(item.messageId))).map(idOf))
+    const removed = Array.isArray(options.removedIds) ? options.removedIds.map(idOf) : previous.items.filter(item => !presentIds.has(idOf(item.messageId))).map(item => idOf(item.messageId))
+    const removedIds = appendRemovedIds(chatId, previous, removed, at, presentIds)
+    const floorCount = Math.max(snapshot.items.length, Number(options.truth.count || 0))
+    const next = normalize(chatId, { ...snapshot, savedAt: Math.max(Number(snapshot.savedAt || 0), at), done: snapshot.done !== false && snapshot.items.length >= floorCount, reconciledAt: at, truthCount: floorCount, removedIds })
+    next.removedIds = removedIds; next.reconciledAt = at; next.truthCount = floorCount; next.done = snapshot.done !== false && next.items.length >= floorCount
+    committed.set(key, next); hydrateRemovalState(chatId, next); publishShared(chatId, next); setTotalFloor(chatId, floorCount, at); updateCountUi(chatId)
+    const persisted = await writePersistent(chatId, next, options); return { snapshot: next, persisted }
+  }
 
+  async function restore (chatId) {
+    const key = idOf(chatId); const owned = committed.get(key)
+    if (owned) { publishShared(chatId, owned); updateCountUi(chatId); return owned }
+    const disk = await readPersistent(chatId).catch(() => null)
+    if (belongsToChat(chatId, disk)) { hydrateRemovalState(chatId, disk); const next = normalize(chatId, disk); committed.set(key, next); publishShared(chatId, next); updateCountUi(chatId); return next }
+    const shared = sharedSnapshot(chatId); return belongsToChat(chatId, shared) ? commitDiscovery(chatId, shared, { source: 'legacy-shared' }) : null
+  }
+  function mediaItemFromMessage (chatId, message) { if (!message || !message.media) return null; const id = message.media.messageId != null ? message.media.messageId : message.id; return id == null ? null : { ...message.media, messageId: id, chatId } }
+  async function reconcileRecent (chatId, snapshot) {
+    const key = idOf(chatId); if (!snapshot || recentJobs.has(key)) return recentJobs.get(key) || snapshot
+    const job = (async () => {
+      const anchor = snapshot.latestSeenMessageId || snapshot.newestMessageId || newestItemId(snapshot.items); let cursor = 0; let reachedAnchor = false; let latestSeen = snapshot.latestSeenMessageId || 0; const additions = []
+      for (let page = 0; page < RECONCILE_MAX_PAGES && !reachedAnchor; page++) {
+        const data = await request('get-messages', { chatId, fromMessageId: cursor || 0, limit: RECONCILE_PAGE_LIMIT }); const messages = Array.isArray(data && data.messages) ? data.messages : []; if (!messages.length) break
+        if (!latestSeen) latestSeen = messages[0] && messages[0].id || 0
+        for (const message of messages) { if (anchor && compareIds(message.id, anchor) <= 0) { reachedAnchor = true; break }; const item = mediaItemFromMessage(chatId, message); if (item && !idOf(item.messageId).startsWith('-')) additions.push(item) }
+        if (reachedAnchor || !data.hasMore) break; const oldest = messages[messages.length - 1]; const nextCursor = oldest && oldest.id; if (!nextCursor || idOf(nextCursor) === idOf(cursor)) break; cursor = nextCursor
+        if (page % 8 === 7) await new Promise(resolve => setTimeout(resolve, 0))
+      }
+      if (!additions.length && latestSeen === snapshot.latestSeenMessageId) return snapshot
+      return commitDiscovery(chatId, { chatId, items: additions, scanned: snapshot.scanned, latestSeenMessageId: latestSeen || anchor, savedAt: Date.now(), done: snapshot.done !== false }, { source: 'recent' })
+    })().catch(() => snapshot).finally(() => recentJobs.delete(key)); recentJobs.set(key, job); return job
+  }
+  function cancelLegacyFullScan (chatId) { try { Promise.resolve(request('cancel-media-scan-v3', { chatId })).catch(() => {}) } catch {} }
+  function scheduleAutoReconcile (chatId) {
+    if (typeof location === 'undefined') return
+    const key = idOf(chatId); if (!key || autoReconcileTimers.has(key)) return
+    const timer = setTimeout(() => { autoReconcileTimers.delete(key); reconcile(chatId).catch(() => {}) }, 250); if (timer && timer.unref) timer.unref(); autoReconcileTimers.set(key, timer)
+  }
+  async function ensure (chatId, options = {}) {
+    if (chatId == null) return null; const key = idOf(chatId); if (loading.has(key)) return loading.get(key)
+    const task = (async () => {
+      let stable = await restore(chatId)
+      if (stable && isCompleteSnapshot(chatId, stable) && !options.hardRefresh) { cancelLegacyFullScan(chatId); reconcileRecent(chatId, stable).catch(() => {}); scheduleAutoReconcile(chatId); return stable }
+      fullScanJobs.add(key)
+      try {
+        const result = await request('scan-media-v3', { chatId, force: !!options.hardRefresh })
+        if (belongsToChat(chatId, result)) { stable = await commitDiscovery(chatId, { ...result, chatId, savedAt: Number(result.savedAt || Date.now()) }, { source: options.hardRefresh ? 'hard-refresh' : 'scan' }); if (stable) reconcileRecent(chatId, stable).catch(() => {}) }
+      } catch { if (!stable) setLoadStateForChat(chatId, 'File index sync failed. Reopen Files to retry.') } finally { fullScanJobs.delete(key) }
+      scheduleAutoReconcile(chatId); return stable
+    })().finally(() => loading.delete(key)); loading.set(key, task); return task
+  }
+
+  function formatMissing (missing) { const list = (missing || []).map(idOf); return list.length <= TRUTH_MISSING_LOG_LIMIT ? (list.join(',') || '-') : `${list.slice(0, TRUTH_MISSING_LOG_LIMIT).join(',')}…(+${list.length - TRUTH_MISSING_LOG_LIMIT})` }
+  function logReconcile (details) {
+    const missing = Array.isArray(details.missing) ? details.missing.map(idOf) : []
+    const parts = [`chatId=${idOf(details.chatId)}`, `cached=${Number(details.cached || 0)}`, `live=${details.live == null ? 'unknown' : Number(details.live)}`, `missing=${details.live == null ? 'unknown' : `${missing.length}[${formatMissing(missing)}]`}`, `remaining=${Number(details.remaining || 0)}`, `persisted=${details.persisted || 'skipped(reason=unknown)'}`, `truth=${details.truth || 'unknown'}`, `complete=${details.complete === true ? 'true' : 'false'}`, `accessible=${details.accessible === false ? 'false' : details.accessible === true ? 'true' : 'unknown'}`]
+    console.info(`[Files reconcile] ${parts.join(' ')}`, missing)
+  }
+  function clearBackoff (chatId) { const key = idOf(chatId); const current = backoff.get(key); if (current && current.timer) clearTimeout(current.timer); backoff.delete(key) }
+  function scheduleBackoff (chatId) {
+    const key = idOf(chatId); const current = backoff.get(key) || { delay: TRUTH_BACKOFF_START_MS, timer: null }; if (current.timer) return
+    const delay = Math.max(TRUTH_BACKOFF_START_MS, Number(current.delay || TRUTH_BACKOFF_START_MS)); const timer = setTimeout(() => { const next = backoff.get(key); if (next) next.timer = null; reconcile(chatId, { force: true }).catch(() => {}) }, delay)
+    if (timer && timer.unref) timer.unref(); backoff.set(key, { delay: Math.min(TRUTH_BACKOFF_MAX_MS, current.delay * 2), timer })
+  }
+  async function recoverLiveMetadata (chatId, key, current, liveIds) {
+    let knownIds = new Set(current.items.map(item => idOf(item.messageId)))
+    let missingMetadata = [...liveIds].filter(id => !knownIds.has(id))
+    if (!missingMetadata.length) return { current, missingMetadata }
+
+    fullScanJobs.add(key)
+    try {
+      const scan = await request('scan-media-v3', { chatId, force: true })
+      if (belongsToChat(chatId, scan)) await commitDiscovery(chatId, { ...scan, chatId, savedAt: Number(scan.savedAt || Date.now()) }, { source: 'truth-metadata-recovery' })
+    } catch {}
+    finally { fullScanJobs.delete(key) }
+
+    const refreshed = committed.get(key) || current
+    knownIds = new Set(refreshed.items.map(item => idOf(item.messageId)))
+    missingMetadata = [...liveIds].filter(id => !knownIds.has(id))
+    return { current: refreshed, missingMetadata }
+  }
+  async function reconcile (chatId, options = {}) {
+    if (chatId == null) return { status: 'skipped', reason: 'no-chat' }; const key = idOf(chatId)
+    if (fullScanJobs.has(key) || progressInFlight.has(key) || candidates.has(key)) return { status: 'skipped', reason: 'scan-in-flight' }
+    if (reconcileJobs.has(key)) return reconcileJobs.get(key)
+    const last = Number(lastTruthPass.get(key) || 0); if (!options.force && last && Date.now() - last < TRUTH_THROTTLE_MS) return { status: 'skipped', reason: 'throttled' }
+    const job = (async () => {
+      let current = await restore(chatId); if (!current) return { status: 'skipped', reason: 'no-index' }; lastTruthPass.set(key, Date.now())
+      let truth = null
+      try { truth = await request('media-truth-v1', { chatId }) } catch (error) { truth = { ok: false, complete: false, accessible: true, error: String(error && error.message ? error.message : error), source: 'request' } }
+      if (!(truth && truth.complete && truth.accessible !== false)) {
+        scheduleBackoff(chatId); setLoadStateForChat(chatId, 'Could not verify against Telegram. Retrying automatically.')
+        logReconcile({ chatId, cached: current.items.length, live: null, missing: [], remaining: current.items.length, persisted: `skipped(reason=${truth && truth.error ? 'truth-error' : truth && truth.accessible === false ? 'chat-inaccessible' : 'truth-incomplete'})`, truth: truth && truth.source || 'unknown', complete: !!(truth && truth.complete), accessible: truth && truth.accessible })
+        return { status: 'unknown', reason: truth && truth.error ? 'truth-error' : 'truth-incomplete' }
+      }
+
+      const rawIds = Array.isArray(truth.ids) ? truth.ids.map(idOf).filter(id => /^\d+$/.test(id)) : []
+      const liveIds = new Set(rawIds)
+      const reportedCount = Number(truth.count)
+      if (!Number.isSafeInteger(reportedCount) || reportedCount < 0 || reportedCount !== liveIds.size || rawIds.length !== liveIds.size) {
+        scheduleBackoff(chatId); setLoadStateForChat(chatId, 'Telegram file truth was inconsistent. Retrying automatically.')
+        logReconcile({ chatId, cached: current.items.length, live: Number.isFinite(reportedCount) ? reportedCount : null, missing: [], remaining: current.items.length, persisted: 'skipped(reason=truth-inconsistent)', truth: truth.source || 'unknown', complete: true, accessible: true })
+        return { status: 'unknown', reason: 'truth-inconsistent' }
+      }
+
+      /* A complete truth ID set is allowed to remove stale rows only after the
+       * owner also has metadata for every live ID. If the browser index is partial,
+       * pruning immediately would turn "100 cached / 120 live" into an even smaller
+       * intersection. Recovery runs through the normal full scanner, but stays
+       * discovery-only and therefore cannot lower the current index. */
+      const recovery = await recoverLiveMetadata(chatId, key, current, liveIds)
+      current = recovery.current
+      if (recovery.missingMetadata.length) {
+        const incompleteAt = Date.now()
+        const partial = await commitAuthoritative(chatId, { ...current, done: false, truthCount: reportedCount, savedAt: incompleteAt }, {
+          at: incompleteAt,
+          truth: { count: reportedCount },
+          presentIds: new Set(current.items.map(item => idOf(item.messageId))),
+          removedIds: []
+        })
+        current = partial.snapshot || current
+        const persisted = partial.persisted && partial.persisted.written ? 'written' : `skipped(reason=${partial.persisted && partial.persisted.reason || 'unknown'})`
+        scheduleBackoff(chatId); setLoadStateForChat(chatId, 'File metadata is incomplete. Retrying automatically.')
+        logReconcile({ chatId, cached: current.items.length, live: liveIds.size, missing: [], remaining: current.items.length, persisted, truth: truth.source || 'unknown', complete: true, accessible: true })
+        return { status: 'unchanged', reason: 'metadata-incomplete', missingMetadata: recovery.missingMetadata.length }
+      }
+
+      clearBackoff(chatId)
+      const missing = current.items.filter(item => !liveIds.has(idOf(item.messageId))).map(item => idOf(item.messageId))
+      const remainingItems = current.items.filter(item => liveIds.has(idOf(item.messageId)))
+      const at = Date.now()
+      const result = await commitAuthoritative(chatId, { ...current, items: remainingItems, savedAt: at, done: remainingItems.length === reportedCount }, { at, truth: { ...truth, count: reportedCount }, presentIds: liveIds, removedIds: missing })
+      const next = result.snapshot; const persisted = result.persisted && result.persisted.written ? 'written' : `skipped(reason=${result.persisted && result.persisted.reason || 'unknown'})`
+      logReconcile({ chatId, cached: current.items.length, live: reportedCount, missing, remaining: next.items.length, persisted, truth: truth.source || 'unknown', complete: true, accessible: true })
+      if (isActiveChat(chatId) && state.view === 'files') setLoadStateForChat(chatId, `Loaded ${next.items.length.toLocaleString()} indexed files`)
+      return { status: missing.length ? 'pruned' : 'unchanged', missing: missing.length, remaining: next.items.length }
+    })().finally(() => reconcileJobs.delete(key)); reconcileJobs.set(key, job); return job
+  }
+
+  async function mergeRealtimeUpsert (chatId, message) {
+    const item = mediaItemFromMessage(chatId, message); if (!item || idOf(item.messageId).startsWith('-')) return
+    const removedIds = currentRemovalMeta(chatId).removedIds
+    if (removedIds.has(idOf(item.messageId))) return
+    await restore(chatId); await commitDiscovery(chatId, { chatId, items: [item], scanned: 1, latestSeenMessageId: item.messageId, savedAt: Date.now(), done: true }, { source: 'realtime-upsert' })
+  }
+  function handleRealtimeDelete (event) {
+    const payload = event && (event.payload || event) || {}; const chatId = payload.chatId != null ? payload.chatId : event && event.chatId; const permanent = payload.isPermanent === true || payload.is_permanent === true; const fromCache = payload.fromCache === true || payload.from_cache === true
+    if (!permanent || fromCache) return
+    const ids = (payload.messageIds || payload.message_ids || event && event.messageIds || []).map(idOf); if (chatId == null || !ids.length) return
+    Promise.resolve(restore(chatId)).then(async previous => {
+      if (!previous) return; const gone = new Set(ids); const nextItems = previous.items.filter(item => !gone.has(idOf(item.messageId))); if (nextItems.length === previous.items.length) return
+      const truthCount = Math.max(nextItems.length, Number(previous.truthCount || previous.items.length) - (previous.items.length - nextItems.length))
+      await commitAuthoritative(chatId, { ...previous, items: nextItems, savedAt: Date.now(), done: previous.done !== false }, { at: Date.now(), truth: { count: truthCount }, presentIds: new Set(nextItems.map(item => idOf(item.messageId))), removedIds: ids })
+    }).catch(() => {})
+  }
+  function retireTemporary (chatId, ids) {
+    if (chatId == null) return Promise.resolve(null); const explicit = Array.isArray(ids) && ids.length ? new Set(ids.map(idOf)) : null
+    return Promise.resolve(restore(chatId)).then(async previous => {
+      if (!previous) return null; const nextItems = previous.items.filter(item => explicit ? !explicit.has(idOf(item.messageId)) : !idOf(item.messageId).startsWith('-')); if (nextItems.length === previous.items.length) return previous
+      const result = await commitAuthoritative(chatId, { ...previous, items: nextItems, savedAt: Date.now(), done: previous.done !== false }, { at: Date.now(), truth: { count: Math.max(0, Number(previous.truthCount || previous.items.length) - (previous.items.length - nextItems.length)) }, presentIds: new Set(nextItems.map(item => idOf(item.messageId))), removedIds: [] }); return result.snapshot
+    })
+  }
+  async function hardRefresh (chatId) { clearTotalFloor(chatId); const snapshot = await ensure(chatId, { hardRefresh: true }); await reconcile(chatId, { force: true }); return committed.get(idOf(chatId)) || snapshot || null }
+
+  function flushProgress (chatId, done) { const key = idOf(chatId); const c = candidates.get(key); if (!c) { if (done) progressInFlight.delete(key); return }; if (done) c.done = c.done && c.historyComplete !== false; if (c.items.length) commitDiscovery(chatId, c, { source: 'progress' }).catch(() => {}); candidates.delete(key); if (done) progressInFlight.delete(key) }
+  function scheduleProgressFlush (chatId) { const key = idOf(chatId); if (flushTimers.has(key)) return; flushTimers.set(key, setTimeout(() => { flushTimers.delete(key); flushProgress(chatId, false) }, PROGRESS_FLUSH_MS)) }
+  function mergeProgress (payload) {
+    if (!payload || payload.chatId == null) return; const chatId = payload.chatId; const key = idOf(chatId); const stable = committed.get(key); if (payload.done) progressInFlight.delete(key); else progressInFlight.add(key)
+    if (!fullScanJobs.has(key) && isCompleteSnapshot(chatId, stable) && stable.items.length) { if (flushTimers.has(key)) clearTimeout(flushTimers.get(key)); flushTimers.delete(key); candidates.delete(key); return }
+    let c = candidates.get(key); if (!c) c = { chatId, items: [], scanned: 0, savedAt: Date.now(), done: false, historyComplete: false }
+    if (Array.isArray(payload.items) && payload.items.length) c.items.push(...payload.items); c.scanned = Math.max(Number(c.scanned || 0), Number(payload.scanned || 0)); c.savedAt = Date.now(); c.done = !!payload.done; c.historyComplete = !!payload.historyComplete; candidates.set(key, c)
+    if (c.items.length >= PROGRESS_FLUSH_ITEMS || payload.done) { if (flushTimers.has(key)) clearTimeout(flushTimers.get(key)); flushTimers.delete(key); flushProgress(chatId, !!payload.done) } else scheduleProgressFlush(chatId)
+  }
+
+  function installCompatibilityOwners () {
+    ownCountLabel(); try { rescueEnsureAllFiles = ensure } catch {}
+    try { rescueApplyCompleteFiles = function fileGramApplyFilesMetadataOnly (chatId) { const owned = committed.get(idOf(chatId)); if (owned) paint(chatId, owned); if (state) state.hasMore = state.hasMore !== false } } catch {}
+    try { filesItems = function fileGramStableFilesItems () { let list = state.files.mode === 'search' ? (state.files.results || []).slice() : ((committed.get(idOf(state.activeChatId)) || {}).items || []); const q = String(state.files.query || '').trim().toLowerCase(); const filtered = q || state.files.filter !== 'all'; if (q) list = list.filter(item => String(item.name || '').toLowerCase().includes(q) || String(item.caption || '').toLowerCase().includes(q)); if (state.files.filter !== 'all') list = list.filter(item => item.type === state.files.filter); if (state.files.sort === 'oldest') return list.slice().reverse(); if (state.files.sort === 'name') return list.slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))); if (state.files.sort === 'size') return list.slice().sort((a, b) => Number(b.fileSize || 0) - Number(a.fileSize || 0)); if (state.files.mode === 'search' && !filtered) return list.slice().sort((a, b) => compareIds(b.messageId, a.messageId)); return list } } catch {}
+  }
+  function installEventOwner () {
+    try {
+      if (typeof handleEvent !== 'function' || handleEvent === ownerHandleEvent) return; const baseHandleEvent = handleEvent
+      const wrapped = function fileGramStableHandleEvent (event) {
+        if (!event) return baseHandleEvent(event); const seen = typeof event === 'object' && handledEvents.has(event)
+        if (event.name === 'media-index-progress') { if (seen) return baseHandleEvent(event); handledEvents.add(event); mergeProgress(event.payload || {}); return }
+        if (!seen && typeof event === 'object') handledEvents.add(event); const result = baseHandleEvent(event)
+        if (!seen && event.name === 'message-delete') handleRealtimeDelete(event)
+        if (!seen && event.name === 'message-upsert') { const payload = event.payload || event; const chatId = payload.chatId != null ? payload.chatId : event.chatId; const message = payload.message || event.message; if (chatId != null && message) mergeRealtimeUpsert(chatId, message).catch(() => {}) }
+        return result
+      }
+      wrapped.__fileGramFilesOwner = true; ownerHandleEvent = wrapped; handleEvent = wrapped
+    } catch {}
+  }
+  function installOpenChatOwner () {
+    try { if (typeof openChat !== 'function' || openChat.__fileGramFilesOwner) return; const base = openChat; const wrapped = async function fileGramStableOpenChat (chatId) { const result = await base(chatId); ensure(chatId).then(() => scheduleAutoReconcile(chatId)).catch(() => {}); return result }; wrapped.__fileGramFilesOwner = true; openChat = wrapped } catch {}
+  }
+  function installRuntimeOwnership () { installCompatibilityOwners(); installEventOwner(); installOpenChatOwner() }
+
+  migrateLegacyReconcileMark(); installRuntimeOwnership()
   window.teleFilesIndex = {
     ensure,
-    count: chatId => {
-      const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
-      return snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0
-    },
-    /* THE source of truth for the Files list.
-     *
-     * Everything that shows a total must read this, so the header, Download all,
-     * Select all and the pager cannot disagree. Reading rescueFileCache directly
-     * is what let them diverge: legacy layers still write that cache, so the list
-     * could show 21,045 while the header showed 22,479. */
-    snapshot: chatId => committed.get(idOf(chatId)) || sharedSnapshot(chatId) || null,
-    // Alias kept for callers that only want the number.
-    total: chatId => {
-      const snapshot = committed.get(idOf(chatId)) || sharedSnapshot(chatId)
-      return snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0
-    },
-    // An explicit hard refresh is the one operation allowed to lower the total,
-    // so it drops the floor first and rebuilds from the scan.
-    hardRefresh: chatId => {
-      clearTotalFloor(chatId)
-      return ensure(chatId, { hardRefresh: true })
-    }
+    count: chatId => { const snapshot = committed.get(idOf(chatId)); return snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0 },
+    snapshot: chatId => cloneSnapshot(committed.get(idOf(chatId)) || null),
+    total: chatId => { const snapshot = committed.get(idOf(chatId)); return snapshot && Array.isArray(snapshot.items) ? snapshot.items.length : 0 },
+    reconcile,
+    retireTemporary,
+    hardRefresh
   }
+  setTimeout(() => { installRuntimeOwnership(); try { if (state && state.activeChatId != null) ensure(state.activeChatId).catch(() => {}) } catch {} }, 0)
 })()

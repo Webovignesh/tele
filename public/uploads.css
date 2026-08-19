@@ -1,0 +1,87 @@
+/* FileGram bulk uploads. Isolated to .fg-up-* so it cannot disturb Files/Messages. */
+#mg-uploads-pane{min-height:0;overflow-y:auto;overflow-x:hidden;padding:0 14px 18px}
+/* The drawer is a three-tab surface now: Downloads | Uploads | Chat Info. Keep
+   all three in one row at every supported desktop width instead of inheriting
+   the old two-column management grid and wrapping Chat Info onto a second line. */
+.mg-drawer-tabs{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:0!important;padding:0 12px!important}
+.mg-drawer-tabs .mg-drawer-tab{min-width:0!important;width:auto!important;white-space:nowrap!important}
+.mg-drawer-tabs .fg-up-tab{gap:7px}
+.fg-up-tab-icon{display:inline-flex;width:16px;height:16px;align-items:center;justify-content:center}
+.fg-up-tab-icon svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.fg-up-pane{color:var(--fg-text,#eef5ff)}
+.fg-up-section{padding:16px 0;border-bottom:1px solid var(--fg-border,#203147)}
+.fg-up-destination{padding-top:14px}
+.fg-up-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px;color:var(--fg-text-muted,#8ea2ba);font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+.fg-up-section-head small{font-size:10px;font-weight:600;letter-spacing:0;text-transform:none;color:var(--fg-success,#35d07f)}
+#fg-upload-channel{width:100%;height:40px;background:var(--fg-surface-2,#111d2b);border:1px solid var(--fg-border,#203147);color:var(--fg-text,#eef5ff);border-radius:8px;padding:0 10px}
+.fg-up-note{margin-top:7px;color:var(--fg-text-muted,#8298b1);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Captioning was removed from the product. This rule also hides the element for
+   a single paint on cached markup until uploads-hardening removes it from DOM. */
+.fg-up-caption{display:none!important}
+.fg-up-add-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.fg-up-add-row button{height:38px}
+/* Explicit rows/min-heights prevent legacy section/card rules from collapsing
+   the aggregate stats to the label strip during queue updates. */
+.fg-up-stats{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;grid-template-rows:minmax(64px,auto) minmax(54px,auto)!important;grid-auto-rows:auto!important;align-items:stretch!important;min-height:120px!important;height:auto!important;margin:14px 0 0;border:1px solid var(--fg-border,#203147);border-radius:10px;background:var(--fg-surface-1,#0e1824);overflow:hidden!important;box-sizing:border-box!important}
+.fg-up-stat{display:grid!important;grid-template-rows:auto auto;align-content:center;gap:5px;padding:11px 10px;min-width:0;min-height:64px!important;height:auto!important;overflow:visible!important}
+.fg-up-stat:not(:nth-child(3)){border-right:1px solid var(--fg-border,#203147)}
+.fg-up-stat span{display:block!important;font-size:9px;line-height:1.25!important;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-text-muted,#8298b1)}
+.fg-up-stat strong{display:block!important;font-size:15px;line-height:1.25!important;color:var(--fg-text,#eef5ff);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#fg-upload-speed{color:var(--fg-accent,#4fa8ff)}
+#fg-upload-completed{color:var(--fg-success,#35d07f)}
+#fg-upload-remaining{color:#bd72ff}
+.fg-up-total{display:grid!important;grid-column:1/-1!important;align-content:center!important;min-height:54px!important;height:auto!important;border-top:1px solid var(--fg-border,#203147);border-right:0!important;padding:10px 10px 11px!important;overflow:visible!important}
+.fg-up-total strong{font-size:13px;line-height:1.3!important}
+.fg-up-range{width:100%;height:20px;margin:0;accent-color:var(--fg-accent,#4fa8ff)}
+.fg-up-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:16px 0;border-bottom:1px solid var(--fg-border,#203147)}
+.fg-up-actions button{height:40px}
+.fg-up-clear-all{grid-column:1/-1}
+.fg-up-queue{padding-top:14px;min-height:160px}
+.fg-up-queue-head{display:flex;justify-content:space-between;gap:10px;margin-bottom:9px;color:var(--fg-text-muted,#8298b1);font-size:10px;font-variant-numeric:tabular-nums}
+.fg-up-list{display:grid;gap:6px}
+.fg-up-job{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:9px;padding:9px 9px 9px 10px;border:1px solid var(--fg-border,#203147);border-radius:8px;background:var(--fg-surface-1,#0e1824);min-width:0}
+.fg-up-job-main{min-width:0}
+.fg-up-job-name{font-size:11px;font-weight:650;color:var(--fg-text,#eef5ff);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fg-up-job-meta{margin-top:3px;font-size:9px;color:var(--fg-text-muted,#8298b1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fg-up-progress{height:3px;margin-top:7px;background:var(--fg-surface-3,#1b2a3c);border-radius:99px;overflow:hidden}
+.fg-up-progress span{display:block;height:100%;background:var(--fg-accent,#4fa8ff);border-radius:inherit;transition:width .15s linear}
+.fg-up-job.is-completed .fg-up-progress span{background:var(--fg-success,#35d07f)}
+.fg-up-job.is-failed .fg-up-progress span,.fg-up-job.is-cancelled .fg-up-progress span{background:var(--fg-danger,#ef5965)}
+.fg-up-job-status{max-width:92px;font-size:9px;color:var(--fg-text-muted,#8298b1);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fg-up-job-actions{display:flex;gap:4px;align-items:center}
+.fg-up-job-actions button{height:26px;min-width:0;padding:0 7px;font-size:9px}
+.fg-up-job-error{margin-top:5px;color:var(--fg-danger,#ef5965);font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fg-up-pager{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px 0 4px;color:var(--fg-text-muted,#8298b1);font-size:10px}
+.fg-up-pager button{height:30px}
+.fg-up-modal{position:fixed;inset:0;z-index:10020;display:flex;align-items:center;justify-content:center;padding:22px;background:rgba(2,7,14,.72);backdrop-filter:blur(2px)}
+.fg-up-modal.hidden{display:none!important}
+.fg-up-review{width:min(760px,calc(100vw - 40px));max-height:min(760px,calc(100vh - 40px));display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--fg-border-strong,#2b4058);border-radius:12px;background:var(--fg-surface-1,#0d1723);box-shadow:0 24px 70px rgba(0,0,0,.42)}
+.fg-up-review-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;padding:18px 20px 14px;border-bottom:1px solid var(--fg-border,#203147)}
+.fg-up-review-head h3{margin:3px 0 0;font-size:17px;line-height:1.3}
+.fg-up-kicker{color:var(--fg-accent,#4fa8ff);font-size:9px;font-weight:750;letter-spacing:.09em;text-transform:uppercase}
+.fg-up-review-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin:14px 20px 0;border:1px solid var(--fg-border,#203147);border-radius:9px;overflow:hidden}
+.fg-up-review-stats>div{display:grid;gap:4px;padding:11px 12px;border-right:1px solid var(--fg-border,#203147)}
+.fg-up-review-stats>div:last-child{border-right:0}
+.fg-up-review-stats span{font-size:9px;color:var(--fg-text-muted,#8298b1);text-transform:uppercase;letter-spacing:.06em}
+.fg-up-review-stats strong{font-size:13px;font-variant-numeric:tabular-nums}
+.fg-up-review-duplicates{min-height:110px;max-height:360px;overflow:auto;margin:14px 20px 0;border:1px solid var(--fg-border,#203147);border-radius:9px;background:var(--fg-surface-0,#09131e)}
+.fg-up-review-clean{padding:28px 16px;text-align:center;color:var(--fg-success,#35d07f);font-size:12px}
+.fg-up-review-duplicate-summary{padding:10px 12px;border-bottom:1px solid var(--fg-border,#203147);font-size:10px;color:#efbd64}
+.fg-up-review-row{display:grid;gap:3px;padding:9px 12px;border-bottom:1px solid rgba(32,49,71,.7)}
+.fg-up-review-row:last-child{border-bottom:0}
+.fg-up-review-row strong{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fg-up-review-row span,.fg-up-review-more{font-size:9px;color:var(--fg-text-muted,#8298b1)}
+.fg-up-review-more{padding:10px 12px;text-align:center}
+.fg-up-review-note{margin:11px 20px 0;color:var(--fg-text-muted,#8298b1);font-size:10px;line-height:1.45}
+.fg-up-review-actions{display:flex;justify-content:flex-end;gap:8px;padding:15px 20px 18px}
+.fg-up-review-actions button{height:38px}
+
+/* Final drawer spacing contract. uploads.css is deliberately loaded after the
+   core FileGram stylesheet so these narrow rules can stabilize both drawer
+   surfaces without touching Files/Messages layout or queue logic. */
+.downloads .fg-save-to{display:grid!important;width:100%!important;min-height:58px!important;margin:0 0 18px!important;padding:10px 12px!important}
+.downloads .conc{display:grid!important;gap:10px!important;margin:0!important;padding:18px 0 0!important;border-top:1px solid var(--fg-border,#203147)!important}
+.downloads .conc>.row{margin:0!important;min-height:24px!important;align-items:center!important}
+#mg-uploads-pane .fg-up-section{overflow:visible!important}
+
+@media(max-width:1150px){.fg-up-job{grid-template-columns:minmax(0,1fr) auto}.fg-up-job-status{grid-column:2}.fg-up-job-actions{grid-column:1/-1;justify-content:flex-end}.fg-up-review-stats{grid-template-columns:1fr 1fr}.fg-up-review-stats>div:nth-child(2){border-right:0}.fg-up-review-stats>div:nth-child(-n+2){border-bottom:1px solid var(--fg-border,#203147)}}
