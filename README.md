@@ -22,7 +22,7 @@ Double-click **`Uninstall FileGram.cmd`** to stop the local server and remove th
 
 ### Post-release repository cleanup
 
-After the v1.0.0 squash merge is on `main`, double-click **`Clean Repo After Release.cmd`** once. It refuses to run on a dirty working tree, fast-forwards local `main`, removes only the known disposable release branches, prunes Git refs, and clears test-report directories. It deliberately keeps `agent/saas-foundation` because that branch contains unique unmerged SaaS work.
+After the v1.0.0 squash merge is on `main`, double-click **`Clean Repo After Release.cmd`** once. It refuses to run on a dirty working tree, fast-forwards local `main`, removes the known disposable release/development branches (including the retired `agent/saas-foundation` experiment), prunes Git refs, and clears test-report directories.
 
 The cleanup script never deletes `.td_database/`, `.td_files/`, `.filegram_state/`, downloads, `config.json`, or `settings.json`.
 

@@ -5,7 +5,8 @@ $ExpectedReleaseTitle = 'release: FileGram v1.0.0 local'
 $DisposableBranches = @(
   'feature/bulk-channel-uploads',
   'backup/claude-bf455-20260819',
-  'rescue/legacy-modernization'
+  'rescue/legacy-modernization',
+  'agent/saas-foundation'
 )
 
 Push-Location $Root
@@ -53,7 +54,7 @@ try {
 
   Write-Host ''
   Write-Host 'Repository cleanup complete.' -ForegroundColor Green
-  Write-Host 'Kept main and agent/saas-foundation. The SaaS branch has unique unmerged work and was intentionally preserved.'
+  Write-Host 'Kept main and removed the known disposable development/release branches, including the retired SaaS experiment.'
   Write-Host 'Preserved .td_database, .td_files, .filegram_state, downloads, config.json and settings.json.'
 } finally {
   Pop-Location
