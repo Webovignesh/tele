@@ -40,6 +40,7 @@ Thumbs.db
 *.swo
 .vscode/
 .idea/
+.kiro/
 
 # Playwright / diagnostic output
 # These entries were previously written in UTF-16, so git could not match them

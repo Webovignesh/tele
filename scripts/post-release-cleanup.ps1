@@ -25,9 +25,9 @@ try {
   git pull --ff-only origin main
   if ($LASTEXITCODE -ne 0) { throw 'Could not fast-forward local main to origin/main.' }
 
-  $title = (git log -1 --pretty=%s origin/main).Trim()
-  if ($title -ne $ExpectedReleaseTitle) {
-    throw "origin/main is not the expected FileGram v1.0.0 release commit. Found: $title"
+  $releaseCommit = @(git log --format='%H%x09%s' origin/main | Select-String -SimpleMatch $ExpectedReleaseTitle | Select-Object -First 1)
+  if ($releaseCommit.Count -eq 0) {
+    throw "origin/main does not contain the expected FileGram v1.0.0 release commit: $ExpectedReleaseTitle"
   }
 
   foreach ($branch in $DisposableBranches) {
