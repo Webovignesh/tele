@@ -14,9 +14,7 @@
 
   const POLL_MS = 1000
   const MAX_RECOVERY_MS = 35 * 60 * 1000
-  const SPEED_SAMPLE_MS = 500
   const recoveries = new Map()
-  const speedSamples = new Map()
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
   const activeServerStates = new Set(['receiving', 'staged', 'sending', 'uncertain'])
@@ -38,6 +36,34 @@
 
   function changed (queue, type, job) {
     try { queue.changed(type, job) } catch {}
+  }
+
+  function paintTransferPhase (queue) {
+    const value = document.querySelector('#fg-upload-speed')
+    if (!value || !queue) return
+    const label = value.closest('.fg-up-stat')?.querySelector('span')
+    if (label) label.textContent = 'Status'
+
+    const jobs = [...queue.jobs.values()]
+    const staging = jobs.filter(job => job.status === 'uploading' && Number(job.progress || 0) < 1)
+    const telegram = jobs.filter(job => job.status === 'uploading' && Number(job.progress || 0) >= 1)
+    const verifying = jobs.filter(job => job.status === 'verifying')
+    const retrying = jobs.filter(job => job.status === 'retrying')
+
+    if (staging.length) {
+      const percent = Math.round(staging.reduce((sum, job) => sum + Math.max(0, Math.min(1, Number(job.progress || 0))), 0) / staging.length * 100)
+      value.textContent = `Staging ${percent}%`
+      return
+    }
+    if (telegram.length) {
+      const oldest = Math.min(...telegram.map(job => Number(job.attemptStartedAt || job.startedAt || Date.now())))
+      const seconds = Math.max(0, Math.floor((Date.now() - oldest) / 1000))
+      value.textContent = `Telegram ${seconds}s`
+      return
+    }
+    if (verifying.length) { value.textContent = 'Verifying…'; return }
+    if (retrying.length) { value.textContent = 'Retrying…'; return }
+    value.textContent = 'Idle'
   }
 
   function completeRecovered (queue, job, status) {
@@ -69,6 +95,14 @@
 
   function stopRecovery (jobId) {
     recoveries.delete(String(jobId))
+  }
+
+  async function verifyExistingDelivery (queue, current, status) {
+    if (typeof queue.verifyDelivery !== 'function') return false
+    let delivered = false
+    try { delivered = !!(await queue.verifyDelivery(current)) } catch {}
+    if (delivered) completeRecovered(queue, current, status)
+    return delivered
   }
 
   async function recoverJob (queue, job, fallbackStatus) {
@@ -104,45 +138,37 @@
         }
 
         if (status && status.exists && activeServerStates.has(String(status.status || ''))) {
-          /* An uncertain ledger record may already have reached Telegram even if
-           * the original response disappeared. Reuse the existing exact
-           * filename/size verification before asking for source access. */
-          if (status.status === 'uncertain' && typeof queue.verifyDelivery === 'function') {
-            let delivered = false
-            try { delivered = !!(await queue.verifyDelivery(current)) } catch {}
-            if (delivered) {
-              completeRecovered(queue, current, status)
-              return
-            }
+          /* If the process that owned the send disappeared, a stale 'sending'
+           * ledger record must not strand the browser in Verifying for 35 minutes.
+           * First look for the exact filename+size on Telegram; if it is not there,
+           * fall back to the browser source so the normal retry path can continue. */
+          if (status.status === 'uncertain' || status.active === false) {
+            if (await verifyExistingDelivery(queue, current, status)) return
+            if (status.active === false && status.status !== 'uncertain') break
           }
           setVerifying(queue, current)
           await sleep(POLL_MS)
           continue
         }
 
-        /* The server has no recoverable staged/send state. Fall back to the
-         * browser source contract. If the persisted handle still has permission,
-         * normal resume proceeds automatically; otherwise the existing Locate UI
-         * is the truthful final state. */
-        current.status = fallbackStatus === 'queued' ? 'queued' : 'needs_access'
-        current.speed = 0
-        current.error = current.status === 'needs_access'
-          ? 'Source access is required because the browser refreshed before FileGram finished staging this file'
-          : null
-        current.updatedAt = Date.now()
-        changed(queue, current.status === 'queued' ? 'resume' : 'needs-access', current)
-        if (current.status === 'queued') queue.pump()
-        return
+        break
       }
 
       const current = queue.jobs.get(id)
-      if (current && current.status === 'verifying') {
-        current.status = 'needs_access'
-        current.speed = 0
-        current.error = 'Could not confirm the interrupted upload. Locate the source file to resume safely.'
-        current.updatedAt = Date.now()
-        changed(queue, 'needs-access', current)
-      }
+      if (!current || ['completed', 'cancelled', 'paused'].includes(current.status)) return
+
+      /* The server has no recoverable staged/send state. Fall back to the browser
+       * source contract. If the persisted handle still has permission, normal
+       * resume proceeds automatically; otherwise Locate is the truthful final
+       * state because FileGram never retained a complete source copy. */
+      current.status = fallbackStatus === 'queued' ? 'queued' : 'needs_access'
+      current.speed = 0
+      current.error = current.status === 'needs_access'
+        ? 'Source access is required because the browser refreshed before FileGram finished staging this file'
+        : null
+      current.updatedAt = Date.now()
+      changed(queue, current.status === 'queued' ? 'resume' : 'needs-access', current)
+      if (current.status === 'queued') queue.pump()
     })().finally(() => stopRecovery(id))
 
     recoveries.set(id, work)
@@ -162,40 +188,23 @@
 
     const baseProgress = queue.progress.bind(queue)
     queue.progress = function fileGramStableUploadProgress (job, loaded, total) {
-      const now = Date.now()
-      const id = String(job && job.id || '')
-      let sample = speedSamples.get(id)
-      if (!sample) {
-        sample = { at: now, bytes: Math.max(0, Number(loaded || 0)) }
-        speedSamples.set(id, sample)
-      }
-
       baseProgress(job, loaded, total)
       if (!job) return
 
+      /* Never surface browser -> localhost throughput as Telegram network speed.
+       * Loopback routinely reports hundreds of MB/s, then freezes at that number
+       * while TDLib performs the real upload. The status tile instead shows the
+       * truthful phase (Staging / Telegram / Verifying) below. */
+      job.speed = 0
       const bytes = Math.max(0, Number(loaded || 0))
       const max = Math.max(bytes, Number(total || 0), Number(job.size || 0))
       if (max > 0 && bytes >= max) {
-        /* The browser -> FileGram copy is finished. TDLib may still be uploading
-         * for seconds/minutes, so never leave the last loopback sample displayed
-         * as if Telegram were receiving at hundreds of MB/s. */
         job.progress = 1
         job.uploadedBytes = max
         job.totalBytes = max
-        job.speed = 0
-        speedSamples.delete(id)
         changed(this, 'staged', job)
-        return
       }
-
-      const elapsed = now - sample.at
-      if (elapsed < SPEED_SAMPLE_MS) {
-        job.speed = 0
-        return
-      }
-      const delta = Math.max(0, bytes - sample.bytes)
-      job.speed = elapsed > 0 ? delta * 1000 / elapsed : 0
-      speedSamples.set(id, { at: now, bytes })
+      queueMicrotask(() => paintTransferPhase(this))
     }
 
     const baseCancel = queue.cancel.bind(queue)
@@ -207,7 +216,6 @@
     const baseClearAll = queue.clearAll.bind(queue)
     queue.clearAll = function fileGramReliableClearAll () {
       recoveries.clear()
-      speedSamples.clear()
       return baseClearAll()
     }
 
@@ -228,8 +236,17 @@
           if (shouldRecover(live)) recoverJob(this, live, live.handle ? 'queued' : 'needs_access').catch(() => {})
         }
       }
+      queueMicrotask(() => paintTransferPhase(this))
       return result
     }
+
+    /* Keep the second phase visibly alive even when TDLib is sending and no XHR
+     * upload progress events remain. This replaces the misleading frozen MB/s
+     * value with an elapsed Telegram phase timer. */
+    const phaseTimer = setInterval(() => {
+      if (!document.documentElement.isConnected) return clearInterval(phaseTimer)
+      paintTransferPhase(queue)
+    }, 1000)
 
     window.__fileGramUploadRecovery = {
       recover: id => {
@@ -238,6 +255,7 @@
       },
       status: readServerStatus
     }
+    queueMicrotask(() => paintTransferPhase(queue))
     return true
   }
 
