@@ -24,6 +24,11 @@ if (-not $node -or -not $npm) {
   throw 'Node.js/npm is required. Install Node.js first, then run Install FileGram.cmd again.'
 }
 
+# A developer may still have `npm start` running. Stop only the FileGram process
+# identified by its local health endpoint before npm ci replaces node_modules.
+& $StopScript
+Start-Sleep -Milliseconds 500
+
 Push-Location $Root
 try {
   Write-Host 'Preparing FileGram local release dependencies...'
