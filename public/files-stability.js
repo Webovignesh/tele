@@ -206,8 +206,15 @@
     if (!belongsToChat(chatId, snapshot) || snapshot.done === false || !Array.isArray(snapshot.items)) return false
     return snapshot.items.length >= totalFloor(chatId) || floorAwareComplete(chatId, snapshot)
   }
+  function isActiveChat (chatId) {
+    try { return !!state && state.activeChatId != null && idOf(state.activeChatId) === idOf(chatId) } catch { return false }
+  }
+  function setLoadStateForChat (chatId, text) {
+    if (!isActiveChat(chatId)) return false
+    try { if (typeof setLoadState === 'function') setLoadState(text); return true } catch { return false }
+  }
   function paint (chatId, snapshot) {
-    if (!state || state.activeChatId == null || idOf(state.activeChatId) !== idOf(chatId)) return
+    if (!isActiveChat(chatId)) return
     const total = snapshot.items.length; state.mediaCount = total; state.typeCounts = snapshot.typeCounts || {}
     const label = document.querySelector('#chat-media-count'); if (label) label.textContent = `${total.toLocaleString()} file${total === 1 ? '' : 's'}`
     const all = document.querySelector('#download-all-media'); if (all) { all.textContent = `Download all media (${total.toLocaleString()})`; all.disabled = total === 0 }
@@ -223,7 +230,7 @@
     const key = idOf(chatId); if (repairAttempts.has(key)) return
     const floor = readTotalFloor(chatId); if (!floor || snapshot.items.length >= floor.count) return
     const reconciledAt = Number(snapshot.reconciledAt || 0); if (floor.at <= reconciledAt) return
-    repairAttempts.add(key); try { setLoadState(`Repairing index (${snapshot.items.length.toLocaleString()} of ${floor.count.toLocaleString()} known files)`) } catch {}; hardRefresh(chatId).catch(() => {})
+    repairAttempts.add(key); setLoadStateForChat(chatId, `Repairing index (${snapshot.items.length.toLocaleString()} of ${floor.count.toLocaleString()} known files)`); hardRefresh(chatId).catch(() => {})
   }
   function updateCountUi (chatId) {
     const snapshot = committed.get(idOf(chatId)); if (!snapshot) return
@@ -289,7 +296,7 @@
       try {
         const result = await request('scan-media-v3', { chatId, force: !!options.hardRefresh })
         if (belongsToChat(chatId, result)) { stable = await commitDiscovery(chatId, { ...result, chatId, savedAt: Number(result.savedAt || Date.now()) }, { source: options.hardRefresh ? 'hard-refresh' : 'scan' }); if (stable) reconcileRecent(chatId, stable).catch(() => {}) }
-      } catch { if (!stable && state && idOf(state.activeChatId) === key) try { setLoadState('File index sync failed. Reopen Files to retry.') } catch {} } finally { fullScanJobs.delete(key) }
+      } catch { if (!stable) setLoadStateForChat(chatId, 'File index sync failed. Reopen Files to retry.') } finally { fullScanJobs.delete(key) }
       scheduleAutoReconcile(chatId); return stable
     })().finally(() => loading.delete(key)); loading.set(key, task); return task
   }
@@ -333,7 +340,7 @@
       let truth = null
       try { truth = await request('media-truth-v1', { chatId }) } catch (error) { truth = { ok: false, complete: false, accessible: true, error: String(error && error.message ? error.message : error), source: 'request' } }
       if (!(truth && truth.complete && truth.accessible !== false)) {
-        scheduleBackoff(chatId); try { setLoadState('Could not verify against Telegram. Retrying automatically.') } catch {}
+        scheduleBackoff(chatId); setLoadStateForChat(chatId, 'Could not verify against Telegram. Retrying automatically.')
         logReconcile({ chatId, cached: current.items.length, live: null, missing: [], remaining: current.items.length, persisted: `skipped(reason=${truth && truth.error ? 'truth-error' : truth && truth.accessible === false ? 'chat-inaccessible' : 'truth-incomplete'})`, truth: truth && truth.source || 'unknown', complete: !!(truth && truth.complete), accessible: truth && truth.accessible })
         return { status: 'unknown', reason: truth && truth.error ? 'truth-error' : 'truth-incomplete' }
       }
@@ -342,7 +349,7 @@
       const liveIds = new Set(rawIds)
       const reportedCount = Number(truth.count)
       if (!Number.isSafeInteger(reportedCount) || reportedCount < 0 || reportedCount !== liveIds.size || rawIds.length !== liveIds.size) {
-        scheduleBackoff(chatId); try { setLoadState('Telegram file truth was inconsistent. Retrying automatically.') } catch {}
+        scheduleBackoff(chatId); setLoadStateForChat(chatId, 'Telegram file truth was inconsistent. Retrying automatically.')
         logReconcile({ chatId, cached: current.items.length, live: Number.isFinite(reportedCount) ? reportedCount : null, missing: [], remaining: current.items.length, persisted: 'skipped(reason=truth-inconsistent)', truth: truth.source || 'unknown', complete: true, accessible: true })
         return { status: 'unknown', reason: 'truth-inconsistent' }
       }
@@ -364,7 +371,7 @@
         })
         current = partial.snapshot || current
         const persisted = partial.persisted && partial.persisted.written ? 'written' : `skipped(reason=${partial.persisted && partial.persisted.reason || 'unknown'})`
-        scheduleBackoff(chatId); try { setLoadState('File metadata is incomplete. Retrying automatically.') } catch {}
+        scheduleBackoff(chatId); setLoadStateForChat(chatId, 'File metadata is incomplete. Retrying automatically.')
         logReconcile({ chatId, cached: current.items.length, live: liveIds.size, missing: [], remaining: current.items.length, persisted, truth: truth.source || 'unknown', complete: true, accessible: true })
         return { status: 'unchanged', reason: 'metadata-incomplete', missingMetadata: recovery.missingMetadata.length }
       }
@@ -376,7 +383,7 @@
       const result = await commitAuthoritative(chatId, { ...current, items: remainingItems, savedAt: at, done: remainingItems.length === reportedCount }, { at, truth: { ...truth, count: reportedCount }, presentIds: liveIds, removedIds: missing })
       const next = result.snapshot; const persisted = result.persisted && result.persisted.written ? 'written' : `skipped(reason=${result.persisted && result.persisted.reason || 'unknown'})`
       logReconcile({ chatId, cached: current.items.length, live: reportedCount, missing, remaining: next.items.length, persisted, truth: truth.source || 'unknown', complete: true, accessible: true })
-      if (state && idOf(state.activeChatId) === key && state.view === 'files') try { setLoadState(`Loaded ${next.items.length.toLocaleString()} indexed files`) } catch {}
+      if (isActiveChat(chatId) && state.view === 'files') setLoadStateForChat(chatId, `Loaded ${next.items.length.toLocaleString()} indexed files`)
       return { status: missing.length ? 'pruned' : 'unchanged', missing: missing.length, remaining: next.items.length }
     })().finally(() => reconcileJobs.delete(key)); reconcileJobs.set(key, job); return job
   }
