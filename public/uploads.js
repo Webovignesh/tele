@@ -110,15 +110,17 @@
   }
 
   function loadPostHardening () {
-    loadMediaPreview()
     loadUploadReliability()
   }
 
+  /* These two features are independent of the upload transport. Preview must
+   * remain available even if the upload workspace takes longer to bootstrap. */
   loadOwnedBulkDelete()
+  loadMediaPreview()
 
   /* The upload chain is intentionally ordered. bulk-uploads owns the UI/queue,
-   * uploads-hardening installs the transport/integrity boundary, and only then do
-   * the refresh-recovery layer and independent on-demand media viewer install. */
+   * uploads-hardening installs the transport/integrity boundary, and only then
+   * does refresh recovery patch that hardened queue. */
   function loadHardening () {
     const existingHardening = document.querySelector('script[data-filegram-upload-hardening]')
     if (existingHardening) {
