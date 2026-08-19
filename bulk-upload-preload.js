@@ -84,6 +84,37 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
       return handler(req, res)
     })
 
+    /* Browser refresh can sever the original POST after FileGram has already
+     * staged the whole source. The append-only ledger is the durable truth for
+     * that in-flight send, so a restored tab can query it before asking the user
+     * to locate the source file again. No file bytes are exposed here. */
+    app.get('/api/filegram/bulk-upload-status/:uploadId', async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store')
+      const uploadId = String(req.params.uploadId || '').trim()
+      if (!/^[A-Za-z0-9._:-]{1,160}$/.test(uploadId)) {
+        return res.status(400).json({ ok: false, error: 'Invalid upload id' })
+      }
+      try {
+        const record = await ledger.get(uploadId)
+        if (!record) return res.json({ ok: true, exists: false, status: 'missing' })
+        return res.json({
+          ok: true,
+          exists: true,
+          active: active.has(uploadId),
+          status: String(record.status || 'unknown'),
+          messageId: record.messageId != null ? record.messageId : null,
+          fileName: String(record.fileName || ''),
+          size: Math.max(0, Number(record.size || 0)),
+          error: record.error ? String(record.error) : null,
+          startedAt: Math.max(0, Number(record.startedAt || 0)),
+          completedAt: Math.max(0, Number(record.completedAt || 0)),
+          updatedAt: Math.max(0, Number(record.updatedAt || 0))
+        })
+      } catch (error) {
+        return res.status(500).json({ ok: false, error: String(error && error.message ? error.message : error) })
+      }
+    })
+
     app.get('/api/bulk-upload-health', async (req, res) => {
       try {
         const auth = activeClient ? await activeClient.invoke({ _: 'getAuthorizationState' }).catch(() => null) : null
@@ -92,6 +123,13 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
         res.status(500).json({ ok: false, error: String(error && error.message ? error.message : error) })
       }
     })
+
+    global.__fileGramBulkUpload = {
+      getClient: () => activeClient,
+      getLedger: () => ledger,
+      getActiveUploads: () => active,
+      root: path.resolve(root)
+    }
     return app
   }
 
@@ -101,6 +139,8 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
 
   global.__fileGramBulkUpload = {
     getClient: () => activeClient,
+    getLedger: () => null,
+    getActiveUploads: () => null,
     root: path.resolve(__dirname)
   }
 }
