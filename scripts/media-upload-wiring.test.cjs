@@ -9,6 +9,7 @@ const read = name => fs.readFileSync(path.join(ROOT, name), 'utf8')
 const pkg = JSON.parse(read('package.json'))
 const uploads = read('public/uploads.js')
 const preload = read('bulk-upload-preload.js')
+const reliability = read('public/upload-reliability.js')
 
 const start = String(pkg.scripts && pkg.scripts.start || '')
 const reliabilityAt = start.indexOf('-r ./bulk-upload-reliability-preload.js')
@@ -17,7 +18,7 @@ assert.ok(reliabilityAt >= 0, 'server reliability preload must be part of npm st
 assert.ok(bulkAt > reliabilityAt, 'server reliability boundary must load before bulk-upload-preload')
 
 assert.match(uploads, /filegram-media-preview\.js\?v=1/)
-assert.match(uploads, /upload-reliability\.js\?v=1/)
+assert.match(uploads, /upload-reliability\.js\?v=2/)
 assert.match(uploads, /uploads-hardening\.js\?v=3/)
 assert.match(uploads, /hardening\.addEventListener\('load',\s*loadPostHardening/)
 assert.match(uploads, /existingHardening\.addEventListener\('load',\s*loadPostHardening/)
@@ -25,5 +26,11 @@ assert.match(uploads, /existingHardening\.addEventListener\('load',\s*loadPostHa
 assert.match(preload, /\/api\/filegram\/bulk-upload-status\/:uploadId/)
 assert.match(preload, /Cache-Control.*no-store/)
 assert.match(preload, /active\.has\(uploadId\)/)
+assert.match(preload, /getFile.*file_id/)
+assert.match(preload, /remote\.uploaded_size/)
+assert.match(preload, /telegramProgressAvailable/)
+assert.match(reliability, /Uploading \$\{.*percent/)
+assert.match(reliability, /telegramUploadedBytes/)
+assert.match(reliability, /pollTelegramProgress/)
 
 console.log('media/upload wiring checks passed')
