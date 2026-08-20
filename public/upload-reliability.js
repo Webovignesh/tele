@@ -4,17 +4,18 @@
  *
  * The upload POST first copies bytes from the browser to the local FileGram
  * process, then TDLib sends the staged file to Telegram. XHR upload progress only
- * measures the first (loopback) phase, so it must not be presented as Telegram
- * network speed. This layer also reconnects restored queue rows to the durable
- * server-side upload ledger before asking the user to locate a source again.
+ * measures the first (loopback) phase, so this layer switches to server-reported
+ * TDLib progress once staging reaches EOF. It also reconnects restored queue rows
+ * to the durable server-side upload ledger before asking for file access again.
  */
 ;(function fileGramUploadReliability () {
   if (window.__fileGramUploadReliabilityInstalled) return
   window.__fileGramUploadReliabilityInstalled = true
 
-  const POLL_MS = 1000
+  const POLL_MS = 500
   const MAX_RECOVERY_MS = 35 * 60 * 1000
   const recoveries = new Map()
+  let progressPollBusy = false
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
   const activeServerStates = new Set(['receiving', 'staged', 'sending', 'uncertain'])
@@ -38,6 +39,30 @@
     try { queue.changed(type, job) } catch {}
   }
 
+  function percentOf (value) {
+    return Math.max(0, Math.min(100, Math.round(Number(value || 0) * 100)))
+  }
+
+  function displayProgress (job) {
+    if (!job) return 0
+    if (job._transferPhase === 'telegram') return Math.max(0, Math.min(1, Number(job._telegramProgress || 0)))
+    return Math.max(0, Math.min(1, Number(job.progress || 0)))
+  }
+
+  function paintJobRows (queue) {
+    if (!queue) return
+    for (const job of queue.jobs.values()) {
+      if (!job || job.status !== 'uploading' || job._transferPhase !== 'telegram') continue
+      const row = document.querySelector(`.fg-up-job[data-job-id="${CSS.escape(String(job.id))}"]`)
+      if (!row) continue
+      const percent = percentOf(job._telegramProgress)
+      const status = row.querySelector('.fg-up-job-status')
+      if (status) status.textContent = job._telegramProgressAvailable ? `Uploading ${percent}%` : 'Uploading to Telegram…'
+      const bar = row.querySelector('.fg-up-progress > span')
+      if (bar) bar.style.width = `${job._telegramProgressAvailable ? percent : 0}%`
+    }
+  }
+
   function paintTransferPhase (queue) {
     const value = document.querySelector('#fg-upload-speed')
     if (!value || !queue) return
@@ -45,25 +70,64 @@
     if (label) label.textContent = 'Status'
 
     const jobs = [...queue.jobs.values()]
-    const staging = jobs.filter(job => job.status === 'uploading' && Number(job.progress || 0) < 1)
-    const telegram = jobs.filter(job => job.status === 'uploading' && Number(job.progress || 0) >= 1)
+    const staging = jobs.filter(job => job.status === 'uploading' && job._transferPhase !== 'telegram')
+    const telegram = jobs.filter(job => job.status === 'uploading' && job._transferPhase === 'telegram')
     const verifying = jobs.filter(job => job.status === 'verifying')
     const retrying = jobs.filter(job => job.status === 'retrying')
 
     if (staging.length) {
-      const percent = Math.round(staging.reduce((sum, job) => sum + Math.max(0, Math.min(1, Number(job.progress || 0))), 0) / staging.length * 100)
-      value.textContent = `Staging ${percent}%`
+      const totalBytes = staging.reduce((sum, job) => sum + Math.max(1, Number(job.totalBytes || job.size || 1)), 0)
+      const doneBytes = staging.reduce((sum, job) => sum + displayProgress(job) * Math.max(1, Number(job.totalBytes || job.size || 1)), 0)
+      value.textContent = `Staging ${Math.round(doneBytes / totalBytes * 100)}%`
+      paintJobRows(queue)
       return
     }
     if (telegram.length) {
-      const oldest = Math.min(...telegram.map(job => Number(job.attemptStartedAt || job.startedAt || Date.now())))
-      const seconds = Math.max(0, Math.floor((Date.now() - oldest) / 1000))
-      value.textContent = `Telegram ${seconds}s`
+      const known = telegram.filter(job => job._telegramProgressAvailable)
+      if (known.length) {
+        const totalBytes = known.reduce((sum, job) => sum + Math.max(1, Number(job._telegramTotalBytes || job.size || 1)), 0)
+        const doneBytes = known.reduce((sum, job) => sum + Math.max(0, Number(job._telegramUploadedBytes || 0)), 0)
+        value.textContent = `Uploading ${Math.max(0, Math.min(100, Math.round(doneBytes / totalBytes * 100)))}%`
+      } else {
+        value.textContent = 'Uploading…'
+      }
+      paintJobRows(queue)
       return
     }
     if (verifying.length) { value.textContent = 'Verifying…'; return }
     if (retrying.length) { value.textContent = 'Retrying…'; return }
     value.textContent = 'Idle'
+  }
+
+  function applyServerProgress (queue, job, status) {
+    if (!job || !status) return
+    if (String(status.status || '') === 'sending') {
+      job._transferPhase = 'telegram'
+      job._telegramProgressAvailable = status.telegramProgressAvailable === true
+      if (status.telegramProgress != null) job._telegramProgress = Math.max(0, Math.min(1, Number(status.telegramProgress || 0)))
+      if (status.telegramUploadedBytes != null) job._telegramUploadedBytes = Math.max(0, Number(status.telegramUploadedBytes || 0))
+      if (status.telegramTotalBytes != null) job._telegramTotalBytes = Math.max(0, Number(status.telegramTotalBytes || 0))
+      job.speed = 0
+      changed(queue, 'telegram-progress', job)
+    }
+  }
+
+  async function pollTelegramProgress (queue) {
+    if (!queue || progressPollBusy) return
+    const jobs = [...queue.jobs.values()].filter(job => job && job.status === 'uploading' && job._transferPhase === 'telegram')
+    if (!jobs.length) return
+    progressPollBusy = true
+    try {
+      await Promise.all(jobs.slice(0, 8).map(async job => {
+        try {
+          const status = await readServerStatus(job)
+          applyServerProgress(queue, job, status)
+        } catch {}
+      }))
+    } finally {
+      progressPollBusy = false
+      paintTransferPhase(queue)
+    }
   }
 
   function completeRecovered (queue, job, status) {
@@ -80,6 +144,11 @@
     job.updatedAt = Date.now()
     if (status && status.messageId != null) job.telegramMessageId = status.messageId
     job.result = { ok: true, messageId: job.telegramMessageId || null }
+    delete job._transferPhase
+    delete job._telegramProgress
+    delete job._telegramProgressAvailable
+    delete job._telegramUploadedBytes
+    delete job._telegramTotalBytes
     changed(queue, 'recovered', job)
     try { queue.pump() } catch {}
   }
@@ -138,6 +207,7 @@
         }
 
         if (status && status.exists && activeServerStates.has(String(status.status || ''))) {
+          if (String(status.status || '') === 'sending') applyServerProgress(queue, current, status)
           /* If the process that owned the send disappeared, a stale 'sending'
            * ledger record must not strand the browser in Verifying for 35 minutes.
            * First look for the exact filename+size on Telegram; if it is not there,
@@ -156,11 +226,6 @@
 
       const current = queue.jobs.get(id)
       if (!current || ['completed', 'cancelled', 'paused'].includes(current.status)) return
-
-      /* The server has no recoverable staged/send state. Fall back to the browser
-       * source contract. If the persisted handle still has permission, normal
-       * resume proceeds automatically; otherwise Locate is the truthful final
-       * state because FileGram never retained a complete source copy. */
       current.status = fallbackStatus === 'queued' ? 'queued' : 'needs_access'
       current.speed = 0
       current.error = current.status === 'needs_access'
@@ -191,10 +256,6 @@
       baseProgress(job, loaded, total)
       if (!job) return
 
-      /* Never surface browser -> localhost throughput as Telegram network speed.
-       * Loopback routinely reports hundreds of MB/s, then freezes at that number
-       * while TDLib performs the real upload. The status tile instead shows the
-       * truthful phase (Staging / Telegram / Verifying) below. */
       job.speed = 0
       const bytes = Math.max(0, Number(loaded || 0))
       const max = Math.max(bytes, Number(total || 0), Number(job.size || 0))
@@ -202,7 +263,13 @@
         job.progress = 1
         job.uploadedBytes = max
         job.totalBytes = max
+        job._transferPhase = 'telegram'
+        job._telegramProgress = 0
+        job._telegramProgressAvailable = false
+        job._telegramUploadedBytes = 0
+        job._telegramTotalBytes = max
         changed(this, 'staged', job)
+        pollTelegramProgress(this).catch(() => {})
       }
       queueMicrotask(() => paintTransferPhase(this))
     }
@@ -219,9 +286,6 @@
       return baseClearAll()
     }
 
-    /* Hardening loads just after bulk-uploads.js. A restored row may already have
-     * tried its persisted handle and reached needs_access in that small window;
-     * reconnect it to server truth immediately instead of showing a false error. */
     for (const job of queue.jobs.values()) {
       if (shouldRecover(job)) recoverJob(queue, job, job.handle ? 'queued' : 'needs_access').catch(() => {})
     }
@@ -235,25 +299,31 @@
           const live = this.jobs.get(String(job.id))
           if (shouldRecover(live)) recoverJob(this, live, live.handle ? 'queued' : 'needs_access').catch(() => {})
         }
+        if (['completed', 'cancel', 'failed'].includes(type) && job) {
+          delete job._transferPhase
+          delete job._telegramProgress
+          delete job._telegramProgressAvailable
+          delete job._telegramUploadedBytes
+          delete job._telegramTotalBytes
+        }
       }
       queueMicrotask(() => paintTransferPhase(this))
       return result
     }
 
-    /* Keep the second phase visibly alive even when TDLib is sending and no XHR
-     * upload progress events remain. This replaces the misleading frozen MB/s
-     * value with an elapsed Telegram phase timer. */
     const phaseTimer = setInterval(() => {
       if (!document.documentElement.isConnected) return clearInterval(phaseTimer)
+      pollTelegramProgress(queue).catch(() => {})
       paintTransferPhase(queue)
-    }, 1000)
+    }, POLL_MS)
 
     window.__fileGramUploadRecovery = {
       recover: id => {
         const job = queue.jobs.get(String(id))
         return job ? recoverJob(queue, job, job.handle ? 'queued' : 'needs_access') : Promise.resolve()
       },
-      status: readServerStatus
+      status: readServerStatus,
+      poll: () => pollTelegramProgress(queue)
     }
     queueMicrotask(() => paintTransferPhase(queue))
     return true
