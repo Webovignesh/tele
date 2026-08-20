@@ -19,10 +19,14 @@ async function uploadQueueFixture (page, statuses = [], jobOverrides = {}) {
   </body></html>`)
   await page.evaluate(({ initialStatuses, overrides }) => {
     window.__statusReplies = initialStatuses.slice()
+    window.__lastStatusReply = initialStatuses.length
+      ? initialStatuses[initialStatuses.length - 1]
+      : { ok: true, exists: false, status: 'missing' }
     window.fetch = async () => {
       const next = window.__statusReplies.length
         ? window.__statusReplies.shift()
-        : { ok: true, exists: false, status: 'missing' }
+        : window.__lastStatusReply
+      if (next) window.__lastStatusReply = next
       return {
         ok: true,
         status: 200,
@@ -116,6 +120,7 @@ test('real TDLib percentage replaces the completed staging bar and survives a no
         telegramTotalBytes: 200
       }
     ]
+    window.__lastStatusReply = window.__statusReplies[window.__statusReplies.length - 1]
     const queue = window.FileGramUploads.queue
     const job = queue.jobs.get('upload-refresh-1')
     job.status = 'uploading'
