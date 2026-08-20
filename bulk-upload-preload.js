@@ -16,6 +16,7 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
   const { ScalableUploadLedger } = require('./bulk-upload-ledger')
 
   let activeClient = null
+  const uploadFileIds = new Map()
   const priorCreateClient = tdl.createClient.bind(tdl)
 
   function installUpdateBoundary (client) {
@@ -54,6 +55,68 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
     }
   }
 
+  function fileFromMessage (message) {
+    const c = message && message.content
+    if (!c) return null
+    if (c._ === 'messageDocument' && c.document) return c.document.document || null
+    if (c._ === 'messageVideo' && c.video) return c.video.video || null
+    if (c._ === 'messageAudio' && c.audio) return c.audio.audio || null
+    if (c._ === 'messageAnimation' && c.animation) return c.animation.animation || null
+    if (c._ === 'messageVoiceNote' && c.voice_note) return c.voice_note.voice || null
+    if (c._ === 'messageVideoNote' && c.video_note) return c.video_note.video || null
+    if (c._ === 'messageSticker' && c.sticker) return c.sticker.sticker || null
+    if (c._ === 'messagePhoto' && c.photo && Array.isArray(c.photo.sizes)) {
+      let best = null
+      for (const size of c.photo.sizes) {
+        const file = size && size.photo
+        if (!file) continue
+        if (!best || Number(file.size || file.expected_size || 0) > Number(best.size || best.expected_size || 0)) best = file
+      }
+      return best
+    }
+    return null
+  }
+
+  async function telegramUploadProgress (client, uploadId, record) {
+    if (!client || !record || String(record.status || '') !== 'sending') return null
+    let fileId = uploadFileIds.get(uploadId)
+
+    if (!fileId && record.messageId != null && record.chatId != null) {
+      let message = await client.invoke({
+        _: 'getMessageLocally',
+        chat_id: record.chatId,
+        message_id: record.messageId
+      }).catch(() => null)
+      if (!message) {
+        message = await client.invoke({
+          _: 'getMessage',
+          chat_id: record.chatId,
+          message_id: record.messageId
+        }).catch(() => null)
+      }
+      const file = fileFromMessage(message)
+      if (file && Number.isSafeInteger(Number(file.id)) && Number(file.id) > 0) {
+        fileId = Number(file.id)
+        uploadFileIds.set(uploadId, fileId)
+      }
+    }
+
+    if (!fileId) return null
+    const file = await client.invoke({ _: 'getFile', file_id: fileId }).catch(() => null)
+    if (!file) return null
+
+    const remote = file.remote || {}
+    const uploadedBytes = Math.max(0, Number(remote.uploaded_size || 0))
+    const totalBytes = Math.max(0, Number(file.size || 0), Number(file.expected_size || 0), Number(record.size || 0))
+    const complete = remote.is_uploading_completed === true
+    const available = complete || uploadedBytes > 0 || remote.is_uploading_active === true
+    const progress = complete
+      ? 1
+      : (totalBytes > 0 ? Math.max(0, Math.min(1, uploadedBytes / totalBytes)) : 0)
+
+    return { available, fileId, uploadedBytes, totalBytes, progress, complete }
+  }
+
   tdl.createClient = function createBulkUploadAwareClient (options) {
     const client = priorCreateClient(options)
     activeClient = client
@@ -86,8 +149,10 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
 
     /* Browser refresh can sever the original POST after FileGram has already
      * staged the whole source. The append-only ledger is the durable truth for
-     * that in-flight send, so a restored tab can query it before asking the user
-     * to locate the source file again. No file bytes are exposed here. */
+     * that in-flight send, so a restored tab can query it before asking for file
+     * access again. While a send is active, TDLib's File.remote.uploaded_size is
+     * also exposed so the browser can display real Telegram transfer progress
+     * rather than browser-to-localhost staging progress. */
     app.get('/api/filegram/bulk-upload-status/:uploadId', async (req, res) => {
       res.setHeader('Cache-Control', 'no-store')
       const uploadId = String(req.params.uploadId || '').trim()
@@ -97,6 +162,8 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
       try {
         const record = await ledger.get(uploadId)
         if (!record) return res.json({ ok: true, exists: false, status: 'missing' })
+        const transfer = await telegramUploadProgress(activeClient, uploadId, record)
+        if (String(record.status || '') === 'completed') uploadFileIds.delete(uploadId)
         return res.json({
           ok: true,
           exists: true,
@@ -105,6 +172,10 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
           messageId: record.messageId != null ? record.messageId : null,
           fileName: String(record.fileName || ''),
           size: Math.max(0, Number(record.size || 0)),
+          telegramProgressAvailable: !!(transfer && transfer.available),
+          telegramProgress: transfer ? transfer.progress : null,
+          telegramUploadedBytes: transfer ? transfer.uploadedBytes : null,
+          telegramTotalBytes: transfer ? transfer.totalBytes : null,
           error: record.error ? String(record.error) : null,
           startedAt: Math.max(0, Number(record.startedAt || 0)),
           completedAt: Math.max(0, Number(record.completedAt || 0)),
