@@ -103,8 +103,8 @@
   function loadUploadReliability () {
     if (window.__fileGramUploadReliabilityInstalled || document.querySelector('script[data-filegram-upload-reliability]')) return
     const reliability = document.createElement('script')
-    reliability.src = 'upload-reliability.js?v=2'
-    reliability.dataset.filegramUploadReliability = '2'
+    reliability.src = 'upload-reliability.js?v=3'
+    reliability.dataset.filegramUploadReliability = '3'
     reliability.async = false
     document.body.appendChild(reliability)
   }
