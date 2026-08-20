@@ -82,6 +82,15 @@
     document.head.appendChild(style)
   }
 
+  function loadUiStability () {
+    if (window.__fileGramUiStabilityInstalled || document.querySelector('script[data-filegram-ui-stability]')) return
+    const stability = document.createElement('script')
+    stability.src = 'filegram-ui-stability.js?v=1'
+    stability.dataset.filegramUiStability = '1'
+    stability.async = false
+    document.body.appendChild(stability)
+  }
+
   function loadOwnedBulkDelete () {
     if (window.__fileGramOwnedBulkDeleteInstalled || document.querySelector('script[data-filegram-owned-bulk-delete]')) return
     const ownedDelete = document.createElement('script')
@@ -113,8 +122,10 @@
     loadUploadReliability()
   }
 
-  /* These two features are independent of the upload transport. Preview must
-   * remain available even if the upload workspace takes longer to bootstrap. */
+  /* These are independent of the upload transport. UI stability loads first so
+   * the global toast contract is corrected immediately; its upload portion waits
+   * for FileGramUploads.queue and then owns only the presentation overlay. */
+  loadUiStability()
   loadOwnedBulkDelete()
   loadMediaPreview()
 
