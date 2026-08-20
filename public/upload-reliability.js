@@ -16,6 +16,8 @@
   const MAX_RECOVERY_MS = 35 * 60 * 1000
   const recoveries = new Map()
   let progressPollBusy = false
+  let paintObserver = null
+  let paintQueued = false
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
   const activeServerStates = new Set(['receiving', 'staged', 'sending', 'uncertain'])
@@ -39,6 +41,10 @@
     try { queue.changed(type, job) } catch {}
   }
 
+  function setText (node, text) {
+    if (node && node.textContent !== text) node.textContent = text
+  }
+
   function percentOf (value) {
     return Math.max(0, Math.min(100, Math.round(Number(value || 0) * 100)))
   }
@@ -57,9 +63,10 @@
       if (!row) continue
       const percent = percentOf(job._telegramProgress)
       const status = row.querySelector('.fg-up-job-status')
-      if (status) status.textContent = job._telegramProgressAvailable ? `Uploading ${percent}%` : 'Uploading to Telegram…'
+      setText(status, job._telegramProgressAvailable ? `Uploading ${percent}%` : 'Uploading to Telegram…')
       const bar = row.querySelector('.fg-up-progress > span')
-      if (bar) bar.style.width = `${job._telegramProgressAvailable ? percent : 0}%`
+      const width = `${job._telegramProgressAvailable ? percent : 0}%`
+      if (bar && bar.style.width !== width) bar.style.width = width
     }
   }
 
@@ -67,7 +74,7 @@
     const value = document.querySelector('#fg-upload-speed')
     if (!value || !queue) return
     const label = value.closest('.fg-up-stat')?.querySelector('span')
-    if (label) label.textContent = 'Status'
+    setText(label, 'Status')
 
     const jobs = [...queue.jobs.values()]
     const staging = jobs.filter(job => job.status === 'uploading' && job._transferPhase !== 'telegram')
@@ -78,7 +85,7 @@
     if (staging.length) {
       const totalBytes = staging.reduce((sum, job) => sum + Math.max(1, Number(job.totalBytes || job.size || 1)), 0)
       const doneBytes = staging.reduce((sum, job) => sum + displayProgress(job) * Math.max(1, Number(job.totalBytes || job.size || 1)), 0)
-      value.textContent = `Staging ${Math.round(doneBytes / totalBytes * 100)}%`
+      setText(value, `Staging ${Math.round(doneBytes / totalBytes * 100)}%`)
       paintJobRows(queue)
       return
     }
@@ -87,16 +94,33 @@
       if (known.length) {
         const totalBytes = known.reduce((sum, job) => sum + Math.max(1, Number(job._telegramTotalBytes || job.size || 1)), 0)
         const doneBytes = known.reduce((sum, job) => sum + Math.max(0, Number(job._telegramUploadedBytes || 0)), 0)
-        value.textContent = `Uploading ${Math.max(0, Math.min(100, Math.round(doneBytes / totalBytes * 100)))}%`
+        setText(value, `Uploading ${Math.max(0, Math.min(100, Math.round(doneBytes / totalBytes * 100)))}%`)
       } else {
-        value.textContent = 'Uploading…'
+        setText(value, 'Uploading…')
       }
       paintJobRows(queue)
       return
     }
-    if (verifying.length) { value.textContent = 'Verifying…'; return }
-    if (retrying.length) { value.textContent = 'Retrying…'; return }
-    value.textContent = 'Idle'
+    if (verifying.length) { setText(value, 'Verifying…'); return }
+    if (retrying.length) { setText(value, 'Retrying…'); return }
+    setText(value, 'Idle')
+  }
+
+  function schedulePaint (queue) {
+    if (paintQueued) return
+    paintQueued = true
+    queueMicrotask(() => {
+      paintQueued = false
+      paintTransferPhase(queue)
+    })
+  }
+
+  function installPaintObserver (queue) {
+    if (paintObserver || typeof MutationObserver !== 'function') return
+    const host = document.querySelector('#mg-uploads-pane')
+    if (!host) return
+    paintObserver = new MutationObserver(() => schedulePaint(queue))
+    paintObserver.observe(host, { childList: true, subtree: true })
   }
 
   function applyServerProgress (queue, job, status) {
@@ -104,9 +128,23 @@
     if (String(status.status || '') === 'sending') {
       job._transferPhase = 'telegram'
       job._telegramProgressAvailable = status.telegramProgressAvailable === true
-      if (status.telegramProgress != null) job._telegramProgress = Math.max(0, Math.min(1, Number(status.telegramProgress || 0)))
-      if (status.telegramUploadedBytes != null) job._telegramUploadedBytes = Math.max(0, Number(status.telegramUploadedBytes || 0))
-      if (status.telegramTotalBytes != null) job._telegramTotalBytes = Math.max(0, Number(status.telegramTotalBytes || 0))
+      job._telegramProgress = status.telegramProgress != null
+        ? Math.max(0, Math.min(1, Number(status.telegramProgress || 0)))
+        : 0
+      job._telegramUploadedBytes = status.telegramUploadedBytes != null
+        ? Math.max(0, Number(status.telegramUploadedBytes || 0))
+        : 0
+      job._telegramTotalBytes = status.telegramTotalBytes != null
+        ? Math.max(0, Number(status.telegramTotalBytes || 0))
+        : Math.max(0, Number(job.size || job.totalBytes || 0))
+
+      /* Keep the queue's normal renderer truthful too. bulk-uploads.js redraws
+       * rows after queue.changed(); without synchronizing these fields it would
+       * repeatedly repaint the completed localhost staging bar at 100% between
+       * TDLib samples. */
+      job.progress = job._telegramProgressAvailable ? job._telegramProgress : 0
+      job.uploadedBytes = job._telegramProgressAvailable ? job._telegramUploadedBytes : 0
+      job.totalBytes = Math.max(0, Number(job._telegramTotalBytes || job.size || 0))
       job.speed = 0
       changed(queue, 'telegram-progress', job)
     }
@@ -134,7 +172,7 @@
     if (!job || !queue.jobs.has(String(job.id))) return
     job.status = 'completed'
     job.progress = 1
-    job.uploadedBytes = Math.max(Number(job.uploadedBytes || 0), Number(job.totalBytes || 0), Number(job.size || 0))
+    job.uploadedBytes = Math.max(Number(job.totalBytes || 0), Number(job.size || 0), Number(job.uploadedBytes || 0))
     job.totalBytes = Math.max(Number(job.totalBytes || 0), Number(job.size || 0))
     job.speed = 0
     job.retryAt = 0
@@ -207,11 +245,18 @@
         }
 
         if (status && status.exists && activeServerStates.has(String(status.status || ''))) {
-          if (String(status.status || '') === 'sending') applyServerProgress(queue, current, status)
+          if (String(status.status || '') === 'sending' && status.active !== false) {
+            current.status = 'uploading'
+            current.error = null
+            applyServerProgress(queue, current, status)
+            await sleep(POLL_MS)
+            continue
+          }
+
           /* If the process that owned the send disappeared, a stale 'sending'
-           * ledger record must not strand the browser in Verifying for 35 minutes.
-           * First look for the exact filename+size on Telegram; if it is not there,
-           * fall back to the browser source so the normal retry path can continue. */
+           * ledger record must not strand the browser indefinitely. First look for
+           * the exact filename+size on Telegram; if it is not there, fall back to
+           * the browser source so the normal retry path can continue. */
           if (status.status === 'uncertain' || status.active === false) {
             if (await verifyExistingDelivery(queue, current, status)) return
             if (status.active === false && status.status !== 'uncertain') break
@@ -260,8 +305,11 @@
       const bytes = Math.max(0, Number(loaded || 0))
       const max = Math.max(bytes, Number(total || 0), Number(job.size || 0))
       if (max > 0 && bytes >= max) {
-        job.progress = 1
-        job.uploadedBytes = max
+        /* The localhost staging copy is complete, but the Telegram transfer is
+         * starting at 0%. Reset the visible queue progress instead of leaving the
+         * old staging bar at 100%. */
+        job.progress = 0
+        job.uploadedBytes = 0
         job.totalBytes = max
         job._transferPhase = 'telegram'
         job._telegramProgress = 0
@@ -271,7 +319,7 @@
         changed(this, 'staged', job)
         pollTelegramProgress(this).catch(() => {})
       }
-      queueMicrotask(() => paintTransferPhase(this))
+      schedulePaint(this)
     }
 
     const baseCancel = queue.cancel.bind(queue)
@@ -307,12 +355,18 @@
           delete job._telegramTotalBytes
         }
       }
-      queueMicrotask(() => paintTransferPhase(this))
+      schedulePaint(this)
       return result
     }
 
+    installPaintObserver(queue)
+
     const phaseTimer = setInterval(() => {
-      if (!document.documentElement.isConnected) return clearInterval(phaseTimer)
+      if (!document.documentElement.isConnected) {
+        if (paintObserver) paintObserver.disconnect()
+        paintObserver = null
+        return clearInterval(phaseTimer)
+      }
       pollTelegramProgress(queue).catch(() => {})
       paintTransferPhase(queue)
     }, POLL_MS)
@@ -325,7 +379,7 @@
       status: readServerStatus,
       poll: () => pollTelegramProgress(queue)
     }
-    queueMicrotask(() => paintTransferPhase(queue))
+    schedulePaint(queue)
     return true
   }
 
