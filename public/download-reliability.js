@@ -11,6 +11,8 @@
   window.__fileGramDownloadReliabilityUiInstalled = true
 
   const completedBypass = new Map()
+  const LONG_REQUEST_TYPES = new Set(['download-dedupe-preview', 'start-download'])
+  const LONG_REQUEST_TIMEOUT_MS = 30 * 60 * 1000
 
   function addBypass (key) {
     const value = String(key || '')
@@ -23,6 +25,37 @@
     const count = completedBypass.get(value) || 0
     if (count <= 1) completedBypass.delete(value)
     else completedBypass.set(value, count - 1)
+  }
+
+  /* app.js hard-codes a 120 second timeout inside request(). A large disk dedupe
+   * plus a real 20k-40k Telegram history refresh can validly exceed that on a slow
+   * connection. If the browser times out first, the server can still finish later
+   * and enqueue downloads the UI believes failed - the worst possible split-brain.
+   *
+   * request() schedules its timeout synchronously before returning its Promise, so
+   * for only these two long-running operations we temporarily map that exact 120s
+   * timer to a bounded 30 minute timer, then restore setTimeout immediately. No
+   * other FileGram request inherits the longer deadline. */
+  function installLongRequestBoundary () {
+    if (typeof request !== 'function' || request.__fileGramLongDownloadRequest) return false
+    const baseRequest = request
+    const wrappedRequest = function fileGramLongDownloadRequest (type, payload) {
+      if (!LONG_REQUEST_TYPES.has(String(type || ''))) return baseRequest(type, payload)
+      const originalSetTimeout = window.setTimeout
+      window.setTimeout = function fileGramLongRequestTimer (callback, delay, ...args) {
+        const nextDelay = Number(delay) === 120000 ? LONG_REQUEST_TIMEOUT_MS : delay
+        return originalSetTimeout.call(window, callback, nextDelay, ...args)
+      }
+      try {
+        return baseRequest(type, payload)
+      } finally {
+        window.setTimeout = originalSetTimeout
+      }
+    }
+    wrappedRequest.__fileGramLongDownloadRequest = true
+    wrappedRequest.__fileGramBase = baseRequest
+    request = wrappedRequest
+    return true
   }
 
   /* app.js and daily-driver-p1.js both used localStorage's `tele-completed` set as
@@ -185,13 +218,17 @@
 
   installStyle()
   paintQueueHealth()
+  installLongRequestBoundary()
   installCompletedMarkerBoundary()
-  if (!installEventBoundary() || !(typeof startDownloads === 'function' && startDownloads.__fileGramDiskTruth)) {
+  if (!installEventBoundary() ||
+      !(typeof startDownloads === 'function' && startDownloads.__fileGramDiskTruth) ||
+      !(typeof request === 'function' && request.__fileGramLongDownloadRequest)) {
     let attempts = 0
     const timer = setInterval(() => {
       const eventReady = installEventBoundary() || (typeof handleEvent === 'function' && handleEvent.__fileGramDownloadReliability)
       const downloadReady = installCompletedMarkerBoundary() || (typeof startDownloads === 'function' && startDownloads.__fileGramDiskTruth)
-      if ((eventReady && downloadReady) || ++attempts > 200) clearInterval(timer)
+      const requestReady = installLongRequestBoundary() || (typeof request === 'function' && request.__fileGramLongDownloadRequest)
+      if ((eventReady && downloadReady && requestReady) || ++attempts > 200) clearInterval(timer)
     }, 25)
   }
 
@@ -199,6 +236,8 @@
     paintQueueHealth,
     paintReferenceProgress,
     finishReferenceRepair,
-    diskTruthInstalled: () => typeof startDownloads === 'function' && !!startDownloads.__fileGramDiskTruth
+    diskTruthInstalled: () => typeof startDownloads === 'function' && !!startDownloads.__fileGramDiskTruth,
+    longRequestInstalled: () => typeof request === 'function' && !!request.__fileGramLongDownloadRequest,
+    longRequestTimeoutMs: LONG_REQUEST_TIMEOUT_MS
   }
 })()
