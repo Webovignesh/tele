@@ -18,6 +18,7 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
   let activeClient = null
   const uploadFileIds = new Map()
   const priorCreateClient = tdl.createClient.bind(tdl)
+  const UPDATE_FILE_PROGRESS_INTERVAL_MS = 200
 
   function fileFromMessage (message) {
     const c = message && message.content
@@ -78,7 +79,10 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
     client.__fileGramUpdateBoundary = true
 
     const priorOn = client.on.bind(client)
+    const priorOff = typeof client.off === 'function' ? client.off.bind(client) : null
+    const priorRemoveListener = typeof client.removeListener === 'function' ? client.removeListener.bind(client) : null
     const priorInvoke = typeof client.invoke === 'function' ? client.invoke.bind(client) : null
+    const updateWrappers = new Map()
 
     /* Capture the TDLib file id from the sendMessage result itself. This is the
      * reliable correlation point: the temporary outgoing message is returned to
@@ -97,16 +101,19 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
 
     /* updateFile is a second, independent correlation path. TDLib keeps the local
      * staging path on the File object while uploading, so even clients/builds that
-     * omit message content from the initial pending send still become measurable. */
+     * omit message content from the initial pending send still become measurable.
+     * This listener is intentionally registered on priorOn, before the public
+     * boundary below, so upload correlation itself is never throttled. */
     priorOn('update', update => {
       if (!update || update._ !== 'updateFile' || !update.file) return
       const uploadId = uploadIdFromLocalPath(update.file.local && update.file.local.path)
       if (uploadId) rememberUploadFile(uploadId, update.file)
     })
 
-    client.on = function fileGramBoundaryOn (eventName, listener) {
-      if (eventName !== 'update' || typeof listener !== 'function') return priorOn(eventName, listener)
-      return priorOn('update', update => {
+    function wrapperFor (listener) {
+      if (updateWrappers.has(listener)) return updateWrappers.get(listener)
+      const lastFileProgress = new Map()
+      const wrapped = update => {
         /* TDLib emits updateDeleteMessages(is_permanent=false) when it evicts
          * messages from its local cache. That is NOT a Telegram deletion and must
          * never reach server.js's media-index delete path or the browser's
@@ -129,8 +136,61 @@ if (!global.__fileGramBulkUploadPreloadInstalled) {
             __fileGramSyntheticDelete: true
           })
         }
+
+        /* Progress-only updateFile events can arrive much faster than any FileGram
+         * surface paints them. DownloadManager historically scans its queue for the
+         * matching file on each update, so an unbounded event stream multiplied by
+         * a 2k-20k queue can starve the event loop. Completion/unavailable events are
+         * NEVER delayed; ordinary progress is coalesced per listener + file id. */
+        if (update && update._ === 'updateFile' && update.file && update.file.id != null) {
+          const file = update.file
+          const local = file.local || {}
+          const remote = file.remote || {}
+          const terminal = local.is_downloading_completed === true ||
+            remote.is_uploading_completed === true || file.can_be_downloaded === false
+          const key = String(file.id)
+          if (terminal) {
+            lastFileProgress.delete(key)
+          } else {
+            const now = Date.now()
+            const last = lastFileProgress.get(key) || 0
+            if (now - last < UPDATE_FILE_PROGRESS_INTERVAL_MS) return
+            lastFileProgress.set(key, now)
+          }
+        }
+
         return listener(update)
-      })
+      }
+      updateWrappers.set(listener, wrapped)
+      return wrapped
+    }
+
+    client.on = function fileGramBoundaryOn (eventName, listener) {
+      if (eventName !== 'update' || typeof listener !== 'function') return priorOn(eventName, listener)
+      return priorOn('update', wrapperFor(listener))
+    }
+
+    /* client.on used to wrap every update listener but client.off was left raw.
+     * A caller later removed the ORIGINAL function, while TDLib had the wrapper,
+     * so preview/thumbnail/attachment listeners leaked permanently and all of them
+     * ran on every future update. Keep the wrapper identity reversible. */
+    const removeBoundaryListener = (method, eventName, listener) => {
+      if (eventName !== 'update' || typeof listener !== 'function') return method ? method(eventName, listener) : client
+      const wrapped = updateWrappers.get(listener)
+      if (!wrapped) return method ? method(eventName, listener) : client
+      updateWrappers.delete(listener)
+      return method ? method('update', wrapped) : client
+    }
+
+    if (priorOff) {
+      client.off = function fileGramBoundaryOff (eventName, listener) {
+        return removeBoundaryListener(priorOff, eventName, listener)
+      }
+    }
+    if (priorRemoveListener) {
+      client.removeListener = function fileGramBoundaryRemoveListener (eventName, listener) {
+        return removeBoundaryListener(priorRemoveListener, eventName, listener)
+      }
     }
   }
 
