@@ -5,8 +5,9 @@
  * Selected Files rows can come from FileGram's persistent per-chat index. Their
  * chatId/messageId is durable Telegram identity; their numeric TDLib fileId is not
  * treated as durable. Intercept start-download before server.js sees it, resolve
- * every selected message against current Telegram state, then forward only the
- * refreshed file references to the existing DownloadManager.
+ * every selected message against current Telegram state, register each available
+ * File.remote.id with TDLib, then forward only the resulting current numeric file
+ * references to the existing DownloadManager.
  *
  * This is global for every chat. It is deliberately not a channel-specific patch.
  */
@@ -111,23 +112,28 @@ if (!global.__fileGramDownloadReliabilityPreloadInstalled) {
               selected: selected.length,
               scanned: progress.scanned,
               resolved: progress.resolved,
-              remaining: progress.remaining
+              remaining: progress.remaining,
+              registered: Math.max(0, Number(progress.registered || 0))
             })
           }
         })
 
+        /* Always close the preflight lifecycle, even if every numeric id happened
+         * to remain unchanged. The old conditional event left the browser stuck on
+         * "Refreshing Telegram file references…" after a perfectly valid large
+         * scan. It also hid the new remote-registration count when getRemoteFile
+         * returned the same numeric id after re-registering it. */
+        sendEvent(socket, 'download-reference-repair', {
+          selected: report.selected,
+          refreshed: report.refreshed,
+          registered: report.registered,
+          missing: report.missing.length,
+          queued: report.items.length,
+          source: report.source
+        })
+
         if (!report.items.length) {
           throw new Error('None of the selected files are still available in this Telegram chat')
-        }
-
-        if (report.refreshed || report.missing.length) {
-          sendEvent(socket, 'download-reference-repair', {
-            selected: report.selected,
-            refreshed: report.refreshed,
-            missing: report.missing.length,
-            queued: report.items.length,
-            source: report.source
-          })
         }
 
         const forwarded = {
