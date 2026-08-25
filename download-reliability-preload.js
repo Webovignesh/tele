@@ -64,24 +64,43 @@ if (!global.__fileGramDownloadReliabilityPreloadInstalled) {
     return Buffer.isBuffer(original) ? Buffer.from(text) : text
   }
 
-  /* TDLib owns everything under .td_files. server.js historically attempts a
-   * rename first when the selected destination happens to be on the same volume,
-   * which removes the cache path behind TDLib's back before deleteFile runs. Make
-   * that one operation copy-only. server.js still calls deleteFile immediately
-   * afterwards, so TDLib itself retires its cache record and bytes consistently.
-   * All other fs.rename calls keep their normal semantics. */
   function inside (child, parent) {
     const relative = path.relative(parent, child)
     return relative === '' || (!!relative && !relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))
   }
 
+  /* TDLib owns everything under .td_files. server.js historically attempts a
+   * rename first when the selected destination happens to be on the same volume,
+   * which removes the cache path behind TDLib's back before deleteFile runs.
+   *
+   * The previous safety shim changed that rename into copyFile(). Correct, but a
+   * large completed video then kept one of FileGram's download slots occupied for
+   * the entire disk copy. If several parallel videos completed together all slots
+   * could become disk-finalization work at once, making network throughput fall to
+   * zero until those copies finished: fast -> pause -> fast.
+   *
+   * On the same filesystem a hard link gives us the safe semantics we actually
+   * need: the destination gets its own directory entry to the already-downloaded
+   * bytes almost instantly, then server.js calls TDLib deleteFile(), which removes
+   * TDLib's cache name without affecting the destination link. No byte-for-byte
+   * copy and no cache ownership violation. If hard-linking is unavailable (most
+   * importantly cross-volume destinations, but also filesystems/policies that do
+   * not support links), fall back to the proven copy path. */
   const originalRename = fs.promises.rename.bind(fs.promises)
   fs.promises.rename = async function fileGramTdlibSafeRename (source, destination) {
     const from = path.resolve(String(source))
     const to = path.resolve(String(destination))
     if (inside(from, TD_FILES_DIR) && !inside(to, TD_FILES_DIR)) {
-      await fs.promises.copyFile(from, to)
-      return
+      try {
+        await fs.promises.link(from, to)
+        return
+      } catch (error) {
+        // EXDEV is the normal cross-volume case. EPERM/ENOTSUP/EACCES can occur on
+        // filesystems or corporate policies that disallow hard links. Copy is the
+        // safe universal fallback for all of them.
+        await fs.promises.copyFile(from, to)
+        return
+      }
     }
     return originalRename(source, destination)
   }
@@ -118,18 +137,8 @@ if (!global.__fileGramDownloadReliabilityPreloadInstalled) {
           }
         })
 
-        /* One non-sensitive line is deliberately written for real authenticated
-         * smoke tests. If a future TDLib build changes remote-file behaviour we can
-         * distinguish "message wasn't found", "remote id wasn't registered" and
-         * "registered file still failed later" without logging chat ids, filenames
-         * or Telegram remote identifiers. */
         console.log(`[downloads] reference preflight selected=${report.selected} registered=${report.registered} numeric_refreshed=${report.refreshed} unavailable=${report.missing.length} queued=${report.items.length}`)
 
-        /* Always close the preflight lifecycle, even if every numeric id happened
-         * to remain unchanged. The old conditional event left the browser stuck on
-         * "Refreshing Telegram file references…" after a perfectly valid large
-         * scan. It also hid the new remote-registration count when getRemoteFile
-         * returned the same numeric id after re-registering it. */
         sendEvent(socket, 'download-reference-repair', {
           selected: report.selected,
           refreshed: report.refreshed,
@@ -155,7 +164,6 @@ if (!global.__fileGramDownloadReliabilityPreloadInstalled) {
       })
       .catch(error => sendResponse(socket, request.id, false, null, error && error.message ? error.message : error))
 
-    // The original message is swallowed; the refreshed request is emitted above.
     return true
   }
 
