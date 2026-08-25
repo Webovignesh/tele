@@ -134,6 +134,41 @@ async function twentyThousandSelectionStaysLinear () {
   assert.ok(elapsed < 5000, `20k in-memory refresh took ${elapsed}ms`)
 }
 
+async function unusableHistoryRowsAreReported () {
+  const chatId = -23003
+  const totalVideos = DIRECT_LOOKUP_LIMIT + 4
+  const unusableId = totalVideos + 1
+  const messages = [
+    { id: unusableId, chat_id: chatId, content: { _: 'messageText', text: { text: 'media was removed' } } },
+    ...Array.from({ length: totalVideos }, (_, index) => {
+      const id = totalVideos - index
+      return videoMessage(chatId, id, 600000 + id, 2000 + id)
+    })
+  ]
+  const position = new Map(messages.map((message, index) => [String(message.id), index]))
+  const items = messages.map(message => ({
+    messageId: message.id,
+    fileId: message.id,
+    fileName: `old_${message.id}.mp4`,
+    fileSize: 1
+  }))
+  const client = {
+    async invoke (query) {
+      if (query._ === 'getMessage') {
+        return messages.find(message => String(message.id) === String(query.message_id)) || null
+      }
+      assert.equal(query._, 'getChatHistory')
+      const start = query.from_message_id
+        ? ((position.get(String(query.from_message_id)) ?? messages.length) + 1)
+        : 0
+      return { messages: messages.slice(start, start + 100) }
+    }
+  }
+  const report = await resolveDownloadItems({ client, chatId, items })
+  assert.equal(report.items.length, totalVideos)
+  assert.deepEqual(report.missing, [unusableId])
+}
+
 async function deletedRowsAreNotQueued () {
   const chatId = -3003
   const message = videoMessage(chatId, 21, 90021, 2121)
@@ -163,6 +198,7 @@ Promise.resolve()
   .then(smallSelectionUsesDurableMessageIdentity)
   .then(largeSelectionWalksHistoryOnce)
   .then(twentyThousandSelectionStaysLinear)
+  .then(unusableHistoryRowsAreReported)
   .then(deletedRowsAreNotQueued)
   .then(() => console.log('download reference resolver checks passed'))
   .catch(error => {
