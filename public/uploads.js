@@ -82,6 +82,22 @@
     document.head.appendChild(style)
   }
 
+  function loadDownloadReliability () {
+    if (!document.querySelector('link[data-filegram-download-reliability]')) {
+      const css = document.createElement('link')
+      css.rel = 'stylesheet'
+      css.href = 'download-reliability.css?v=1'
+      css.dataset.filegramDownloadReliability = '1'
+      document.head.appendChild(css)
+    }
+    if (window.__fileGramDownloadReliabilityUiInstalled || document.querySelector('script[data-filegram-download-reliability]')) return
+    const script = document.createElement('script')
+    script.src = 'download-reliability.js?v=1'
+    script.dataset.filegramDownloadReliability = '1'
+    script.async = false
+    document.body.appendChild(script)
+  }
+
   function loadUiStability () {
     if (window.__fileGramUiStabilityInstalled || document.querySelector('script[data-filegram-ui-stability]')) return
     const stability = document.createElement('script')
@@ -122,9 +138,10 @@
     loadUploadReliability()
   }
 
-  /* These are independent of the upload transport. UI stability loads first so
-   * the global toast contract is corrected immediately; its upload portion waits
-   * for FileGramUploads.queue and then owns only the presentation overlay. */
+  /* These are independent of the upload transport. Global download geometry and
+   * reference-repair feedback load first, then the existing UI stability/owned
+   * delete/preview layers. */
+  loadDownloadReliability()
   loadUiStability()
   loadOwnedBulkDelete()
   loadMediaPreview()
