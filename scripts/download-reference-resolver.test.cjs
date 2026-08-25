@@ -148,6 +148,35 @@ async function staleNumericIdIsReRegisteredFromRemoteIdentity () {
   assert.deepEqual(report.missing, [])
 }
 
+/* Registration is still required when TDLib reuses the SAME numeric id. The
+ * important side effect is re-registering remote.id; a numeric-id comparison alone
+ * cannot prove that happened. This is why the preflight completion event carries a
+ * separate `registered` count rather than using `refreshed` as a proxy. */
+async function remoteRegistrationCanKeepSameNumericId () {
+  const chatId = -1778
+  const message = videoMessage(chatId, 72, 99072, 7200)
+  let remoteCalls = 0
+  const client = {
+    async invoke (query) {
+      if (query._ === 'getMessage') return message
+      if (query._ === 'getRemoteFile') {
+        remoteCalls++
+        return registeredFile(query.remote_file_id)
+      }
+      throw new Error(`unexpected ${query._}`)
+    }
+  }
+  const report = await resolveDownloadItems({
+    client,
+    chatId,
+    items: [{ messageId: 72, fileId: 99072, fileName: 'same-id.mp4', fileSize: 7200 }]
+  })
+  assert.equal(remoteCalls, 1)
+  assert.equal(report.items[0].fileId, 99072)
+  assert.equal(report.refreshed, 0)
+  assert.equal(report.registered, 1)
+}
+
 async function remoteRegistrationFailureFallsBackToCurrentNumericFile () {
   const chatId = -1888
   const message = videoMessage(chatId, 88, 70088, 8800, 'remote:unavailable')
@@ -342,6 +371,7 @@ async function deletedRowsAreNotQueued () {
 Promise.resolve()
   .then(smallSelectionUsesDurableMessageIdentity)
   .then(staleNumericIdIsReRegisteredFromRemoteIdentity)
+  .then(remoteRegistrationCanKeepSameNumericId)
   .then(remoteRegistrationFailureFallsBackToCurrentNumericFile)
   .then(largeSelectionWalksHistoryOnce)
   .then(twentyThousandSelectionStaysLinear)
