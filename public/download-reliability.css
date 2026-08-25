@@ -1,0 +1,79 @@
+/* FileGram download queue reliability.
+ *
+ * The final download renderer already caps the DOM at 140 sticky rows. Browser
+ * content-visibility on those same rows is therefore redundant and, when rows are
+ * patched/reordered while off-screen, Chromium can preserve the intrinsic 56px
+ * placeholder while painting only fragments of the real row. That is the merged /
+ * collapsed-card failure seen on multi-thousand-file queues.
+ *
+ * One scalability mechanism only: JavaScript caps the window; every mounted row
+ * has ordinary, deterministic layout. */
+
+#download-list {
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  contain: none !important;
+  overflow-anchor: none !important;
+}
+
+#download-list .djob {
+  display: block !important;
+  position: relative !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  min-height: 58px !important;
+  height: auto !important;
+  flex: 0 0 auto !important;
+  margin: 0 0 7px !important;
+  overflow: visible !important;
+  content-visibility: visible !important;
+  contain: none !important;
+  contain-intrinsic-size: none !important;
+  box-sizing: border-box !important;
+}
+
+#download-list .djob .name,
+#download-list .djob .sub,
+#download-list .djob .bar,
+#download-list .djob .error-text,
+#download-list .djob .actions {
+  position: static !important;
+  float: none !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+
+#download-list .djob .sub {
+  min-height: 14px !important;
+  justify-content: space-between !important;
+}
+
+#download-list .djob .bar {
+  width: 100% !important;
+  min-height: 3px !important;
+}
+
+#download-list .djob .error-text:not(:empty) {
+  display: block !important;
+  min-height: 14px !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+
+#download-list .djob .actions {
+  min-height: 0 !important;
+  flex-wrap: wrap !important;
+}
+
+/* Make a terminal failure self-explanatory instead of looking like a stopped
+ * transfer. The error text remains the exact server error. */
+#download-list .djob.error {
+  border: 1px solid rgba(240, 78, 90, 0.18) !important;
+  background: rgba(240, 78, 90, 0.035) !important;
+}
+
+#download-list .tele-ui-download-list-note {
+  contain: none !important;
+  flex: 0 0 auto !important;
+}
