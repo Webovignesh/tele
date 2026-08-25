@@ -142,3 +142,37 @@ test('a stale local completed marker cannot veto a file the disk preflight appro
   // Outside the download invocation the completion marker keeps its UI semantics.
   expect(await page.evaluate(() => window.isCompleted('777:42'))).toBe(true)
 })
+
+test('only long download preparation requests extend the generic 120 second timeout', async ({ page }) => {
+  await page.setContent('<div id="download-list"></div>')
+  await page.evaluate(() => {
+    window.state = { activeChatId: 777, queueStats: null, downloads: new Map() }
+    window.handleEvent = () => {}
+    window.isCompleted = () => false
+    window.startDownloads = async () => {}
+    window.__scheduledDelays = []
+    const nativeSetTimeout = window.setTimeout.bind(window)
+    window.setTimeout = (callback, delay, ...args) => {
+      window.__scheduledDelays.push(Number(delay))
+      return nativeSetTimeout(callback, 0, ...args)
+    }
+    window.request = () => new Promise(resolve => setTimeout(resolve, 120000))
+  })
+
+  await page.addScriptTag({ path: RELIABILITY_JS })
+  await expect.poll(() => page.evaluate(() => window.FileGramDownloadReliability.longRequestInstalled())).toBe(true)
+  expect(await page.evaluate(() => window.FileGramDownloadReliability.longRequestTimeoutMs)).toBe(30 * 60 * 1000)
+
+  await page.evaluate(async () => {
+    window.__scheduledDelays.length = 0
+    await window.request('start-download', {})
+  })
+  expect(await page.evaluate(() => window.__scheduledDelays.includes(30 * 60 * 1000))).toBe(true)
+
+  await page.evaluate(async () => {
+    window.__scheduledDelays.length = 0
+    await window.request('get-status', {})
+  })
+  expect(await page.evaluate(() => window.__scheduledDelays.includes(120000))).toBe(true)
+  expect(await page.evaluate(() => window.__scheduledDelays.includes(30 * 60 * 1000))).toBe(false)
+})
