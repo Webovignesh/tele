@@ -1,13 +1,81 @@
 'use strict'
 
 /* Presentation companion for download-reliability-preload.js.
- * It owns no queue state. It only explains the preflight when a large persistent
- * Files selection is being refreshed against Telegram and makes terminal failures
- * explicit instead of leaving a misleading "Remaining 0" card above silent rows.
+ * It owns no queue state. It explains the preflight when a large persistent Files
+ * selection is being refreshed against Telegram, makes terminal failures explicit,
+ * and prevents FileGram's historical local "completed" marker from vetoing a file
+ * that the on-disk dedupe scan has just proved is missing from the download path.
  */
 ;(function fileGramDownloadReliabilityUi () {
   if (window.__fileGramDownloadReliabilityUiInstalled) return
   window.__fileGramDownloadReliabilityUiInstalled = true
+
+  const completedBypass = new Map()
+
+  function addBypass (key) {
+    const value = String(key || '')
+    if (!value) return
+    completedBypass.set(value, (completedBypass.get(value) || 0) + 1)
+  }
+
+  function removeBypass (key) {
+    const value = String(key || '')
+    const count = completedBypass.get(value) || 0
+    if (count <= 1) completedBypass.delete(value)
+    else completedBypass.set(value, count - 1)
+  }
+
+  /* app.js and daily-driver-p1.js both used localStorage's `tele-completed` set as
+   * an independent download authority. That is unsafe: users can move/delete a
+   * downloaded file while the marker survives, so the exact disk scan says
+   * "missing" but BOTH download wrappers silently remove it before start-download.
+   *
+   * Keep completed markers for presentation/Mark completed. Only while a user is
+   * actively running startDownloads do the selected identities bypass that marker;
+   * daily-driver-p1's filename+size disk scan remains the authority for whether the
+   * file really needs to be queued. Reference counts keep overlapping calls safe. */
+  function installCompletedMarkerBoundary () {
+    if (typeof startDownloads !== 'function' || startDownloads.__fileGramDiskTruth) return false
+    if (typeof isCompleted !== 'function') return false
+
+    const baseStartDownloads = startDownloads
+    const baseIsCompleted = isCompleted
+    if (!baseIsCompleted.__fileGramDiskTruth) {
+      const wrappedCompleted = function fileGramDiskTruthCompleted (key) {
+        if (completedBypass.has(String(key || ''))) return false
+        return baseIsCompleted(key)
+      }
+      wrappedCompleted.__fileGramDiskTruth = true
+      wrappedCompleted.__fileGramBase = baseIsCompleted
+      isCompleted = wrappedCompleted
+    }
+
+    const wrappedStart = async function fileGramDiskTruthStartDownloads (items) {
+      const rows = (Array.isArray(items) ? items : []).filter(Boolean)
+      const keys = []
+      const activeChatId = typeof state !== 'undefined' && state ? state.activeChatId : null
+      for (const item of rows) {
+        const messageId = item && item.messageId
+        if (messageId == null) continue
+        const ownChatId = item.chatId != null ? item.chatId : activeChatId
+        if (ownChatId != null) keys.push(`${ownChatId}:${messageId}`)
+        /* app.js's original startDownloads still keys against state.activeChatId.
+         * Include that legacy key too so the later base call cannot re-filter the
+         * item after daily-driver-p1's disk scan has approved it. */
+        if (activeChatId != null && String(activeChatId) !== String(ownChatId)) keys.push(`${activeChatId}:${messageId}`)
+      }
+      for (const key of keys) addBypass(key)
+      try {
+        return await baseStartDownloads.call(this, rows)
+      } finally {
+        for (const key of keys) removeBypass(key)
+      }
+    }
+    wrappedStart.__fileGramDiskTruth = true
+    wrappedStart.__fileGramBase = baseStartDownloads
+    startDownloads = wrappedStart
+    return true
+  }
 
   function ensureBanner () {
     let banner = document.querySelector('#fg-download-health')
@@ -117,16 +185,20 @@
 
   installStyle()
   paintQueueHealth()
-  if (!installEventBoundary()) {
+  installCompletedMarkerBoundary()
+  if (!installEventBoundary() || !(typeof startDownloads === 'function' && startDownloads.__fileGramDiskTruth)) {
     let attempts = 0
     const timer = setInterval(() => {
-      if (installEventBoundary() || ++attempts > 200) clearInterval(timer)
+      const eventReady = installEventBoundary() || (typeof handleEvent === 'function' && handleEvent.__fileGramDownloadReliability)
+      const downloadReady = installCompletedMarkerBoundary() || (typeof startDownloads === 'function' && startDownloads.__fileGramDiskTruth)
+      if ((eventReady && downloadReady) || ++attempts > 200) clearInterval(timer)
     }, 25)
   }
 
   window.FileGramDownloadReliability = {
     paintQueueHealth,
     paintReferenceProgress,
-    finishReferenceRepair
+    finishReferenceRepair,
+    diskTruthInstalled: () => typeof startDownloads === 'function' && !!startDownloads.__fileGramDiskTruth
   }
 })()
