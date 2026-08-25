@@ -3,7 +3,38 @@
 const assert = require('node:assert/strict')
 const { DIRECT_LOOKUP_LIMIT, resolveDownloadItems } = require('../download-reference-resolver')
 
-function videoMessage (chatId, messageId, fileId, size = 1000) {
+function remoteIdFor (fileId, size) {
+  return `remote:${fileId}:${size}`
+}
+
+function registeredFile (remoteFileId) {
+  const match = /^remote:(\d+):(\d+)$/.exec(String(remoteFileId || ''))
+  if (!match) return null
+  const fileId = Number(match[1])
+  const size = Number(match[2])
+  return {
+    id: fileId,
+    size,
+    expected_size: size,
+    local: {
+      path: '',
+      can_be_downloaded: true,
+      can_be_deleted: false,
+      is_downloading_active: false,
+      is_downloading_completed: false,
+      downloaded_size: 0
+    },
+    remote: {
+      id: String(remoteFileId),
+      unique_id: `unique:${fileId}`,
+      is_uploading_active: false,
+      is_uploading_completed: true,
+      uploaded_size: size
+    }
+  }
+}
+
+function videoMessage (chatId, messageId, fileId, size = 1000, remoteFileId = remoteIdFor(fileId, size)) {
   return {
     id: messageId,
     chat_id: chatId,
@@ -13,7 +44,26 @@ function videoMessage (chatId, messageId, fileId, size = 1000) {
       video: {
         file_name: `video_${messageId}.mp4`,
         mime_type: 'video/mp4',
-        video: { id: fileId, size, expected_size: size }
+        video: {
+          id: fileId,
+          size,
+          expected_size: size,
+          local: {
+            path: '',
+            can_be_downloaded: true,
+            can_be_deleted: false,
+            is_downloading_active: false,
+            is_downloading_completed: false,
+            downloaded_size: 0
+          },
+          remote: {
+            id: remoteFileId,
+            unique_id: `unique:${fileId}`,
+            is_uploading_active: false,
+            is_uploading_completed: true,
+            uploaded_size: size
+          }
+        }
       }
     }
   }
@@ -26,11 +76,19 @@ async function smallSelectionUsesDurableMessageIdentity () {
     ['12', videoMessage(chatId, 12, 90012, 2222)]
   ])
   let getMessageCalls = 0
+  let getRemoteFileCalls = 0
   const client = {
     async invoke (query) {
-      if (query._ !== 'getMessage') throw new Error(`unexpected ${query._}`)
-      getMessageCalls++
-      return messages.get(String(query.message_id)) || null
+      if (query._ === 'getMessage') {
+        getMessageCalls++
+        return messages.get(String(query.message_id)) || null
+      }
+      if (query._ === 'getRemoteFile') {
+        getRemoteFileCalls++
+        assert.equal(query.file_type, null)
+        return registeredFile(query.remote_file_id)
+      }
+      throw new Error(`unexpected ${query._}`)
     }
   }
   const report = await resolveDownloadItems({
@@ -43,10 +101,81 @@ async function smallSelectionUsesDurableMessageIdentity () {
   })
   assert.equal(report.items.length, 2)
   assert.equal(report.refreshed, 2)
+  assert.equal(report.registered, 2)
   assert.deepEqual(report.items.map(row => row.fileId), [90011, 90012])
   assert.deepEqual(report.items.map(row => row.fileSize), [1111, 2222])
   assert.equal(getMessageCalls, 2)
+  assert.equal(getRemoteFileCalls, 2)
   assert.equal(report.source, 'messages')
+}
+
+/* Exact live regression from the failed 2,329-file run:
+ *
+ * The message exists and carries a media File, but that message's numeric File.id
+ * belongs to an old TDLib registry entry. Merely rereading getMessage/history and
+ * copying id=71 would still make downloadFile answer "File not found". The remote
+ * id is durable; getRemoteFile registers it and returns the usable id=99071. */
+async function staleNumericIdIsReRegisteredFromRemoteIdentity () {
+  const chatId = -1777
+  const message = videoMessage(chatId, 71, 71, 91700000, remoteIdFor(99071, 91700000))
+  let remoteCalls = 0
+  const client = {
+    async invoke (query) {
+      if (query._ === 'getMessage') return message
+      if (query._ === 'getRemoteFile') {
+        remoteCalls++
+        assert.equal(query.remote_file_id, remoteIdFor(99071, 91700000))
+        assert.equal(query.file_type, null)
+        return registeredFile(query.remote_file_id)
+      }
+      if (query._ === 'getFile') throw new Error('old numeric file id is not registered')
+      throw new Error(`unexpected ${query._}`)
+    }
+  }
+
+  const report = await resolveDownloadItems({
+    client,
+    chatId,
+    items: [{ messageId: 71, fileId: 71, fileName: 'video_71.mp4', fileSize: 91700000 }]
+  })
+
+  assert.equal(remoteCalls, 1)
+  assert.equal(report.items.length, 1)
+  assert.equal(report.items[0].fileId, 99071)
+  assert.equal(report.items[0].remoteFileId, remoteIdFor(99071, 91700000))
+  assert.equal(report.refreshed, 1)
+  assert.equal(report.registered, 1)
+  assert.deepEqual(report.missing, [])
+}
+
+async function remoteRegistrationFailureFallsBackToCurrentNumericFile () {
+  const chatId = -1888
+  const message = videoMessage(chatId, 88, 70088, 8800, 'remote:unavailable')
+  let getFileCalls = 0
+  const client = {
+    async invoke (query) {
+      if (query._ === 'getMessage') return message
+      if (query._ === 'getRemoteFile') throw new Error('temporary remote registration failure')
+      if (query._ === 'getFile') {
+        getFileCalls++
+        return registeredFile(remoteIdFor(70088, 8800))
+      }
+      throw new Error(`unexpected ${query._}`)
+    }
+  }
+
+  const report = await resolveDownloadItems({
+    client,
+    chatId,
+    items: [{ messageId: 88, fileId: 1, fileName: 'fallback.mp4', fileSize: 1 }]
+  })
+
+  assert.equal(getFileCalls, 1)
+  assert.equal(report.items.length, 1)
+  assert.equal(report.items[0].fileId, 70088)
+  assert.equal(report.refreshed, 1)
+  assert.equal(report.registered, 0)
+  assert.deepEqual(report.missing, [])
 }
 
 async function largeSelectionWalksHistoryOnce () {
@@ -63,11 +192,16 @@ async function largeSelectionWalksHistoryOnce () {
 
   let historyCalls = 0
   let getMessageCalls = 0
+  let remoteCalls = 0
   const client = {
     async invoke (query) {
       if (query._ === 'getMessage') {
         getMessageCalls++
         return null
+      }
+      if (query._ === 'getRemoteFile') {
+        remoteCalls++
+        return registeredFile(query.remote_file_id)
       }
       assert.equal(query._, 'getChatHistory')
       historyCalls++
@@ -84,7 +218,9 @@ async function largeSelectionWalksHistoryOnce () {
   assert.equal(report.items.length, total)
   assert.equal(report.missing.length, 0)
   assert.equal(report.refreshed, total)
+  assert.equal(report.registered, total)
   assert.equal(getMessageCalls, 0, 'large selection must not fan out one getMessage RPC per row')
+  assert.equal(remoteCalls, total, 'every selected durable remote identity must be registered once')
   assert.ok(historyCalls <= Math.ceil(total / 100) + 1, `unexpected history calls: ${historyCalls}`)
   assert.equal(report.items[0].fileId, 100000 + messages[0].id)
   assert.equal(report.source, 'history')
@@ -106,11 +242,16 @@ async function twentyThousandSelectionStaysLinear () {
   }))
   let historyCalls = 0
   let getMessageCalls = 0
+  let remoteCalls = 0
   const client = {
     async invoke (query) {
       if (query._ === 'getMessage') {
         getMessageCalls++
         return null
+      }
+      if (query._ === 'getRemoteFile') {
+        remoteCalls++
+        return registeredFile(query.remote_file_id)
       }
       assert.equal(query._, 'getChatHistory')
       historyCalls++
@@ -126,8 +267,10 @@ async function twentyThousandSelectionStaysLinear () {
   const elapsed = Date.now() - started
   assert.equal(report.items.length, total)
   assert.equal(report.refreshed, total)
+  assert.equal(report.registered, total)
   assert.equal(report.missing.length, 0)
   assert.equal(getMessageCalls, 0)
+  assert.equal(remoteCalls, total)
   assert.ok(historyCalls <= 201, `20k refresh used ${historyCalls} history calls`)
   // This is a local in-memory fake; the bound catches accidental O(n^2) post-passes
   // without pretending to benchmark Telegram/network latency in CI.
@@ -157,6 +300,7 @@ async function unusableHistoryRowsAreReported () {
       if (query._ === 'getMessage') {
         return messages.find(message => String(message.id) === String(query.message_id)) || null
       }
+      if (query._ === 'getRemoteFile') return registeredFile(query.remote_file_id)
       assert.equal(query._, 'getChatHistory')
       const start = query.from_message_id
         ? ((position.get(String(query.from_message_id)) ?? messages.length) + 1)
@@ -175,6 +319,7 @@ async function deletedRowsAreNotQueued () {
   const client = {
     async invoke (query) {
       if (query._ === 'getMessage') return String(query.message_id) === '21' ? message : null
+      if (query._ === 'getRemoteFile') return registeredFile(query.remote_file_id)
       throw new Error(`unexpected ${query._}`)
     }
   }
@@ -196,6 +341,8 @@ async function deletedRowsAreNotQueued () {
 
 Promise.resolve()
   .then(smallSelectionUsesDurableMessageIdentity)
+  .then(staleNumericIdIsReRegisteredFromRemoteIdentity)
+  .then(remoteRegistrationFailureFallsBackToCurrentNumericFile)
   .then(largeSelectionWalksHistoryOnce)
   .then(twentyThousandSelectionStaysLinear)
   .then(unusableHistoryRowsAreReported)
