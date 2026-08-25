@@ -113,3 +113,32 @@ test('terminal queue failures are made explicit instead of looking silently stop
   await page.evaluate(() => window.handleEvent({ name: 'download-stats', stats: { total: 2329, remaining: 1200, done: 1129, error: 0 } }))
   await expect(page.locator('#fg-download-health')).toBeHidden()
 })
+
+test('a stale local completed marker cannot veto a file the disk preflight approved', async ({ page }) => {
+  await page.setContent('<div id="download-list"></div>')
+  await page.evaluate(() => {
+    window.state = { activeChatId: 777, queueStats: null, downloads: new Map() }
+    window.handleEvent = () => {}
+    // Simulate a historical localStorage completion marker that survived after the
+    // actual file was deleted/moved from the configured download path.
+    window.isCompleted = () => true
+    window.__queued = []
+
+    // Model the two existing filters: daily-driver-p1 checks item.chatId, then after
+    // an async disk scan app.js checks state.activeChatId again. The reliability
+    // boundary must suppress BOTH checks for this active invocation only.
+    window.startDownloads = async items => {
+      const p1Todo = items.filter(item => !window.isCompleted(`${item.chatId}:${item.messageId}`))
+      await Promise.resolve()
+      const baseTodo = p1Todo.filter(item => !window.isCompleted(`${window.state.activeChatId}:${item.messageId}`))
+      window.__queued.push(...baseTodo.map(item => item.messageId))
+    }
+  })
+  await page.addScriptTag({ path: RELIABILITY_JS })
+  await expect.poll(() => page.evaluate(() => window.FileGramDownloadReliability.diskTruthInstalled())).toBe(true)
+
+  await page.evaluate(() => window.startDownloads([{ chatId: 777, messageId: 42, fileId: 1, name: 'video.mp4' }]))
+  expect(await page.evaluate(() => window.__queued)).toEqual([42])
+  // Outside the download invocation the completion marker keeps its UI semantics.
+  expect(await page.evaluate(() => window.isCompleted('777:42'))).toBe(true)
+})
