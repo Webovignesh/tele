@@ -90,6 +90,50 @@ async function largeSelectionWalksHistoryOnce () {
   assert.equal(report.source, 'history')
 }
 
+async function twentyThousandSelectionStaysLinear () {
+  const chatId = -22002
+  const total = 20000
+  const messages = Array.from({ length: total }, (_, index) => {
+    const id = total - index
+    return videoMessage(chatId, id, 500000 + id, 1000000 + id)
+  })
+  const position = new Map(messages.map((message, index) => [String(message.id), index]))
+  const items = messages.map(message => ({
+    messageId: message.id,
+    fileId: message.id,
+    fileName: `video_${message.id}.mp4`,
+    fileSize: 1
+  }))
+  let historyCalls = 0
+  let getMessageCalls = 0
+  const client = {
+    async invoke (query) {
+      if (query._ === 'getMessage') {
+        getMessageCalls++
+        return null
+      }
+      assert.equal(query._, 'getChatHistory')
+      historyCalls++
+      const start = query.from_message_id
+        ? ((position.get(String(query.from_message_id)) ?? messages.length) + 1)
+        : 0
+      return { messages: messages.slice(start, start + 100) }
+    }
+  }
+
+  const started = Date.now()
+  const report = await resolveDownloadItems({ client, chatId, items })
+  const elapsed = Date.now() - started
+  assert.equal(report.items.length, total)
+  assert.equal(report.refreshed, total)
+  assert.equal(report.missing.length, 0)
+  assert.equal(getMessageCalls, 0)
+  assert.ok(historyCalls <= 201, `20k refresh used ${historyCalls} history calls`)
+  // This is a local in-memory fake; the bound catches accidental O(n^2) post-passes
+  // without pretending to benchmark Telegram/network latency in CI.
+  assert.ok(elapsed < 5000, `20k in-memory refresh took ${elapsed}ms`)
+}
+
 async function deletedRowsAreNotQueued () {
   const chatId = -3003
   const message = videoMessage(chatId, 21, 90021, 2121)
@@ -118,6 +162,7 @@ async function deletedRowsAreNotQueued () {
 Promise.resolve()
   .then(smallSelectionUsesDurableMessageIdentity)
   .then(largeSelectionWalksHistoryOnce)
+  .then(twentyThousandSelectionStaysLinear)
   .then(deletedRowsAreNotQueued)
   .then(() => console.log('download reference resolver checks passed'))
   .catch(error => {
