@@ -2,9 +2,12 @@
 
 const assert = require('node:assert/strict')
 const {
+  ACTIVE_STALL_MS,
+  REASSERT_MIN_MS,
   normalizeFileShape,
   isTransientDownloadError,
-  invokeDownloadWithRetry
+  invokeDownloadWithRetry,
+  createActiveDownloadKeeper
 } = require('../download-client-reliability-preload')
 
 function availabilityIsNormalized () {
@@ -40,10 +43,111 @@ async function transientInvokeGetsAnotherChance () {
   assert.equal(result.can_be_downloaded, true)
 }
 
+async function quietAcceptedTransferIsReassertedWithoutCancellation () {
+  let clock = 1000
+  const calls = []
+  const emitted = []
+  const invoke = async query => {
+    calls.push({ ...query })
+    if (query._ === 'getFile') {
+      return { id: query.file_id, size: 1000, local: { can_be_downloaded: true, downloaded_size: 100, is_downloading_completed: false } }
+    }
+    if (query._ === 'downloadFile') {
+      return { id: query.file_id, size: 1000, local: { can_be_downloaded: true, downloaded_size: 100, is_downloading_completed: false } }
+    }
+    throw new Error(`unexpected ${query._}`)
+  }
+  const keeper = createActiveDownloadKeeper({
+    invoke,
+    emitUpdate: file => emitted.push(file),
+    now: () => clock,
+    setIntervalFn: () => ({ unref () {} }),
+    clearIntervalFn: () => {}
+  })
+
+  keeper.track({ _: 'downloadFile', file_id: 77, priority: 32, offset: 0, limit: 0, synchronous: false })
+  keeper.observe({ id: 77, local: { downloaded_size: 100, is_downloading_completed: false } })
+
+  clock += ACTIVE_STALL_MS - 1
+  await keeper.sweep()
+  assert.equal(calls.length, 0, 'healthy/too-young quiet window must not be touched')
+
+  clock += Math.max(2, REASSERT_MIN_MS)
+  await keeper.sweep()
+  assert.deepEqual(calls.map(call => call._), ['getFile', 'downloadFile'])
+  assert.equal(calls.some(call => call._ === 'cancelDownloadFile'), false, 'stall recovery must never discard partial bytes')
+  assert.equal(keeper.size(), 1, 'accepted transfer stays tracked until completion/cancel')
+  assert.equal(emitted.length, 0)
+  keeper.stop()
+}
+
+async function missedCompletionIsReturnedToExistingQueue () {
+  let clock = 1000
+  const emitted = []
+  const calls = []
+  const invoke = async query => {
+    calls.push({ ...query })
+    if (query._ === 'getFile') {
+      return {
+        id: query.file_id,
+        size: 500,
+        local: {
+          can_be_downloaded: true,
+          downloaded_size: 500,
+          is_downloading_completed: true,
+          path: 'C:/tdlib/file.bin'
+        }
+      }
+    }
+    throw new Error(`unexpected ${query._}`)
+  }
+  const keeper = createActiveDownloadKeeper({
+    invoke,
+    emitUpdate: file => emitted.push(file),
+    now: () => clock,
+    setIntervalFn: () => ({ unref () {} }),
+    clearIntervalFn: () => {}
+  })
+
+  keeper.track({ _: 'downloadFile', file_id: 88, priority: 32, offset: 0, limit: 0, synchronous: false })
+  clock += ACTIVE_STALL_MS + REASSERT_MIN_MS + 5
+  await keeper.sweep()
+
+  assert.deepEqual(calls.map(call => call._), ['getFile'])
+  assert.equal(emitted.length, 1, 'a completion missed by the normal update stream must be emitted back to the queue')
+  assert.equal(emitted[0].id, 88)
+  assert.equal(keeper.size(), 0)
+  keeper.stop()
+}
+
+async function byteProgressResetsTheQuietWindow () {
+  let clock = 1000
+  const calls = []
+  const invoke = async query => { calls.push(query); return { id: query.file_id, local: { can_be_downloaded: true } } }
+  const keeper = createActiveDownloadKeeper({
+    invoke,
+    emitUpdate: () => {},
+    now: () => clock,
+    setIntervalFn: () => ({ unref () {} }),
+    clearIntervalFn: () => {}
+  })
+
+  keeper.track({ _: 'downloadFile', file_id: 99, priority: 32, synchronous: false })
+  clock += ACTIVE_STALL_MS - 100
+  keeper.observe({ id: 99, local: { downloaded_size: 4096, is_downloading_completed: false } })
+  clock += 200
+  await keeper.sweep()
+  assert.equal(calls.length, 0, 'new bytes must postpone stall recovery even if the request itself is old')
+  keeper.stop()
+}
+
 Promise.resolve()
   .then(availabilityIsNormalized)
   .then(errorClassificationIsConservative)
   .then(transientInvokeGetsAnotherChance)
+  .then(quietAcceptedTransferIsReassertedWithoutCancellation)
+  .then(missedCompletionIsReturnedToExistingQueue)
+  .then(byteProgressResetsTheQuietWindow)
   .then(() => console.log('download client reliability checks passed'))
   .catch(error => {
     console.error(error)
