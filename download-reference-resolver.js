@@ -187,9 +187,13 @@ async function resolveDownloadItems ({ client, chatId, items, onProgress } = {})
     ? await resolveDirect(client, numericChatId, normalized)
     : await resolveByHistory(client, numericChatId, normalized, onProgress)
 
+  /* Keep the post-pass O(n). A 20k selection used to call Array.find once for
+   * every resolved row here, turning an otherwise linear history walk back into
+   * hundreds of millions of comparisons right before queueing. */
+  const originalById = new Map(normalized.map(row => [String(row.messageId), row]))
   let refreshed = 0
   for (const item of result.items) {
-    const original = normalized.find(row => String(row.messageId) === String(item.messageId))
+    const original = originalById.get(String(item.messageId))
     if (original && String(original.fileId) !== String(item.fileId)) refreshed++
   }
 
