@@ -143,8 +143,13 @@ async function resolveByHistory (client, chatId, items, onProgress) {
       const item = wanted.get(key)
       if (!item) continue
       const fresh = applyFreshFile(item, message)
-      if (fresh) resolved.set(key, fresh)
-      wanted.delete(key)
+      if (fresh) {
+        resolved.set(key, fresh)
+        wanted.delete(key)
+      }
+      /* If the message still exists but no longer exposes a downloadable media
+       * File, keep it in `wanted`. Reaching the end of history then reports it as
+       * missing/unusable instead of silently dropping it from both queued+missing. */
     }
 
     if (typeof onProgress === 'function' && (iteration % 10 === 0 || !wanted.size)) {
