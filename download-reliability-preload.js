@@ -118,6 +118,13 @@ if (!global.__fileGramDownloadReliabilityPreloadInstalled) {
           }
         })
 
+        /* One non-sensitive line is deliberately written for real authenticated
+         * smoke tests. If a future TDLib build changes remote-file behaviour we can
+         * distinguish "message wasn't found", "remote id wasn't registered" and
+         * "registered file still failed later" without logging chat ids, filenames
+         * or Telegram remote identifiers. */
+        console.log(`[downloads] reference preflight selected=${report.selected} registered=${report.registered} numeric_refreshed=${report.refreshed} unavailable=${report.missing.length} queued=${report.items.length}`)
+
         /* Always close the preflight lifecycle, even if every numeric id happened
          * to remain unchanged. The old conditional event left the browser stuck on
          * "Refreshing Telegram file references…" after a perfectly valid large
