@@ -95,9 +95,6 @@ if (!global.__fileGramDownloadReliabilityPreloadInstalled) {
         await fs.promises.link(from, to)
         return
       } catch (error) {
-        // EXDEV is the normal cross-volume case. EPERM/ENOTSUP/EACCES can occur on
-        // filesystems or corporate policies that disallow hard links. Copy is the
-        // safe universal fallback for all of them.
         await fs.promises.copyFile(from, to)
         return
       }
@@ -151,6 +148,16 @@ if (!global.__fileGramDownloadReliabilityPreloadInstalled) {
         if (!report.items.length) {
           throw new Error('None of the selected files are still available in this Telegram chat')
         }
+
+        /* Prime only AFTER durable remote-id repair. The warm backlog must never
+         * see stale persisted File ids. It keeps a rolling 32-file low-priority
+         * cushion in TDLib while server.js continues to own the real active slots.
+         * This masks the network-idle gap when active jobs are being finalized or
+         * TDLib is switching to the next files. */
+        try {
+          const warm = global.__fileGramDownloadWarmBacklog
+          if (warm && typeof warm.prime === 'function') warm.prime(report.items)
+        } catch {}
 
         const forwarded = {
           ...request,
