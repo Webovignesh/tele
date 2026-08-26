@@ -4,10 +4,12 @@ const assert = require('node:assert/strict')
 const {
   ACTIVE_STALL_MS,
   REASSERT_MIN_MS,
+  WARM_PRIORITY,
   normalizeFileShape,
   isTransientDownloadError,
   invokeDownloadWithRetry,
-  createActiveDownloadKeeper
+  createActiveDownloadKeeper,
+  createWarmDownloadBacklog
 } = require('../download-client-reliability-preload')
 
 function availabilityIsNormalized () {
@@ -141,6 +143,38 @@ async function byteProgressResetsTheQuietWindow () {
   keeper.stop()
 }
 
+async function warmBacklogIsBoundedAndRolling () {
+  const calls = []
+  const invoke = async query => {
+    calls.push({ ...query })
+    if (query._ === 'downloadFile') return { id: query.file_id, local: { can_be_downloaded: true, downloaded_size: 0, is_downloading_completed: false } }
+    if (query._ === 'cancelDownloadFile') return { _: 'ok' }
+    throw new Error(`unexpected ${query._}`)
+  }
+  const warm = createWarmDownloadBacklog({ invoke, warmAhead: 4, warmPriority: WARM_PRIORITY })
+  warm.prime(Array.from({ length: 10 }, (_, index) => ({ fileId: index + 1 })))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(calls.slice(0, 4).map(call => call.file_id), [1, 2, 3, 4])
+  assert.ok(calls.slice(0, 4).every(call => call.priority === WARM_PRIORITY), 'warm requests must stay below active priority')
+  assert.equal(warm.stats().warmed, 4)
+
+  warm.promote(1)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls.filter(call => call._ === 'downloadFile').length, 5, 'promoting one worker must immediately warm one successor')
+  assert.equal(calls.filter(call => call._ === 'downloadFile').at(-1).file_id, 5)
+
+  warm.observe({ id: 2, local: { is_downloading_completed: true, path: 'C:/tdlib/2.bin' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls.filter(call => call._ === 'downloadFile').length, 6, 'a warm completion must also replenish the cushion')
+  assert.equal(calls.filter(call => call._ === 'downloadFile').at(-1).file_id, 6)
+
+  await warm.drop()
+  const cancelIds = calls.filter(call => call._ === 'cancelDownloadFile').map(call => call.file_id).sort((a, b) => a - b)
+  assert.deepEqual(cancelIds, [3, 4, 5, 6], 'manual queue intervention must cancel every invisible warm request')
+  assert.equal(warm.stats().warmed, 0)
+  assert.equal(warm.stats().pending, 0)
+}
+
 Promise.resolve()
   .then(availabilityIsNormalized)
   .then(errorClassificationIsConservative)
@@ -148,6 +182,7 @@ Promise.resolve()
   .then(quietAcceptedTransferIsReassertedWithoutCancellation)
   .then(missedCompletionIsReturnedToExistingQueue)
   .then(byteProgressResetsTheQuietWindow)
+  .then(warmBacklogIsBoundedAndRolling)
   .then(() => console.log('download client reliability checks passed'))
   .catch(error => {
     console.error(error)
