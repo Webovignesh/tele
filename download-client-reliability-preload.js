@@ -2,31 +2,29 @@
 
 /* TDLib download invocation boundary.
  *
- * server.js already owns queue state. This layer only hardens accepted TDLib
- * transfers: transient invoke failures are retried, File.local availability is
- * normalized for the older manager, and a tiny process-side keeper re-asserts an
- * accepted download when its BYTE COUNT has not advanced for a short window.
+ * server.js remains the queue owner. This layer hardens accepted TDLib transfers
+ * and keeps a small, low-priority backlog registered with TDLib so the network
+ * does not repeatedly fall idle between FileGram's active-worker batches.
  *
- * Why the keeper exists: on Windows TDLib can accept downloadFile, transfer in a
- * burst, then sit quiet while an internal temp/cache transition or retry is
- * pending. The server watchdog is intentionally conservative and only checks every
- * several seconds. The user-visible result is repeated full-speed -> 0 B/s ->
- * full-speed gaps. Re-asserting downloadFile is idempotent and does not discard
- * partial bytes, so we can safely nudge only the already-active file much sooner.
- *
- * This remains global for every chat and never owns queue state, starts extra
- * queued files, changes concurrency, or cancels a healthy transfer.
+ * The warm backlog is deliberately bounded. It never changes FileGram's visible
+ * concurrency, never marks extra jobs active, and is cancelled wholesale whenever
+ * a download pause/cancel/clear command is issued. Active workers are always
+ * promoted to max priority by the normal server request.
  */
 
 if (!global.__fileGramDownloadClientReliabilityInstalled) {
   global.__fileGramDownloadClientReliabilityInstalled = true
 
   const tdl = require('tdl')
+  const wsModule = require('ws')
   const priorCreateClient = tdl.createClient.bind(tdl)
   const RETRY_DELAYS_MS = [250, 750, 1500]
   const ACTIVE_STALL_MS = 1800
   const ACTIVE_SWEEP_MS = 600
   const REASSERT_MIN_MS = 1500
+  const ACTIVE_PRIORITY = 32
+  const WARM_PRIORITY = 8
+  const WARM_AHEAD = 32
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -90,7 +88,7 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
         query: {
           _: 'downloadFile',
           file_id: fileId,
-          priority: Math.max(1, Number(query.priority || 32)),
+          priority: Math.max(1, Number(query.priority || ACTIVE_PRIORITY)),
           offset: Number(query.offset || 0),
           limit: Number(query.limit || 0),
           synchronous: false
@@ -143,7 +141,7 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
       }
 
       const before = state.lastBytes
-      const result = await invokeDownloadWithRetry(invoke, { ...state.query, priority: 32 }).catch(() => null)
+      const result = await invokeDownloadWithRetry(invoke, { ...state.query, priority: ACTIVE_PRIORITY }).catch(() => null)
       if (!tracked.has(fileId) || !result) return
       const local = result.local || {}
       if (local.is_downloading_completed && local.path) {
@@ -162,8 +160,6 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
       if (sweeping || !tracked.size) return
       sweeping = true
       try {
-        // The queue exposes at most its configured active workers here. Keep this
-        // bounded and serial so recovery itself can never become an RPC storm.
         for (const [fileId, state] of [...tracked.entries()]) await checkOne(fileId, state)
       } finally {
         sweeping = false
@@ -183,6 +179,105 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
     }
   }
 
+  /* Keep the next few selected Telegram files warm at low priority.
+   *
+   * A unique max-priority request means FileGram has promoted that file into one
+   * of its real active slots. We immediately use the freed warm slot for the next
+   * queued file. A warm file that completes before promotion also frees a slot.
+   * This maintains a rolling backlog instead of pre-starting an unbounded batch.
+   */
+  function createWarmDownloadBacklog ({ invoke, warmAhead = WARM_AHEAD, warmPriority = WARM_PRIORITY } = {}) {
+    const pending = []
+    const known = new Set()
+    const warmed = new Set()
+    const promoted = new Set()
+    const completed = new Set()
+    let cursor = 0
+    let pumping = false
+    let dropped = false
+
+    function fileIdOf (value) {
+      const id = Number(value)
+      return Number.isFinite(id) && id !== 0 ? id : null
+    }
+
+    async function pump () {
+      if (pumping || dropped) return
+      pumping = true
+      try {
+        while (!dropped && warmed.size < warmAhead && cursor < pending.length) {
+          const fileId = pending[cursor++]
+          if (!fileId || completed.has(fileId) || promoted.has(fileId) || warmed.has(fileId)) continue
+          warmed.add(fileId)
+          await invokeDownloadWithRetry(invoke, {
+            _: 'downloadFile',
+            file_id: fileId,
+            priority: warmPriority,
+            offset: 0,
+            limit: 0,
+            synchronous: false
+          }).catch(() => {
+            warmed.delete(fileId)
+          })
+        }
+      } finally {
+        pumping = false
+      }
+    }
+
+    function prime (items) {
+      dropped = false
+      for (const item of Array.isArray(items) ? items : []) {
+        const fileId = fileIdOf(item && (item.fileId != null ? item.fileId : item.file_id))
+        if (!fileId || known.has(fileId) || completed.has(fileId)) continue
+        known.add(fileId)
+        pending.push(fileId)
+      }
+      Promise.resolve(pump()).catch(() => {})
+    }
+
+    function promote (fileId) {
+      const id = fileIdOf(fileId)
+      if (!id || promoted.has(id)) return
+      promoted.add(id)
+      warmed.delete(id)
+      Promise.resolve(pump()).catch(() => {})
+    }
+
+    function observe (file) {
+      const id = fileIdOf(file && file.id)
+      if (!id) return
+      const local = (file && file.local) || {}
+      if (!local.is_downloading_completed) return
+      completed.add(id)
+      warmed.delete(id)
+      Promise.resolve(pump()).catch(() => {})
+    }
+
+    async function drop () {
+      dropped = true
+      const ids = [...warmed]
+      warmed.clear()
+      pending.length = 0
+      cursor = 0
+      known.clear()
+      promoted.clear()
+      for (const fileId of ids) {
+        await invoke({ _: 'cancelDownloadFile', file_id: fileId, only_if_pending: false }).catch(() => {})
+      }
+    }
+
+    return {
+      prime,
+      promote,
+      observe,
+      drop,
+      stats: () => ({ pending: Math.max(0, pending.length - cursor), warmed: warmed.size, promoted: promoted.size, completed: completed.size })
+    }
+  }
+
+  let warmBridge = null
+
   tdl.createClient = function createDownloadReliableClient (options) {
     const client = priorCreateClient(options)
     if (!client || client.__fileGramDownloadClientReliability || typeof client.invoke !== 'function') return client
@@ -195,24 +290,33 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
         if (file && typeof client.emit === 'function') client.emit('update', { _: 'updateFile', file })
       }
     })
+    const warm = createWarmDownloadBacklog({ invoke: priorInvoke })
+    warmBridge = warm
+    global.__fileGramDownloadWarmBacklog = warm
 
     if (typeof client.on === 'function') {
       client.on('update', update => {
-        if (update && update._ === 'updateFile') keeper.observe(update.file)
+        if (update && update._ === 'updateFile') {
+          keeper.observe(update.file)
+          warm.observe(update.file)
+        }
       })
     }
 
     client.invoke = async function fileGramDownloadReliableInvoke (query) {
       if (query && query._ === 'downloadFile' && query.synchronous === false) {
-        keeper.track(query)
+        const priority = Math.max(1, Number(query.priority || ACTIVE_PRIORITY))
+        if (priority >= ACTIVE_PRIORITY) {
+          warm.promote(query.file_id)
+          keeper.track(query)
+        }
         try {
           const result = await invokeDownloadWithRetry(priorInvoke, query)
-          keeper.observe(result)
+          if (priority >= ACTIVE_PRIORITY) keeper.observe(result)
+          warm.observe(result)
           return result
         } catch (error) {
-          // A rejected initial request belongs to the existing queue error path;
-          // do not leave a keeper entry for work TDLib never accepted.
-          keeper.forget(query.file_id)
+          if (priority >= ACTIVE_PRIORITY) keeper.forget(query.file_id)
           throw error
         }
       }
@@ -224,14 +328,39 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
     return client
   }
 
+  /* Safety boundary for user cancellation/pause. A warm request is deliberately
+   * not a FileGram active worker, so server.js cannot know it exists. Whenever the
+   * user issues any download pause/cancel/clear command, cancel the warm backlog
+   * before the normal server handler runs. Correctness wins over keeping the
+   * optimization alive after a manual queue intervention. */
+  const previousEmit = wsModule.WebSocket.prototype.emit
+  wsModule.WebSocket.prototype.emit = function fileGramWarmBacklogSocketEmit (eventName, ...args) {
+    if (eventName === 'message' && args.length && warmBridge) {
+      let request = null
+      try {
+        const raw = Buffer.isBuffer(args[0]) ? args[0].toString('utf8') : String(args[0])
+        request = JSON.parse(raw)
+      } catch {}
+      const type = String(request && request.type || '').toLowerCase()
+      if (type && /download/.test(type) && /(pause|cancel|clear|remove)/.test(type)) {
+        Promise.resolve(warmBridge.drop()).catch(() => {})
+      }
+    }
+    return previousEmit.call(this, eventName, ...args)
+  }
+
   module.exports = {
     RETRY_DELAYS_MS,
     ACTIVE_STALL_MS,
     ACTIVE_SWEEP_MS,
     REASSERT_MIN_MS,
+    ACTIVE_PRIORITY,
+    WARM_PRIORITY,
+    WARM_AHEAD,
     normalizeFileShape,
     isTransientDownloadError,
     invokeDownloadWithRetry,
-    createActiveDownloadKeeper
+    createActiveDownloadKeeper,
+    createWarmDownloadBacklog
   }
 }
