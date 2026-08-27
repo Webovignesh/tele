@@ -48,7 +48,7 @@ fs.mkdirSync(thumbsDir, { recursive: true })
 fs.mkdirSync(MANAGEMENT_UPLOAD_DIR, { recursive: true })
 
 const PORT = Number(process.env.PORT || 3000)
-let CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 8))
+let CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 4))
 
 /* Build identity.
  *
@@ -267,7 +267,7 @@ class DownloadManager {
       this.metrics.lastLogAt = now
       const avgCopy = this.metrics.finalizeCopyCount ? (this.metrics.finalizeCopyMs/this.metrics.finalizeCopyCount).toFixed(1) : 0
       const avgDel = this.metrics.finalizeDeleteCount ? (this.metrics.finalizeDeleteMs/this.metrics.finalizeDeleteCount).toFixed(1) : 0
-      const msg = `[pipeline] activeSlot=${active}/${CONCURRENCY} inFlight=${inFlight} tdlActive=${activeTdl} queued=${queued} remaining=${remaining} speed=${Math.round(speed/1024)}KB/s stalledFor=${stalledFor}ms starts=${this.metrics.starts} completes=${this.metrics.completes} tryRunAvg=${this.metrics.tryRunScans ? (this.metrics.tryRunTimeMs/this.metrics.tryRunScans).toFixed(2) : 0}ms finalizeCopyAvg=${avgCopy}ms deleteAvg=${avgDel}ms`
+      const msg = `[pipeline] activeSlot=${active}/${CONCURRENCY} inFlight=${inFlight} tdlActive=${activeTdl} queued=${queued} remaining=${remaining} speed=${Math.round(speed/1024)}KB/s stalledFor=${stalledFor}ms starts=${this.metrics.starts} completions=${this.metrics.completions} tryRunAvg=${this.metrics.tryRunScans ? (this.metrics.tryRunTimeMs/this.metrics.tryRunScans).toFixed(2) : 0}ms finalizeCopyAvg=${avgCopy}ms deleteAvg=${avgDel}ms`
       console.log(msg)
       try { fs.appendFileSync(path.join(ROOT, '.filegram_state', 'download-pipeline.log'), now + ' ' + msg + '\n') } catch {}
     }

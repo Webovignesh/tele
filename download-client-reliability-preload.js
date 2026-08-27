@@ -24,7 +24,7 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
   const REASSERT_MIN_MS = 1500
   const ACTIVE_PRIORITY = 32
   const WARM_PRIORITY = 1
-  const WARM_AHEAD = 16
+  const WARM_AHEAD = 0 // disabled for now – 8 active already keep TDLib busy; warm was adding contention and not fixing 8s stall (see pipeline log tdlActive=8 speed=0)
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -126,7 +126,7 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
       if (stamp - state.lastProgressAt < ACTIVE_STALL_MS) return
       if (stamp - state.lastAssertAt < REASSERT_MIN_MS) return
       state.lastAssertAt = stamp
-
+      try { console.log(`[keeper] reassert file=${fileId} stalled=${stamp - state.lastProgressAt}ms`) } catch {}
       const info = normalizeFileShape(await invoke({ _: 'getFile', file_id: fileId }).catch(() => null))
       if (!tracked.has(fileId)) return
       if (info && info.local && info.local.is_downloading_completed && info.local.path) {
