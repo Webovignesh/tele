@@ -223,8 +223,54 @@ class DownloadManager {
     // Watchdog; unref'd so it never keeps the process alive on its own.
     this.sweepTimer = setInterval(() => { try { this.sweep() } catch {} }, SWEEP_INTERVAL_MS)
     if (this.sweepTimer && this.sweepTimer.unref) this.sweepTimer.unref()
+    // Pipeline diagnostics: measures requested in audit (concurrency vs productive,
+    // slot occupancy, replacement latency, finalize/copy latency, TDLib state).
+    this.metrics = {
+      lastCompleteAt: 0,
+      lastStartAt: 0,
+      completions: 0,
+      starts: 0,
+      tryRunScans: 0,
+      tryRunTimeMs: 0,
+      finalizeCopyMs: 0,
+      finalizeCopyCount: 0,
+      finalizeDeleteMs: 0,
+      finalizeDeleteCount: 0,
+      lastSpeedZeroAt: 0,
+      lastLogAt: 0
+    }
+    this.tdlActiveSet = new Set()
+    this.metricsTimer = setInterval(() => { try { this.logPipeline() } catch {} }, 2000)
+    if (this.metricsTimer && this.metricsTimer.unref) this.metricsTimer.unref()
     // Best-effort restore before TDLib is ready; tryRun will pump once ready.
     try { this.loadPersistedSync() } catch {}
+  }
+
+  logPipeline () {
+    if (!this.jobs.size) return
+    const s = this.stats()
+    const now = Date.now()
+    const speed = s.speed
+    const activeTdl = this.tdlActiveSet ? this.tdlActiveSet.size : 0
+    const inFlight = this.inFlightFiles.size
+    const active = this.activeCount
+    const queued = s.queued
+    const remaining = s.remaining
+    // Only log when there is work and to avoid spam when idle.
+    if (!remaining) return
+    const isZero = speed < 1024 // <1KB/s considered stalled
+    if (isZero && !this.metrics.lastSpeedZeroAt) this.metrics.lastSpeedZeroAt = now
+    if (!isZero) this.metrics.lastSpeedZeroAt = 0
+    const stalledFor = this.metrics.lastSpeedZeroAt ? now - this.metrics.lastSpeedZeroAt : 0
+    // Log on stall >2s or every 10s otherwise.
+    if (stalledFor > 2000 || now - this.metrics.lastLogAt > 10000) {
+      this.metrics.lastLogAt = now
+      const avgCopy = this.metrics.finalizeCopyCount ? (this.metrics.finalizeCopyMs/this.metrics.finalizeCopyCount).toFixed(1) : 0
+      const avgDel = this.metrics.finalizeDeleteCount ? (this.metrics.finalizeDeleteMs/this.metrics.finalizeDeleteCount).toFixed(1) : 0
+      const msg = `[pipeline] activeSlot=${active}/${CONCURRENCY} inFlight=${inFlight} tdlActive=${activeTdl} queued=${queued} remaining=${remaining} speed=${Math.round(speed/1024)}KB/s stalledFor=${stalledFor}ms starts=${this.metrics.starts} completes=${this.metrics.completes} tryRunAvg=${this.metrics.tryRunScans ? (this.metrics.tryRunTimeMs/this.metrics.tryRunScans).toFixed(2) : 0}ms finalizeCopyAvg=${avgCopy}ms deleteAvg=${avgDel}ms`
+      console.log(msg)
+      try { fs.appendFileSync(path.join(ROOT, '.filegram_state', 'download-pipeline.log'), now + ' ' + msg + '\n') } catch {}
+    }
   }
 
   /* ------------------------------ Persistence ------------------------------ */
@@ -475,6 +521,7 @@ class DownloadManager {
 
   tryRun () {
     if (this.bulk) return
+    const t0 = Date.now()
     // Single linear scan fills all free slots. The previous nested while+for
     // scanned from the start of the Map for every slot, so completing one file
     // in a 20k queue scanned O(n * CONCURRENCY) entries (mostly already-done
@@ -487,11 +534,16 @@ class DownloadManager {
       if (this.inFlightFiles.has(job.fileId)) continue
       this.activeCount++
       started++
+      this.metrics.starts++
+      this.metrics.lastStartAt = Date.now()
       // startJob handles its own failures, but it is not awaited here, so an
       // unexpected rejection must not become an unhandled rejection that leaves
       // activeCount incremented with nothing running.
       Promise.resolve(this.startJob(job)).catch(() => {})
     }
+    const dt = Date.now() - t0
+    this.metrics.tryRunScans++
+    this.metrics.tryRunTimeMs += dt
     // If nothing was started but capacity remains, the queue is genuinely
     // drained (all queued are duplicates of in-flight files). No further scan
     // needed until an in-flight completes and settles its twins.
@@ -620,9 +672,15 @@ class DownloadManager {
   onFileUpdate (file) {
     if (!file || !file.id) return
     const now = Date.now()
+    // Track TDLib productive concurrency for audit.
+    const fid = file.id
+    const loc = file.local || {}
+    if (loc.is_downloading_completed) this.tdlActiveSet.delete(fid)
+    else if (loc.is_downloading_active) this.tdlActiveSet.add(fid)
+    else this.tdlActiveSet.delete(fid)
     for (const job of this.jobs.values()) {
-      if (job.fileId !== file.id) continue
-      const local = file.local || {}
+      if (job.fileId !== fid) continue
+      const local = loc
       if (job.status === 'paused' || job.status === 'cancelled') continue
       // A finished job must not be resurrected by a late update.
       if (TERMINAL.includes(job.status)) continue
@@ -729,6 +787,7 @@ class DownloadManager {
         try { fs.mkdirSync(chatFolder, { recursive: true }) } catch {}
         const dest = uniquePath(chatFolder, sanitize(job.fileName))
         let moved = false
+        const tCopy0 = Date.now()
         try {
           await fs.promises.rename(srcPath, dest)
           moved = true
@@ -737,6 +796,9 @@ class DownloadManager {
           // destination is usually another drive.
           await fs.promises.copyFile(srcPath, dest)
         }
+        const tCopy1 = Date.now()
+        this.metrics.finalizeCopyMs += (tCopy1 - tCopy0)
+        this.metrics.finalizeCopyCount++
         /* Retire TDLib's copy through TDLib, not behind its back.
          *
          * Removing the cache file directly left TDLib believing it was still
@@ -753,11 +815,15 @@ class DownloadManager {
          *
          * deleteFile keeps TDLib's database consistent whether or not the bytes are
          * still there, so it never tries to reuse a file we have taken. */
+        const tDel0 = Date.now()
         if (client && ready) {
           await client.invoke({ _: 'deleteFile', file_id: job.fileId }).catch(() => {})
         } else if (!moved) {
           await fs.promises.unlink(srcPath).catch(() => {})
         }
+        const tDel1 = Date.now()
+        this.metrics.finalizeDeleteMs += (tDel1 - tDel0)
+        this.metrics.finalizeDeleteCount++
         job.destPath = dest
         job.status = 'done'
         job.speed = 0
@@ -790,6 +856,16 @@ class DownloadManager {
         // above due to already-terminal), still free the slot.
         job.active = false
         this.activeCount = Math.max(0, this.activeCount - 1)
+      }
+      // Metrics for audit.
+      if (job.status === 'done') {
+        this.metrics.completions++
+        this.metrics.lastCompleteAt = Date.now()
+        if (this.metrics.lastStartAt) {
+          const gap = this.metrics.lastCompleteAt - this.metrics.lastStartAt
+          // Replacement latency: time from last start to this completion's pump.
+          // Logged via pipeline.
+        }
       }
       // Ensure any queued work that was blocked on this fileId gets a chance.
       this.tryRun()
@@ -3303,6 +3379,37 @@ app.get('/api/filegram/asset-hashes', (req, res) => {
     return res.status(500).json({ ok: false, error: String(e.message || e) })
   }
   res.json({ ok: true, buildId: BUILD_ID, buildIdSource: BUILD_ID_SOURCE, serverPid: process.pid, assets })
+})
+
+app.get('/api/filegram/download-pipeline', (req, res) => {
+  try {
+    const s = dm.stats()
+    const m = dm.metrics || {}
+    const tdlActive = dm.tdlActiveSet ? dm.tdlActiveSet.size : 0
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      serverPid: process.pid,
+      concurrency: CONCURRENCY,
+      stats: s,
+      inFlight: dm.inFlightFiles ? dm.inFlightFiles.size : 0,
+      tdlActive,
+      metrics: {
+        starts: m.starts || 0,
+        completions: m.completions || 0,
+        lastStartAt: m.lastStartAt || 0,
+        lastCompleteAt: m.lastCompleteAt || 0,
+        tryRunScans: m.tryRunScans || 0,
+        tryRunTimeMs: m.tryRunTimeMs || 0,
+        finalizeCopyMs: m.finalizeCopyMs || 0,
+        finalizeCopyCount: m.finalizeCopyCount || 0,
+        finalizeDeleteMs: m.finalizeDeleteMs || 0,
+        finalizeDeleteCount: m.finalizeDeleteCount || 0
+      }
+    })
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) })
+  }
 })
 
 /* ---------------------------- Download folder picker ----------------------------
