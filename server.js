@@ -48,7 +48,7 @@ fs.mkdirSync(thumbsDir, { recursive: true })
 fs.mkdirSync(MANAGEMENT_UPLOAD_DIR, { recursive: true })
 
 const PORT = Number(process.env.PORT || 3000)
-let CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 4))
+let CONCURRENCY = Math.max(1, Number(process.env.CONCURRENCY || 2))
 
 /* Build identity.
  *
