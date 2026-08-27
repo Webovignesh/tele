@@ -28,6 +28,7 @@ let thumbsDir = null
 const DB_DIR = path.join(ROOT, '.td_database')
 const FILES_DIR = path.join(ROOT, '.td_files')
 const MANAGEMENT_UPLOAD_DIR = path.join(ROOT, '.management_uploads')
+const DOWNLOAD_QUEUE_FILE = path.join(ROOT, '.filegram_state', 'download-queue.json')
 
 function loadSettings () {
   try {
@@ -215,9 +216,128 @@ class DownloadManager {
     // of pointless TDLib downloadFile round-trips).
     this.bulk = false
     this.statsTimer = null
+    // Persistence coalescing. 20k enqueues must not produce 20k disk rewrites.
+    this.persistTimer = null
+    this.persistPending = false
     // Watchdog; unref'd so it never keeps the process alive on its own.
     this.sweepTimer = setInterval(() => { try { this.sweep() } catch {} }, SWEEP_INTERVAL_MS)
     if (this.sweepTimer && this.sweepTimer.unref) this.sweepTimer.unref()
+    // Best-effort restore before TDLib is ready; tryRun will pump once ready.
+    try { this.loadPersistedSync() } catch {}
+  }
+
+  /* ------------------------------ Persistence ------------------------------ */
+  /* The download queue used to live only in RAM. A server restart therefore
+   * looked like a completed batch: nothing failed, nothing remained, the UI
+   * simply showed an empty queue. For a 20k bulk download that is data loss
+   * of user intent. Persist the structural queue (not per-byte progress) to
+   * .filegram_state/download-queue.json, coalesced to at most one rewrite per
+   * 400 ms. Only queued/downloading/paused/done/error/cancelled structural
+   * states are stored; transient speed/downloaded are reset on restore and
+   * will be repopulated by TDLib progress.
+   *
+   * The file is written atomically via temp+rename so a crash mid-write never
+   * leaves a truncated JSON. A truncated tail from a prior unclean shutdown
+   * is treated as missing and ignored. */
+  loadPersistedSync () {
+    // Gracefully no-op in unit-test harnesses where fs is a fake without readFileSync.
+    if (!fs || typeof fs.readFileSync !== 'function' || typeof fs.existsSync !== 'function') return
+    let raw = null
+    try {
+      if (!fs.existsSync(DOWNLOAD_QUEUE_FILE)) return
+      raw = fs.readFileSync(DOWNLOAD_QUEUE_FILE, 'utf8')
+    } catch { return }
+    if (!raw || !raw.trim()) return
+    let data = null
+    try { data = JSON.parse(raw) } catch { return }
+    const jobs = Array.isArray(data && data.jobs) ? data.jobs : []
+    if (!jobs.length) return
+    for (const j of jobs) {
+      if (!j || !j.jobId || !j.fileId) continue
+      const job = {
+        jobId: String(j.jobId),
+        chatId: j.chatId,
+        chatTitle: String(j.chatTitle || 'Chat'),
+        messageId: j.messageId,
+        fileId: Number(j.fileId),
+        remoteFileId: String(j.remoteFileId || '').trim() || null,
+        fileName: String(j.fileName || 'file'),
+        fileSize: Math.max(0, Number(j.fileSize || 0)),
+        status: String(j.status || 'queued'),
+        downloaded: 0,
+        speed: 0,
+        error: j.error ? String(j.error) : null,
+        destPath: j.destPath ? String(j.destPath) : null,
+        active: false,
+        run: Math.max(0, Number(j.run || 0)),
+        attempts: Math.max(0, Number(j.attempts || 0)),
+        lastProgressAt: 0,
+        finalizing: false
+      }
+      // A download that was in-flight when the process died is no longer
+      // driving TDLib. Requeue it so tryRun can start a fresh runner with a
+      // current remote registration (startJob will refresh the numeric id).
+      if (job.status === 'downloading') job.status = 'queued'
+      if (!['queued', 'paused', 'done', 'error', 'cancelled'].includes(job.status)) job.status = 'queued'
+      // Done/error/cancelled are terminal and stay terminal, but they are pruned
+      // on next clearDone/clearAll; keeping them allows the UI to show history
+      // after a restart without re-downloading.
+      this.jobs.set(job.jobId, job)
+      if (job.status === 'done' && job.destPath) {
+        // Keep sibling dedupe functional after restart even though the TDLib
+        // cache entry is gone.
+        if (!this.deliveredByFile.has(job.fileId) && job.destPath) {
+          try { if (fs.existsSync(job.destPath)) this.deliveredByFile.set(job.fileId, job.destPath) } catch {}
+          if (!this.deliveredByFile.has(job.fileId)) this.deliveredByFile.set(job.fileId, job.destPath)
+        }
+      }
+    }
+    // activeCount is derived, not persisted.
+    this.reconcile()
+  }
+
+  scheduleSave () {
+    if (this.persistTimer) { this.persistPending = true; return }
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null
+      const hadPending = this.persistPending
+      this.persistPending = false
+      try { this.saveNowSync() } catch {}
+      if (hadPending) this.scheduleSave()
+    }, 400)
+    if (this.persistTimer && this.persistTimer.unref) this.persistTimer.unref()
+  }
+
+  saveNowSync () {
+    if (!fs || typeof fs.writeFileSync !== 'function' || typeof fs.mkdirSync !== 'function') return
+    // Avoid persisting progress noise; structural queue only.
+    const jobs = []
+    for (const job of this.jobs.values()) {
+      jobs.push({
+        jobId: job.jobId,
+        chatId: job.chatId,
+        chatTitle: job.chatTitle,
+        messageId: job.messageId,
+        fileId: job.fileId,
+        remoteFileId: job.remoteFileId || null,
+        fileName: job.fileName,
+        fileSize: job.fileSize,
+        status: job.status,
+        destPath: job.destPath || null,
+        error: job.error || null,
+        run: job.run || 0,
+        attempts: job.attempts || 0
+      })
+    }
+    const payload = JSON.stringify({ version: 1, savedAt: Date.now(), jobs }, null, 0)
+    try { fs.mkdirSync(path.dirname(DOWNLOAD_QUEUE_FILE), { recursive: true }) } catch {}
+    const tmp = DOWNLOAD_QUEUE_FILE + '.tmp'
+    try {
+      fs.writeFileSync(tmp, payload, 'utf8')
+      fs.renameSync(tmp, DOWNLOAD_QUEUE_FILE)
+    } catch {
+      try { fs.unlinkSync(tmp) } catch {}
+    }
   }
 
   /* Aggregate over the FULL queue. This is the only sanctioned source for the
@@ -270,7 +390,7 @@ class DownloadManager {
     }, 200)
   }
 
-  add (chatId, chatTitle, messageId, fileId, fileName, fileSize) {
+  add (chatId, chatTitle, messageId, fileId, fileName, fileSize, remoteFileId) {
     if (!fileId) throw new Error('No file id')
     const jobId = crypto.randomUUID()
     const job = {
@@ -279,6 +399,7 @@ class DownloadManager {
       chatTitle,
       messageId,
       fileId,
+      remoteFileId: String(remoteFileId || '').trim() || null,
       fileName,
       fileSize: fileSize || 0,
       status: 'queued',
@@ -299,33 +420,34 @@ class DownloadManager {
     // otherwise push 20k socket frames. The coalesced aggregate keeps the client
     // honest about queue size without that flood.
     this.scheduleStats()
+    this.scheduleSave()
     this.tryRun()
     return jobId
   }
 
   tryRun () {
     if (this.bulk) return
-    while (this.activeCount < CONCURRENCY) {
-      /* A file already in flight is skipped rather than requested again. Asking
-       * TDLib for the same file twice made it fetch the bytes a second time into
-       * another temp file, whose temp -> cache rename then collided with the copy we
-       * were taking; TDLib calls that a failed download and retries after a long
-       * backoff. The duplicate is left queued and settles as soon as the first copy
-       * lands - see settleTwins. */
-      let next = null
-      for (const job of this.jobs.values()) {
-        if (job.status !== 'queued') continue
-        if (this.inFlightFiles.has(job.fileId)) continue
-        next = job
-        break
-      }
-      if (!next) break
+    // Single linear scan fills all free slots. The previous nested while+for
+    // scanned from the start of the Map for every slot, so completing one file
+    // in a 20k queue scanned O(n * CONCURRENCY) entries (mostly already-done
+    // heads). One pass is O(n) regardless of queue size and never starves the
+    // pump while 10k done rows sit at the front.
+    let started = 0
+    for (const job of this.jobs.values()) {
+      if (this.activeCount >= CONCURRENCY) break
+      if (job.status !== 'queued') continue
+      if (this.inFlightFiles.has(job.fileId)) continue
       this.activeCount++
+      started++
       // startJob handles its own failures, but it is not awaited here, so an
       // unexpected rejection must not become an unhandled rejection that leaves
       // activeCount incremented with nothing running.
-      Promise.resolve(this.startJob(next)).catch(() => {})
+      Promise.resolve(this.startJob(job)).catch(() => {})
     }
+    // If nothing was started but capacity remains, the queue is genuinely
+    // drained (all queued are duplicates of in-flight files). No further scan
+    // needed until an in-flight completes and settles its twins.
+    void started
   }
 
   /* Runs fn with the scheduler suspended, then pumps once. */
@@ -375,7 +497,31 @@ class DownloadManager {
         job.speed = 0
         this.finishJob(job)
         this.emitJob(job)
+        this.scheduleSave()
         return
+      }
+
+      // If this job survived a restart, its numeric fileId may be stale. A
+      // persisted remoteFileId, when present, is the durable Telegram identity:
+      // re-register it before trusting the numeric id, exactly as the reference
+      // resolver does for fresh selections.
+      if (job.remoteFileId) {
+        try {
+          const reg = await client.invoke({ _: 'getRemoteFile', remote_file_id: job.remoteFileId, file_type: null }).catch(() => null)
+          if (stale()) return
+          if (reg && reg.id && Number(reg.id) !== Number(job.fileId)) {
+            this.inFlightFiles.delete(job.fileId)
+            job.fileId = Number(reg.id)
+            this.inFlightFiles.add(job.fileId)
+            if (reg.size || reg.expected_size) job.fileSize = reg.size || reg.expected_size
+            if (reg.local && reg.local.is_downloading_completed && reg.local.path) {
+              job.downloaded = job.fileSize || reg.local.downloaded_size || 0
+              return await this.finalize(job, reg.local.path)
+            }
+          } else if (reg && reg.local && Number(reg.size || reg.expected_size || 0)) {
+            if (reg.size || reg.expected_size) job.fileSize = reg.size || reg.expected_size
+          }
+        } catch {}
       }
 
       const fileInfo = await client.invoke({ _: 'getFile', file_id: job.fileId }).catch(() => null)
@@ -492,6 +638,25 @@ class DownloadManager {
      * with ENOENT and flips an already-'done' job to 'error'. */
     if (job.finalizing || TERMINAL.includes(job.status)) return
     job.finalizing = true
+    // Do NOT hold the concurrency slot during disk I/O. A 1-2 GB video copy
+    // on a cross-volume destination can take tens of seconds; holding the
+    // slot starves the network pipeline and is the root cause of the
+    // high-speed -> 0 B/s -> high-speed burst pattern. Release the slot
+    // immediately on completion signal, keep inFlightFiles until the copy
+    // commits so duplicate fileIds stay deduplicated.
+    let slotReleased = false
+    const releaseSlot = () => {
+      if (slotReleased) return
+      slotReleased = true
+      if (job.active) {
+        job.active = false
+        this.activeCount = Math.max(0, this.activeCount - 1)
+        // Do not clear inFlightFiles here; it guards duplicate same-file
+        // downloads until deliveredByFile is committed.
+        this.tryRun()
+        this.scheduleStats()
+      }
+    }
     try {
       /* One TDLib file can back more than one queued message - the same photo
        * reposted, or the same item indexed twice. Whichever job finalizes first
@@ -504,12 +669,16 @@ class DownloadManager {
        * duplicate checker from later seeing phantom "(1)" files. */
       const delivered = this.deliveredByFile.get(job.fileId)
       if (delivered && fs.existsSync(delivered) && !fs.existsSync(srcPath)) {
+        releaseSlot()
         job.destPath = delivered
         job.status = 'done'
         job.speed = 0
       } else {
+        // Release immediately before any awaited disk work so the network
+        // pipeline stays saturated while this file is copied/linked.
+        releaseSlot()
         const chatFolder = path.join(downloadsDir, sanitize(job.chatTitle))
-        fs.mkdirSync(chatFolder, { recursive: true })
+        try { fs.mkdirSync(chatFolder, { recursive: true }) } catch {}
         const dest = uniquePath(chatFolder, sanitize(job.fileName))
         let moved = false
         try {
@@ -551,6 +720,7 @@ class DownloadManager {
     } catch (e) {
       /* Last chance: a sibling may have delivered this same file while we were
        * awaiting, in which case the content is on disk and this is not an error. */
+      releaseSlot()
       const delivered = this.deliveredByFile.get(job.fileId)
       if (delivered && fs.existsSync(delivered)) {
         job.destPath = delivered
@@ -564,8 +734,19 @@ class DownloadManager {
       }
     } finally {
       job.finalizing = false
+      // Now the dedupe guard can be released: deliveredByFile is committed (or
+      // the job errored). Twins have already been settled via settleTwins.
+      this.inFlightFiles.delete(job.fileId)
+      if (job.active) {
+        // In the rare path where releaseSlot was not called (e.g. early return
+        // above due to already-terminal), still free the slot.
+        job.active = false
+        this.activeCount = Math.max(0, this.activeCount - 1)
+      }
+      // Ensure any queued work that was blocked on this fileId gets a chance.
+      this.tryRun()
+      this.scheduleSave()
     }
-    this.finishJob(job)
     this.emitJob(job)
   }
 
@@ -597,11 +778,18 @@ class DownloadManager {
       job.active = false
       this.activeCount = Math.max(0, this.activeCount - 1)
       this.inFlightFiles.delete(job.fileId)
+    } else {
+      // Finalization now releases `active` early but keeps `inFlightFiles` until
+      // the disk copy commits. A job completing via finalize already freed its
+      // slot; here only the file guard needs clearing. Clearing unconditionally
+      // would erase a still-active sibling's guard.
+      if (TERMINAL.includes(job.status)) this.inFlightFiles.delete(job.fileId)
     }
     /* Pump unconditionally. This used to sit inside the `if (job.active)` branch,
      * so a terminal transition on a job that held no slot never re-pumped even
      * when capacity was free. */
     this.tryRun()
+    this.scheduleSave()
   }
 
   /* Recomputes activeCount from the jobs that actually hold a slot.
@@ -739,6 +927,7 @@ class DownloadManager {
       this.finishJob(job)
     }
     this.emitJob(job)
+    this.scheduleSave()
     return true
   }
 
@@ -757,6 +946,7 @@ class DownloadManager {
     job.lastProgressAt = Date.now()
     this.tryRun()
     this.emitJob(job)
+    this.scheduleSave()
     return true
   }
 
@@ -785,18 +975,20 @@ class DownloadManager {
    * auto-start afterwards, which holds because tryRun only ever selects
    * 'queued' and every cancellable job leaves this loop as 'cancelled'. */
   cancelAll () {
-    return this.runBulk(() => {
+    const n = this.runBulk(() => {
       const ids = [...this.jobs.values()]
         .filter(j => CANCELLABLE.includes(j.status))
         .map(j => j.jobId)
       for (const id of ids) this.cancel(id)
       return ids.length
     })
+    this.scheduleSave()
+    return n
   }
 
   /* Removes finished entries only. Never touches live work. */
   clearDone () {
-    return this.runBulk(() => {
+    const n = this.runBulk(() => {
       let removed = 0
       for (const job of [...this.jobs.values()]) {
         if (TERMINAL.includes(job.status)) {
@@ -807,11 +999,13 @@ class DownloadManager {
       }
       return removed
     })
+    this.scheduleSave()
+    return n
   }
 
   /* Cancels everything still running, then empties the queue and history. */
   clearAll () {
-    return this.runBulk(() => {
+    const r = this.runBulk(() => {
       let cancelled = 0
       for (const job of [...this.jobs.values()]) {
         if (CANCELLABLE.includes(job.status) && this.cancel(job.jobId)) cancelled++
@@ -824,6 +1018,8 @@ class DownloadManager {
       this.activeCount = 0
       return { cancelled, removed }
     })
+    this.scheduleSave()
+    return r
   }
 
   cancel (jobId) {
@@ -836,6 +1032,7 @@ class DownloadManager {
         this.finishJob(job)
       }
       this.emitJob(job)
+      this.scheduleSave()
       return true
     }
     return false
@@ -858,6 +1055,7 @@ class DownloadManager {
     this.jobs.delete(jobId)
     this.lastEmit.delete(jobId)
     this.scheduleStats()
+    this.scheduleSave()
     return true
   }
 
@@ -1135,7 +1333,7 @@ async function scanChat (chatId, { queue = false, mode, returnItems = false } = 
             batchItems.push(item)
           }
           if (queue) {
-            dm.add(chatId, chatTitle, m.id, f.id, media.name, f.size || f.expected_size || 0)
+            dm.add(chatId, chatTitle, m.id, f.id, media.name, f.size || f.expected_size || 0, f.remote && f.remote.id ? String(f.remote.id) : null)
             scanState.queued++
           }
         }
@@ -1570,6 +1768,9 @@ function handleAuthState (state) {
 
   if (state._ === 'authorizationStateReady') {
     ready = true
+    // A restart may have left queued downloads on disk. Now that TDLib is
+    // ready, pump the persisted queue so downloads resume without user action.
+    try { dm.tryRun() } catch {}
     client.invoke({ _: 'getMe' }).then(async me => {
       currentUser = {
         id: me.id,
@@ -3503,7 +3704,7 @@ wss.on('connection', (ws) => {
           const chatTitle = chat.title || 'Chat'
           const jobIds = []
           for (const item of payload.items || []) {
-            const jid = dm.add(payload.chatId, chatTitle, item.messageId, item.fileId, item.fileName, item.fileSize)
+            const jid = dm.add(payload.chatId, chatTitle, item.messageId, item.fileId, item.fileName, item.fileSize, item.remoteFileId || item.remoteId || null)
             jobIds.push(jid)
           }
           return respond(ws, id, true, { jobIds })
@@ -3650,6 +3851,7 @@ server.listen(PORT, '127.0.0.1', () => {
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
+    try { dm.saveNowSync() } catch {}
     if (client) await client.close().catch(() => {})
     process.exit(0)
   })

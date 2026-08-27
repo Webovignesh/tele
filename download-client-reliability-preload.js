@@ -205,20 +205,31 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
       if (pumping || dropped) return
       pumping = true
       try {
+        // Batch warm registrations in parallel so a 32-file cushion is ready
+        // in <100 ms rather than 32 sequential round-trips. A sequential pump
+        // left the TDLib backlog cold for ~500 ms, which is exactly the network
+        // gap measured between FileGram's active batches (fast -> 0 -> fast).
         while (!dropped && warmed.size < warmAhead && cursor < pending.length) {
-          const fileId = pending[cursor++]
-          if (!fileId || completed.has(fileId) || promoted.has(fileId) || warmed.has(fileId)) continue
-          warmed.add(fileId)
-          await invokeDownloadWithRetry(invoke, {
-            _: 'downloadFile',
-            file_id: fileId,
-            priority: warmPriority,
-            offset: 0,
-            limit: 0,
-            synchronous: false
-          }).catch(() => {
-            warmed.delete(fileId)
-          })
+          const needed = Math.min(warmAhead - warmed.size, pending.length - cursor, 8)
+          if (needed <= 0) break
+          const batch = []
+          for (let i = 0; i < needed && cursor < pending.length; i++) {
+            const fileId = pending[cursor++]
+            if (!fileId || completed.has(fileId) || promoted.has(fileId) || warmed.has(fileId)) continue
+            warmed.add(fileId)
+            batch.push(
+              invokeDownloadWithRetry(invoke, {
+                _: 'downloadFile',
+                file_id: fileId,
+                priority: warmPriority,
+                offset: 0,
+                limit: 0,
+                synchronous: false
+              }).catch(() => { warmed.delete(fileId) })
+            )
+          }
+          if (batch.length) await Promise.all(batch)
+          else if (warmed.size >= warmAhead) break
         }
       } finally {
         pumping = false
