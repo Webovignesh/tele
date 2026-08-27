@@ -310,8 +310,15 @@ class DownloadManager {
       this.persistPending = false
       this.saveNowAsync().catch(() => {})
       if (hadPending) this.scheduleSave()
-    }, 800)
+    }, 250)
     if (this.persistTimer && this.persistTimer.unref) this.persistTimer.unref()
+  }
+
+  // Immediate durable save for infrequent but critical transitions (pause/
+  // resume/cancel) so an abrupt kill (Stop-Process -Force) within the
+  // coalesce window does not lose the entire paused queue.
+  saveNowSyncImmediate () {
+    try { this.saveNowSync() } catch {}
   }
 
   async saveNowAsync () {
@@ -963,6 +970,7 @@ class DownloadManager {
     }
     this.emitJob(job)
     this.scheduleSave()
+    this.saveNowSyncImmediate()
     return true
   }
 
@@ -982,15 +990,18 @@ class DownloadManager {
     this.tryRun()
     this.emitJob(job)
     this.scheduleSave()
+    this.saveNowSyncImmediate()
     return true
   }
 
   pauseAll () {
-    return this.runBulk(() => {
+    const n = this.runBulk(() => {
       const ids = [...this.jobs.values()].filter(j => j.status === 'queued' || j.status === 'downloading').map(j => j.jobId)
       for (const id of ids) this.pause(id)
       return ids.length
     })
+    this.saveNowSyncImmediate()
+    return n
   }
 
   resumeAll () {
@@ -1003,6 +1014,7 @@ class DownloadManager {
      * this button reported success and started precisely nothing. */
     const recovered = this.recover()
     this.scheduleStats()
+    this.saveNowSyncImmediate()
     return ids.length + recovered
   }
 
@@ -1018,6 +1030,7 @@ class DownloadManager {
       return ids.length
     })
     this.scheduleSave()
+    this.saveNowSyncImmediate()
     return n
   }
 
@@ -1035,6 +1048,7 @@ class DownloadManager {
       return removed
     })
     this.scheduleSave()
+    this.saveNowSyncImmediate()
     return n
   }
 
@@ -1054,6 +1068,7 @@ class DownloadManager {
       return { cancelled, removed }
     })
     this.scheduleSave()
+    this.saveNowSyncImmediate()
     return r
   }
 
@@ -1068,6 +1083,7 @@ class DownloadManager {
       }
       this.emitJob(job)
       this.scheduleSave()
+      this.saveNowSyncImmediate()
       return true
     }
     return false
@@ -1091,6 +1107,7 @@ class DownloadManager {
     this.lastEmit.delete(jobId)
     this.scheduleStats()
     this.scheduleSave()
+    this.saveNowSyncImmediate()
     return true
   }
 
@@ -1390,6 +1407,7 @@ async function scanChat (chatId, { queue = false, mode, returnItems = false } = 
         savedAt: Date.now()
       })
     }
+    if (queue) try { dm.saveNowSyncImmediate() } catch {}
     emitScan({ done: true })
     return result
   }
@@ -3742,6 +3760,7 @@ wss.on('connection', (ws) => {
             const jid = dm.add(payload.chatId, chatTitle, item.messageId, item.fileId, item.fileName, item.fileSize, item.remoteFileId || item.remoteId || null)
             jobIds.push(jid)
           }
+          try { dm.saveNowSyncImmediate() } catch {}
           return respond(ws, id, true, { jobIds })
         }
         case 'download-all':
