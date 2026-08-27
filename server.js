@@ -246,10 +246,21 @@ class DownloadManager {
       lastLogAt: 0
     }
     this.tdlActiveSet = new Set()
+    this.lastDownloadFileAt = 0
+    this.floodWaitUntil = 0
+    this.downloadRateMs = 600
+    this.tryRunTimer = null
     this.metricsTimer = setInterval(() => { try { this.logPipeline() } catch {} }, 2000)
     if (this.metricsTimer && this.metricsTimer.unref) this.metricsTimer.unref()
     // Best-effort restore before TDLib is ready; tryRun will pump once ready.
     try { this.loadPersistedSync() } catch {}
+  }
+
+  parseFloodWaitMs (err) {
+    const m = String(err && err.message || err || '').match(/FLOOD_PREMIUM_WAIT_(\d+)|FLOOD_WAIT_(\d+)|retry after (\d+)/i)
+    if (!m) return 0
+    const v = Number(m[1] || m[2] || m[3] || 0)
+    return v > 0 ? v * 1000 : 0
   }
 
   logPipeline () {
@@ -521,12 +532,35 @@ class DownloadManager {
     // honest about queue size without that flood.
     this.scheduleStats()
     this.scheduleSave()
-    this.tryRun()
+    if (this.downloadRateMs === 0) this.tryRun()
+    else this.scheduleTryRun()
     return jobId
+  }
+
+  scheduleTryRun () {
+    if (this.tryRunTimer) return
+    this.tryRunTimer = setTimeout(() => {
+      this.tryRunTimer = null
+      try { this.tryRun() } catch {}
+    }, 0)
+    if (this.tryRunTimer && this.tryRunTimer.unref) this.tryRunTimer.unref()
   }
 
   tryRun () {
     if (this.bulk) return
+    const now = Date.now()
+    if (now < this.floodWaitUntil) {
+      const wait = this.floodWaitUntil - now
+      setTimeout(() => { try { this.tryRun() } catch {} }, wait + 50)
+      return
+    }
+    // Burst-level rate-limit: allow up to CONCURRENCY to start together,
+    // but space bursts by downloadRateMs to avoid FLOOD_PREMIUM_WAIT.
+    if (this.metrics.starts > 0 && now - this.lastDownloadFileAt < this.downloadRateMs) {
+      const wait = this.downloadRateMs - (now - this.lastDownloadFileAt)
+      setTimeout(() => { try { this.tryRun() } catch {} }, wait + 20)
+      return
+    }
     const t0 = Date.now()
     // Single linear scan fills all free slots. The previous nested while+for
     // scanned from the start of the Map for every slot, so completing one file
@@ -547,6 +581,7 @@ class DownloadManager {
       // activeCount incremented with nothing running.
       Promise.resolve(this.startJob(job)).catch(() => {})
     }
+    if (started > 0) this.lastDownloadFileAt = Date.now()
     const dt = Date.now() - t0
     this.metrics.tryRunScans++
     this.metrics.tryRunTimeMs += dt
@@ -645,14 +680,37 @@ class DownloadManager {
         return await this.finalize(job, cached.path)
       }
 
-      const res = await client.invoke({
-        _: 'downloadFile',
-        file_id: job.fileId,
-        priority: 32, // Increase priority to max
-        offset: 0,
-        limit: 0,
-        synchronous: false
-      })
+      let res
+      try {
+        this.lastDownloadFileAt = Date.now()
+        res = await client.invoke({
+          _: 'downloadFile',
+          file_id: job.fileId,
+          priority: 32, // Increase priority to max
+          offset: 0,
+          limit: 0,
+          synchronous: false
+        })
+      } catch (e) {
+        const wait = this.parseFloodWaitMs(e)
+        if (wait) {
+          this.floodWaitUntil = Math.max(this.floodWaitUntil, Date.now() + wait)
+          console.log(`[flood] downloadFile file=${job.fileId} wait=${wait}ms until=${new Date(this.floodWaitUntil).toISOString()}`)
+          try { fs.appendFileSync(path.join(ROOT, '.filegram_state', 'download-pipeline.log'), Date.now() + ` [flood] file=${job.fileId} wait=${wait}ms\n`) } catch {}
+          // Requeue without counting as failed attempt; TDLib will retry after wait.
+          job.status = 'queued'
+          if (job.active) {
+            job.active = false
+            this.activeCount = Math.max(0, this.activeCount - 1)
+            this.inFlightFiles.delete(job.fileId)
+          }
+          job.speed = 0
+          this.emitJob(job)
+          setTimeout(() => { try { this.tryRun() } catch {} }, wait + 100)
+          return
+        }
+        throw e
+      }
       if (stale()) return
       // downloadFile can resolve after the job was cancelled or paused. Both are
       // deliberate terminations, so neither may be overwritten by done/error.
@@ -667,6 +725,21 @@ class DownloadManager {
     } catch (e) {
       if (stale()) return
       if (job.status === 'paused' || job.status === 'cancelled') return
+      const wait = this.parseFloodWaitMs(e)
+      if (wait) {
+        this.floodWaitUntil = Math.max(this.floodWaitUntil, Date.now() + wait)
+        console.log(`[flood] startJob error file=${job.fileId} wait=${wait}ms`)
+        job.status = 'queued'
+        if (job.active) {
+          job.active = false
+          this.activeCount = Math.max(0, this.activeCount - 1)
+          this.inFlightFiles.delete(job.fileId)
+        }
+        job.speed = 0
+        this.emitJob(job)
+        setTimeout(() => { try { this.tryRun() } catch {} }, wait + 100)
+        return
+      }
       job.status = 'error'
       job.error = String(e.message || e)
       job.speed = 0

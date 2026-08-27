@@ -114,6 +114,13 @@ function makeHarness (concurrency = 8, overrides = {}) {
     concurrency
   )
 
+  const dm = new api.DownloadManager()
+  // Disable rate-limiting for deterministic unit tests (production uses 600ms burst gap
+  // to avoid FLOOD_PREMIUM_WAIT; tests enqueue 100 jobs synchronously and expect
+  // CONCURRENCY slots filled immediately).
+  dm.downloadRateMs = 0
+  dm.floodWaitUntil = 0
+  dm.lastDownloadFileAt = 0
   return {
     ...api,
     invocations,
@@ -121,7 +128,7 @@ function makeHarness (concurrency = 8, overrides = {}) {
     disk,
     // Pretends TDLib has finished writing a file into its cache.
     seed: target => { disk.add(String(target)); return target },
-    dm: new api.DownloadManager()
+    dm
   }
 }
 
