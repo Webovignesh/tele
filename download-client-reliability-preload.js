@@ -23,8 +23,8 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
   const ACTIVE_SWEEP_MS = 600
   const REASSERT_MIN_MS = 1500
   const ACTIVE_PRIORITY = 32
-  const WARM_PRIORITY = 8
-  const WARM_AHEAD = 32
+  const WARM_PRIORITY = 1
+  const WARM_AHEAD = 16
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -205,12 +205,13 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
       if (pumping || dropped) return
       pumping = true
       try {
-        // Batch warm registrations in parallel so a 32-file cushion is ready
-        // in <100 ms rather than 32 sequential round-trips. A sequential pump
-        // left the TDLib backlog cold for ~500 ms, which is exactly the network
-        // gap measured between FileGram's active batches (fast -> 0 -> fast).
+        // Batch warm registrations in small parallel groups. The previous
+        // 32-sequential pump left the backlog cold for ~500 ms (gap). 8-wide
+        // parallel turned into visible contention with active transfers.
+        // 4-wide, priority 1 and 16-ahead keeps the gap closed without
+        // sharing bandwidth away from active workers.
         while (!dropped && warmed.size < warmAhead && cursor < pending.length) {
-          const needed = Math.min(warmAhead - warmed.size, pending.length - cursor, 8)
+          const needed = Math.min(warmAhead - warmed.size, pending.length - cursor, 4)
           if (needed <= 0) break
           const batch = []
           for (let i = 0; i < needed && cursor < pending.length; i++) {

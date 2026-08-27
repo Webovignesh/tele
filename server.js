@@ -219,6 +219,7 @@ class DownloadManager {
     // Persistence coalescing. 20k enqueues must not produce 20k disk rewrites.
     this.persistTimer = null
     this.persistPending = false
+    this.persistChain = Promise.resolve()
     // Watchdog; unref'd so it never keeps the process alive on its own.
     this.sweepTimer = setInterval(() => { try { this.sweep() } catch {} }, SWEEP_INTERVAL_MS)
     if (this.sweepTimer && this.sweepTimer.unref) this.sweepTimer.unref()
@@ -232,13 +233,18 @@ class DownloadManager {
    * simply showed an empty queue. For a 20k bulk download that is data loss
    * of user intent. Persist the structural queue (not per-byte progress) to
    * .filegram_state/download-queue.json, coalesced to at most one rewrite per
-   * 400 ms. Only queued/downloading/paused/done/error/cancelled structural
+   * 800 ms. Only queued/downloading/paused/done/error/cancelled structural
    * states are stored; transient speed/downloaded are reset on restore and
    * will be repopulated by TDLib progress.
    *
    * The file is written atomically via temp+rename so a crash mid-write never
    * leaves a truncated JSON. A truncated tail from a prior unclean shutdown
-   * is treated as missing and ignored. */
+   * is treated as missing and ignored.
+   *
+   * Normal saves are async (fs.promises) to avoid blocking the event loop:
+   * a 3 MB synchronous write would stall TDLib updateFile handling and
+   * produced the reported 0 B/s gaps after the previous fix. SIGINT/SIGTERM
+   * still does a final synchronous flush. */
   loadPersistedSync () {
     // Gracefully no-op in unit-test harnesses where fs is a fake without readFileSync.
     if (!fs || typeof fs.readFileSync !== 'function' || typeof fs.existsSync !== 'function') return
@@ -302,15 +308,50 @@ class DownloadManager {
       this.persistTimer = null
       const hadPending = this.persistPending
       this.persistPending = false
-      try { this.saveNowSync() } catch {}
+      this.saveNowAsync().catch(() => {})
       if (hadPending) this.scheduleSave()
-    }, 400)
+    }, 800)
     if (this.persistTimer && this.persistTimer.unref) this.persistTimer.unref()
+  }
+
+  async saveNowAsync () {
+    if (!fs || !fs.promises || typeof fs.promises.writeFile !== 'function') return
+    const jobs = []
+    for (const job of this.jobs.values()) {
+      jobs.push({
+        jobId: job.jobId,
+        chatId: job.chatId,
+        chatTitle: job.chatTitle,
+        messageId: job.messageId,
+        fileId: job.fileId,
+        remoteFileId: job.remoteFileId || null,
+        fileName: job.fileName,
+        fileSize: job.fileSize,
+        status: job.status,
+        destPath: job.destPath || null,
+        error: job.error || null,
+        run: job.run || 0,
+        attempts: job.attempts || 0
+      })
+    }
+    const payload = JSON.stringify({ version: 1, savedAt: Date.now(), jobs }, null, 0)
+    const dir = path.dirname(DOWNLOAD_QUEUE_FILE)
+    const tmp = DOWNLOAD_QUEUE_FILE + '.tmp'
+    // Serialize through chain so concurrent saves do not interleave tmp renames.
+    this.persistChain = this.persistChain.then(async () => {
+      try { await fs.promises.mkdir(dir, { recursive: true }) } catch {}
+      try {
+        await fs.promises.writeFile(tmp, payload, 'utf8')
+        await fs.promises.rename(tmp, DOWNLOAD_QUEUE_FILE)
+      } catch {
+        try { await fs.promises.unlink(tmp) } catch {}
+      }
+    }).catch(() => {})
+    return this.persistChain
   }
 
   saveNowSync () {
     if (!fs || typeof fs.writeFileSync !== 'function' || typeof fs.mkdirSync !== 'function') return
-    // Avoid persisting progress noise; structural queue only.
     const jobs = []
     for (const job of this.jobs.values()) {
       jobs.push({
@@ -778,12 +819,6 @@ class DownloadManager {
       job.active = false
       this.activeCount = Math.max(0, this.activeCount - 1)
       this.inFlightFiles.delete(job.fileId)
-    } else {
-      // Finalization now releases `active` early but keeps `inFlightFiles` until
-      // the disk copy commits. A job completing via finalize already freed its
-      // slot; here only the file guard needs clearing. Clearing unconditionally
-      // would erase a still-active sibling's guard.
-      if (TERMINAL.includes(job.status)) this.inFlightFiles.delete(job.fileId)
     }
     /* Pump unconditionally. This used to sit inside the `if (job.active)` branch,
      * so a terminal transition on a job that held no slot never re-pumped even
