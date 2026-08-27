@@ -19,9 +19,9 @@ if (!global.__fileGramDownloadClientReliabilityInstalled) {
   const wsModule = require('ws')
   const priorCreateClient = tdl.createClient.bind(tdl)
   const RETRY_DELAYS_MS = [250, 750, 1500]
-  const ACTIVE_STALL_MS = 1800
-  const ACTIVE_SWEEP_MS = 600
-  const REASSERT_MIN_MS = 1500
+  const ACTIVE_STALL_MS = 900
+  const ACTIVE_SWEEP_MS = 400
+  const REASSERT_MIN_MS = 800
   const ACTIVE_PRIORITY = 32
   const WARM_PRIORITY = 1
   const WARM_AHEAD = 0 // disabled for now – 8 active already keep TDLib busy; warm was adding contention and not fixing 8s stall (see pipeline log tdlActive=8 speed=0)

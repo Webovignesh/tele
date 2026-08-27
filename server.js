@@ -191,9 +191,15 @@ const TERMINAL = ['done', 'error', 'cancelled']
  * dead; at 8s we nudge it back to work first. Observed against 150 photos: 146
  * finished in 14s and the last four froze for 38s, matching those log lines
  * exactly - including thumbnails under .td_database, which this app never touches,
- * so the refusal is not something we cause. */
-const STALL_AFTER_MS = 8000
-const SWEEP_INTERVAL_MS = 2000
+ * so the refusal is not something we cause.
+ *
+ * Pipeline log on current build showed 8s flat 0KB/s with tdlActive=8/8
+ * (all 8 advertised active but 0 bytes) – AV holding TDLib temp file
+ * blocks its temp->cache rename, TDLib retries after 36s, we reassert
+ * at STALL_AFTER_MS. With 8s threshold the user sees 8s pauses. Lower
+ * to 3s to cut visible stall to ~3s while AV exclusion is the proper fix. */
+const STALL_AFTER_MS = 3000
+const SWEEP_INTERVAL_MS = 1000
 // Bounded so a genuinely broken file cannot retry for ever.
 const MAX_ATTEMPTS = 3
 const SPEED_SMOOTHING = 0.6
