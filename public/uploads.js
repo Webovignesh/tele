@@ -82,6 +82,31 @@
     document.head.appendChild(style)
   }
 
+  function loadDownloadReliability () {
+    if (!document.querySelector('link[data-filegram-download-reliability]')) {
+      const css = document.createElement('link')
+      css.rel = 'stylesheet'
+      css.href = 'download-reliability.css?v=1'
+      css.dataset.filegramDownloadReliability = '1'
+      document.head.appendChild(css)
+    }
+    if (window.__fileGramDownloadReliabilityUiInstalled || document.querySelector('script[data-filegram-download-reliability]')) return
+    const script = document.createElement('script')
+    script.src = 'download-reliability.js?v=1'
+    script.dataset.filegramDownloadReliability = '1'
+    script.async = false
+    document.body.appendChild(script)
+  }
+
+  function loadUiStability () {
+    if (window.__fileGramUiStabilityInstalled || document.querySelector('script[data-filegram-ui-stability]')) return
+    const stability = document.createElement('script')
+    stability.src = 'filegram-ui-stability.js?v=1'
+    stability.dataset.filegramUiStability = '1'
+    stability.async = false
+    document.body.appendChild(stability)
+  }
+
   function loadOwnedBulkDelete () {
     if (window.__fileGramOwnedBulkDeleteInstalled || document.querySelector('script[data-filegram-owned-bulk-delete]')) return
     const ownedDelete = document.createElement('script')
@@ -91,21 +116,51 @@
     document.body.appendChild(ownedDelete)
   }
 
-  loadOwnedBulkDelete()
+  function loadMediaPreview () {
+    if (window.__fileGramMediaPreviewInstalled || document.querySelector('script[data-filegram-media-preview]')) return
+    const preview = document.createElement('script')
+    preview.src = 'filegram-media-preview.js?v=1'
+    preview.dataset.filegramMediaPreview = '1'
+    preview.async = false
+    document.body.appendChild(preview)
+  }
 
-  /* The chain used to end with a third link, `file-consistency-v2.js?v=3`, appended
-   * on this script's load event. That file is deleted: it duplicated Files
-   * reconciliation, the folder-picker handler and the Save-to paint, and being last
-   * in the chain it won `#set-dir` by accident of load order. Its concerns belong to
-   * `files-stability.js`, `app.js` and `index.html` + `filegram-ui.css` now. The
-   * chain keeps its shape - bulk-uploads, then hardening on its load event - so
-   * nothing about the upload path changes. */
+  function loadUploadReliability () {
+    if (window.__fileGramUploadReliabilityInstalled || document.querySelector('script[data-filegram-upload-reliability]')) return
+    const reliability = document.createElement('script')
+    reliability.src = 'upload-reliability.js?v=3'
+    reliability.dataset.filegramUploadReliability = '3'
+    reliability.async = false
+    document.body.appendChild(reliability)
+  }
+
+  function loadPostHardening () {
+    loadUploadReliability()
+  }
+
+  /* These are independent of the upload transport. Global download geometry and
+   * reference-repair feedback load first, then the existing UI stability/owned
+   * delete/preview layers. */
+  loadDownloadReliability()
+  loadUiStability()
+  loadOwnedBulkDelete()
+  loadMediaPreview()
+
+  /* The upload chain is intentionally ordered. bulk-uploads owns the UI/queue,
+   * uploads-hardening installs the transport/integrity boundary, and only then
+   * does refresh recovery patch that hardened queue. */
   function loadHardening () {
-    if (document.querySelector('script[data-filegram-upload-hardening]')) return
+    const existingHardening = document.querySelector('script[data-filegram-upload-hardening]')
+    if (existingHardening) {
+      if (window.__fileGramUploadsHardeningInstalled) loadPostHardening()
+      else existingHardening.addEventListener('load', loadPostHardening, { once: true })
+      return
+    }
     const hardening = document.createElement('script')
     hardening.src = 'uploads-hardening.js?v=3'
     hardening.dataset.filegramUploadHardening = '3'
     hardening.async = false
+    hardening.addEventListener('load', loadPostHardening, { once: true })
     document.body.appendChild(hardening)
   }
 
